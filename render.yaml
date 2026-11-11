@@ -8,9 +8,9 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: THRESHOLD
-        value: "0.1"
+        value: "0.05"
       - key: WINDOW_MINUTES
-        value: "20"
+        value: "5"
       - key: MA_PERIOD
         value: "24"
       - key: MIN_MAX_LEVERAGE
