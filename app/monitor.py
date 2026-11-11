@@ -139,6 +139,7 @@ class Monitor:
         async def load(sym: str) -> None:
             async with sem:
                 try:
+                    assert self._rest is not None
                     kl = await self._rest.get_kline_1h(sym, limit=settings.ma_period + 5)
                 except Exception:
                     return
