@@ -179,6 +179,7 @@ async function loadAlerts() {
   const tb = document.getElementById('alerts');
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Нет сигналов</td></tr>'; return; }
   tb.innerHTML = d.items.map(a => {
+    // a.ts — Unix timestamp, уже в UTC, *1000 = мс
     const timeStr = new Date(a.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
     return '<tr><td class="muted">'+timeStr+'</td><td>'+a.symbol+'</td><td class="'+(a.kind==='PUMP'?'pump':'dump')+'">'+a.kind+'</td><td>'+(a.timeframe||'')+'</td><td>'+a.change_pct.toFixed(2)+'%</td><td>'+fmtNum(a.price_now)+'</td></tr>';
   }).join('');
@@ -202,7 +203,8 @@ async function loadTrades() {
   
   tb.innerHTML = d.items.map(t => {
     const position_size = (t.total_qty * t.current_price).toFixed(2);
-    const timeStr = t.opened_at ? new Date(t.opened_at).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
+    // Время в МСК: добавляем 'Z' чтобы JS парсил как UTC
+    const timeStr = t.opened_at ? new Date(t.opened_at + 'Z').toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
     const changeClass = t.change_pct > 0 ? 'pump' : (t.change_pct < 0 ? 'dump' : '');
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
       '<td class="muted">'+timeStr+'</td>'+
@@ -231,7 +233,8 @@ async function loadClosedTrades() {
   
   tb.innerHTML = d.items.map(t => {
     const position_size = (t.total_qty * t.avg_entry_price).toFixed(2);
-    const timeStr = t.closed_at ? new Date(t.closed_at).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
+    // Время в МСК: добавляем 'Z' чтобы JS парсил как UTC
+    const timeStr = t.closed_at ? new Date(t.closed_at + 'Z').toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
       '<td class="muted">'+timeStr+'</td>'+
       '<td>'+t.symbol+'</td>'+
@@ -292,7 +295,8 @@ async function openHistory(tradeId, symbol) {
       <thead><tr><th>Время (МСК)</th><th>Действие</th><th>Цена</th><th>Кол-во</th><th>PnL</th></tr></thead>
       <tbody>
         ${d.items.map(h => {
-          const timeStr = new Date(h.ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+          // Время в МСК: добавляем 'Z' чтобы JS парсил как UTC
+          const timeStr = new Date(h.ts + 'Z').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
           return `
             <tr>
               <td class="muted">${timeStr}</td>
