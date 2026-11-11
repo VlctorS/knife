@@ -89,21 +89,6 @@ async def api_alerts(limit: int = 100):
         ]
     }
 
-@app.get('/api/symbols')
-async def api_symbols():
-    return {
-        'items': [
-            {
-                'symbol': s.symbol,
-                'last_price': s.last_price,
-                'ma': s.ma,
-                'max_leverage': s.max_leverage,
-                'last_price_ts': s.last_price_ts,
-            }
-            for s in state.symbols.values()
-        ]
-    }
-
 @app.get('/api/stats')
 async def api_stats(limit: int = 50):
     async with SessionLocal() as session:
@@ -142,10 +127,12 @@ async def api_stats(limit: int = 50):
 @app.get('/api/trades')
 async def api_trades(limit: int = 100):
     async with SessionLocal() as session:
-        r = await session.execute(select(Trade).order_by(Trade.opened_at.desc()).limit(limit))
+        # Только открытые (PARTIAL тоже считаем открытыми, пока не закрыты полностью)
+        r = await session.execute(
+            select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL'])).order_by(Trade.opened_at.desc()).limit(limit)
+        )
         items = []
         for t in r.scalars().all():
-            # Изменение от средней цены входа
             if t.avg_entry_price > 0 and t.current_price > 0:
                 if t.side == 'LONG':
                     change_pct = (t.current_price - t.avg_entry_price) / t.avg_entry_price * 100
@@ -155,23 +142,67 @@ async def api_trades(limit: int = 100):
                 change_pct = 0
             
             items.append({
-                'id': t.id,
-                'symbol': t.symbol,
-                'side': t.side,
-                'entry_price': t.entry_price,
-                'avg_entry_price': t.avg_entry_price,
-                'current_price': t.current_price,
-                'grid_step': t.grid_step,
-                'total_qty': t.total_qty,
-                'total_margin': t.total_margin,
-                'status': t.status,
-                'pnl': t.pnl,
-                'leverage': t.leverage,
+                'id': t.id, 'symbol': t.symbol, 'side': t.side,
+                'entry_price': t.entry_price, 'avg_entry_price': t.avg_entry_price,
+                'current_price': t.current_price, 'grid_step': t.grid_step,
+                'total_qty': t.total_qty, 'total_margin': t.total_margin,
+                'status': t.status, 'pnl': t.pnl, 'leverage': t.leverage,
                 'change_pct': round(change_pct, 2),
+                'opened_at': t.opened_at.isoformat() if t.opened_at else None,
+            })
+        return {'items': items}
+
+@app.get('/api/closed_trades')
+async def api_closed_trades(limit: int = 100):
+    async with SessionLocal() as session:
+        r = await session.execute(
+            select(Trade).where(Trade.status == 'CLOSED').order_by(Trade.closed_at.desc()).limit(limit)
+        )
+        items = []
+        for t in r.scalars().all():
+            items.append({
+                'id': t.id, 'symbol': t.symbol, 'side': t.side,
+                'entry_price': t.entry_price, 'avg_entry_price': t.avg_entry_price,
+                'total_qty': t.total_qty, 'total_margin': t.total_margin,
+                'pnl': t.pnl, 'leverage': t.leverage,
                 'opened_at': t.opened_at.isoformat() if t.opened_at else None,
                 'closed_at': t.closed_at.isoformat() if t.closed_at else None,
             })
         return {'items': items}
+
+@app.post('/api/close_trade')
+async def api_close_trade(request: Request):
+    data = await request.json()
+    trade_id = data.get('trade_id')
+    async with SessionLocal() as session:
+        t = await session.get(Trade, trade_id)
+        if not t or t.status not in ('OPEN', 'PARTIAL'):
+            return {'ok': False, 'error': 'Trade not found or already closed'}
+        
+        st = state.symbols.get(t.symbol)
+        price = st.last_price if st else t.current_price
+        if price <= 0:
+            return {'ok': False, 'error': 'No price'}
+        
+        # Закрываем всю оставшуюся позицию
+        closed_qty = t.total_qty
+        if t.side == 'LONG':
+            closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
+        else:
+            closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
+        
+        t.status = 'CLOSED'
+        t.closed_at = datetime.datetime.utcnow()
+        t.current_price = price
+        
+        history = TradeHistory(
+            trade_id=t.id, action='MANUAL_CLOSE', price=price, qty=closed_qty,
+            margin=t.total_margin, pnl=closed_pnl, notes='manual close'
+        )
+        session.add(history)
+        await session.commit()
+        log.info('MANUAL CLOSE %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
+    return {'ok': True}
 
 @app.get('/api/trade_history')
 async def api_trade_history(trade_id: int):
@@ -203,20 +234,15 @@ async def api_trade_history(trade_id: int):
         items = []
         for h in r.scalars().all():
             current_pnl = h.pnl
-            if trade.status == 'OPEN' and trade.current_price > 0:
+            if trade.status in ('OPEN', 'PARTIAL') and trade.current_price > 0:
                 if trade.side == 'LONG':
                     current_pnl = h.qty * (trade.current_price - h.price)
                 else:
                     current_pnl = h.qty * (h.price - trade.current_price)
             
             items.append({
-                'ts': h.ts.isoformat(),
-                'action': h.action,
-                'price': h.price,
-                'qty': h.qty,
-                'margin': h.margin,
-                'pnl': current_pnl,
-                'notes': h.notes,
+                'ts': h.ts.isoformat(), 'action': h.action, 'price': h.price,
+                'qty': h.qty, 'margin': h.margin, 'pnl': current_pnl, 'notes': h.notes,
             })
             
         return {
@@ -233,15 +259,11 @@ async def api_get_configs():
         return {
             'items': [
                 {
-                    'symbol': c.symbol,
-                    'entry_pct': c.entry_pct,
-                    'grid_step_pct': c.grid_step_pct,
-                    'grid_step_multiplier': c.grid_step_multiplier,
-                    'max_steps': c.max_steps,
-                    'initial_exit_pct': c.initial_exit_pct,
+                    'symbol': c.symbol, 'entry_pct': c.entry_pct,
+                    'grid_step_pct': c.grid_step_pct, 'grid_step_multiplier': c.grid_step_multiplier,
+                    'max_steps': c.max_steps, 'initial_exit_pct': c.initial_exit_pct,
                     'exit_contract_pct': c.exit_contract_pct,
-                    'position_size_entry': c.position_size_entry,
-                    'position_size_grid': c.position_size_grid,
+                    'position_size_entry': c.position_size_entry, 'position_size_grid': c.position_size_grid,
                 }
                 for c in r.scalars().all()
             ]
@@ -270,16 +292,11 @@ async def api_get_settings():
             session.add(s)
             await session.commit()
         return {
-            "min_turnover": s.min_turnover, 
-            "min_leverage": s.min_leverage,
-            "entry_pct": s.entry_pct,
-            "grid_step_pct": s.grid_step_pct,
-            "grid_step_multiplier": s.grid_step_multiplier,
-            "max_steps": s.max_steps,
-            "initial_exit_pct": s.initial_exit_pct,
-            "exit_contract_pct": s.exit_contract_pct,
-            "position_size_entry": s.position_size_entry,
-            "position_size_grid": s.position_size_grid
+            "min_turnover": s.min_turnover, "min_leverage": s.min_leverage,
+            "entry_pct": s.entry_pct, "grid_step_pct": s.grid_step_pct,
+            "grid_step_multiplier": s.grid_step_multiplier, "max_steps": s.max_steps,
+            "initial_exit_pct": s.initial_exit_pct, "exit_contract_pct": s.exit_contract_pct,
+            "position_size_entry": s.position_size_entry, "position_size_grid": s.position_size_grid
         }
 
 @app.post("/api/settings")
@@ -303,9 +320,7 @@ async def api_clear_data():
         await session.execute(delete(Trade))
         await session.execute(delete(TradeHistory))
         await session.commit()
-    
     state.alerts.clear()
-    
     return {"ok": True, "message": "Data cleared"}
 
 @app.get("/favicon.ico")

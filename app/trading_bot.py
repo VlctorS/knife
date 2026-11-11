@@ -14,7 +14,7 @@ from .config import settings
 log = logging.getLogger(__name__)
 
 MIN_POS_SIZE = 6.0
-VOLUME_LOOKBACK = 20  # Средний объём за 20 свечей
+VOLUME_LOOKBACK = 20
 
 
 def _get_upsert(model, values, pk_col):
@@ -25,11 +25,8 @@ def _get_upsert(model, values, pk_col):
 
 
 def _calc_avg_volume(candles, lookback=20):
-    """Средний объём за последние N свечей (исключая текущую)."""
     if len(candles) < lookback + 1:
         return 0.0
-    # candles: список [start, open, high, low, close, volume, turnover]
-    # Берем предыдущие N свечей (не включая последнюю)
     prev = candles[-(lookback + 1):-1]
     vols = [float(k[5]) for k in prev if float(k[5]) > 0]
     return sum(vols) / len(vols) if vols else 0.0
@@ -47,18 +44,15 @@ class TradingBot:
         async with SessionLocal() as session:
             for sym, st in state.symbols.items():
                 try:
-                    # 720 часовых свечей = 30 дней
                     kl = await self.rest.get_kline_1h(sym, limit=720)
                     if len(kl) < VOLUME_LOOKBACK + 2:
                         continue
                     
-                    # Считаем средний объём за 20 свечей (глобально по всей истории)
                     all_vols = [float(k[5]) for k in kl if float(k[5]) > 0]
                     if not all_vols:
                         continue
                     global_avg_vol = sum(all_vols) / len(all_vols)
                     
-                    # Считаем прострелы ТОЛЬКО на свечах с объёмом > среднего
                     prostrels = []
                     for k in kl:
                         high = float(k[2])
@@ -122,7 +116,6 @@ class TradingBot:
                 session.add(gs)
                 await session.commit()
 
-            # ТФ для проверки: 1h, 4h, 1d
             intervals = ['60', '240', 'D']
             
             for sym in symbols_to_check:
@@ -130,6 +123,9 @@ class TradingBot:
                     cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == sym))
                     cfg = cfg_res.scalars().first()
                     stat = await session.get(SymbolStat, sym)
+                    st = state.symbols.get(sym)
+                    if not st or st.ma is None:
+                        continue
                     
                     # Логика порога
                     if cfg and cfg.entry_pct > 0:
@@ -141,30 +137,22 @@ class TradingBot:
                         threshold = max(threshold, 5.0)
                     
                     for tf in intervals:
-                        # Берем 22 свечи: 1 для проверки + 20 для среднего объёма + 1 запас
                         kl = await self.rest.get_kline(sym, interval=tf, limit=22)
                         if len(kl) < VOLUME_LOOKBACK + 2:
                             continue
                         
-                        # Последняя закрытая свеча (перед текущей, которая еще не закрыта)
-                        # Bybit отдает от новых к старым. Последний элемент - самая старая.
-                        # kl[-1] - самая свежая (текущая, может быть не закрыта)
-                        # kl[-2] - последняя закрытая
                         last_closed = kl[-2]
                         open_price = float(last_closed[1])
                         close_price = float(last_closed[4])
+                        high_price = float(last_closed[2])
+                        low_price = float(last_closed[3])
                         volume = float(last_closed[5])
                         
                         if open_price <= 0 or volume <= 0:
                             continue
                         
-                        # Средний объём за 20 предыдущих свечей
                         avg_vol = _calc_avg_volume(kl, VOLUME_LOOKBACK)
-                        if avg_vol <= 0:
-                            continue
-                        
-                        # Объем должен быть выше среднего
-                        if volume < avg_vol:
+                        if avg_vol <= 0 or volume < avg_vol:
                             continue
                         
                         change_pct = (close_price - open_price) / open_price * 100
@@ -178,15 +166,36 @@ class TradingBot:
                             kind = 'PUMP' if change_pct > 0 else 'DUMP'
                             side = 'SHORT' if change_pct > 0 else 'LONG'
                             
+                            # --- ПРОВЕРКА: не входим внизу/сверху всплеска ---
+                            # Центр всплеска (mean of high/low)
+                            spike_center = (high_price + low_price) / 2
+                            
+                            if side == 'LONG':
+                                # Для лонга: цена должна быть ниже MA, но выше центра всплеска (мы покупаем на отскоке от нижней части)
+                                if st.ma is None or close_price >= st.ma:
+                                    log.info(f'SKIP LONG {sym}: price {close_price} >= MA {st.ma}')
+                                    continue
+                                if close_price < spike_center:
+                                    log.info(f'SKIP LONG {sym}: price {close_price} < spike center {spike_center}')
+                                    continue
+                            else:  # SHORT
+                                # Для шорта: цена должна быть выше MA, но ниже центра всплеска
+                                if st.ma is None or close_price <= st.ma:
+                                    log.info(f'SKIP SHORT {sym}: price {close_price} <= MA {st.ma}')
+                                    continue
+                                if close_price > spike_center:
+                                    log.info(f'SKIP SHORT {sym}: price {close_price} > spike center {spike_center}')
+                                    continue
+                            
                             tf_label = {'60': '1h', '240': '4h', 'D': '1d'}.get(tf, tf)
                             
                             state.add_alert(Alert(
                                 ts=time.time(), symbol=sym, kind=kind,
-                                price_now=close_price, ref_price=open_price, ma=0.0,
+                                price_now=close_price, ref_price=open_price, ma=st.ma,
                                 change_pct=change_pct, timeframe=tf_label
                             ))
                             
-                            await self._open_trade(session, sym, side, close_price, state.symbols[sym].max_leverage, cfg, gs, change_pct)
+                            await self._open_trade(session, sym, side, close_price, st.max_leverage, cfg, gs, change_pct)
                             
                             log.info(f'SIGNAL {kind} {sym} ({tf_label}) {change_pct:.2f}% (vol {volume:.0f} > avg {avg_vol:.0f}) -> OPEN {side}')
                             
@@ -215,7 +224,7 @@ class TradingBot:
 
         trade = Trade(
             symbol=sym, side=side, entry_price=price, avg_entry_price=price,
-            total_qty=qty, total_margin=margin, status='OPEN',
+            total_qty=qty, total_margin=margin, initial_margin=margin, status='OPEN',
             grid_step=0, max_steps=max_steps,
             leverage=max_lev, current_price=price,
         )
@@ -242,14 +251,16 @@ class TradingBot:
             result = await session.execute(select(Trade).where(Trade.status == 'OPEN'))
             for t in result.scalars().all():
                 st = state.symbols.get(t.symbol)
-                if not st or st.last_price <= 0: continue
+                if not st or st.last_price <= 0 or st.ma is None: continue
                 
                 price = st.last_price
+                ma = st.ma
                 t.current_price = price
                 
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
                 
+                # --- УСРЕДНЕНИЕ (только если цена ниже MA для LONG / выше MA для SHORT) ---
                 if t.grid_step < t.max_steps:
                     if cfg and cfg.grid_step_pct > 0:
                         start_pct = cfg.grid_step_pct
@@ -263,9 +274,13 @@ class TradingBot:
                     
                     step_pct = start_pct * (mult ** t.grid_step)
                     
-                    if (t.side == 'LONG' and price <= t.avg_entry_price * (1 - step_pct / 100)) or \
-                       (t.side == 'SHORT' and price >= t.avg_entry_price * (1 + step_pct / 100)):
-                        
+                    can_grid = False
+                    if t.side == 'LONG' and price <= t.avg_entry_price * (1 - step_pct / 100) and price < ma:
+                        can_grid = True
+                    elif t.side == 'SHORT' and price >= t.avg_entry_price * (1 + step_pct / 100) and price > ma:
+                        can_grid = True
+                    
+                    if can_grid:
                         if cfg and cfg.position_size_grid > 0:
                             add_pos_size = cfg.position_size_grid
                         else:
@@ -290,12 +305,14 @@ class TradingBot:
                         log.info('GRID ADD %s %s @ %.6f (step %d)', t.side, t.symbol, price, t.grid_step)
                         await session.commit()
 
+                # PnL
                 if t.side == 'LONG':
                     pnl_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
                     pnl_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
                 t.pnl = t.total_margin * (pnl_pct / 100.0) * t.leverage
                 
+                # Выход
                 if cfg and cfg.initial_exit_pct > 0:
                     exit_pct = cfg.initial_exit_pct
                 else:
@@ -320,9 +337,12 @@ class TradingBot:
                         action = 'FULL_CLOSE'
                         log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
                     else:
+                        # СБРОС СЕТКИ при частичном выходе
                         t.total_qty -= closed_qty
+                        t.total_margin -= (closed_qty * t.avg_entry_price / t.leverage)
+                        t.grid_step = 0  # <-- СБРОС СЕТКИ
                         action = 'PARTIAL_CLOSE'
-                        log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT', t.side, t.symbol, price, close_pct, closed_pnl)
+                        log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT, grid reset', t.side, t.symbol, price, close_pct, closed_pnl)
                     
                     history = TradeHistory(
                         trade_id=t.id, action=action, price=price, qty=closed_qty,

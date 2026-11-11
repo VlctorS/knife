@@ -31,7 +31,6 @@ class Settings(Base):
     min_turnover: Mapped[float] = mapped_column(Float, default=5.0)
     min_leverage: Mapped[float] = mapped_column(Float, default=10.0)
     
-    # Глобальные настройки торговли (дефолтные)
     entry_pct: Mapped[float] = mapped_column(Float, default=0.0)
     grid_step_pct: Mapped[float] = mapped_column(Float, default=5.0)
     grid_step_multiplier: Mapped[float] = mapped_column(Float, default=2.5)
@@ -74,6 +73,7 @@ class Trade(Base):
     avg_entry_price: Mapped[float] = mapped_column(Float)
     total_qty: Mapped[float] = mapped_column(Float, default=0.0)
     total_margin: Mapped[float] = mapped_column(Float, default=0.0)
+    initial_margin: Mapped[float] = mapped_column(Float, default=0.0)  # Для сброса сетки
     status: Mapped[str] = mapped_column(String, default='OPEN')
     pnl: Mapped[float] = mapped_column(Float, default=0.0)
     current_price: Mapped[float] = mapped_column(Float, default=0.0)
@@ -88,7 +88,7 @@ class TradeHistory(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_id: Mapped[int] = mapped_column(Integer, index=True)
     ts: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
-    action: Mapped[str] = mapped_column(String)
+    action: Mapped[str] = mapped_column(String)  # OPEN, GRID_ADD, PARTIAL_CLOSE, FULL_CLOSE, MANUAL_CLOSE
     price: Mapped[float] = mapped_column(Float)
     qty: Mapped[float] = mapped_column(Float)
     margin: Mapped[float] = mapped_column(Float)
