@@ -60,12 +60,47 @@ async def api_status():
     return {
         'uptime_sec': int(time.time() - state.started_at),
         'symbols_count': len(state.symbols),
+        'symbols_last_refresh': getattr(state, 'last_symbols_refresh', 0),
         'threshold_pct': settings.threshold * 100,
         'window_minutes': settings.window_minutes,
         'ma_period': settings.ma_period,
         'min_max_leverage': db_min_lev,
         'min_turnover': db_min_turnover,
         'alerts_count': len(state.alerts),
+        'server_time': time.time(),
+    }
+
+@app.get('/api/alerts')
+async def api_alerts(limit: int = 100):
+    limit = max(1, min(limit, settings.max_alerts))
+    return {
+        'items': [
+            {
+                'ts': a.ts,
+                'symbol': a.symbol,
+                'kind': a.kind,
+                'price_now': a.price_now,
+                'ref_price': a.ref_price,
+                'ma': a.ma,
+                'change_pct': a.change_pct,
+            }
+            for a in list(state.alerts)[:limit]
+        ]
+    }
+
+@app.get('/api/symbols')
+async def api_symbols():
+    return {
+        'items': [
+            {
+                'symbol': s.symbol,
+                'last_price': s.last_price,
+                'ma': s.ma,
+                'max_leverage': s.max_leverage,
+                'last_price_ts': s.last_price_ts,
+            }
+            for s in state.symbols.values()
+        ]
     }
 
 @app.get('/api/stats')
@@ -75,9 +110,12 @@ async def api_stats(limit: int = 50):
         return {
             'items': [
                 {
-                    'symbol': s.symbol, 'avg_prostrel_pct': round(s.avg_prostrel_pct, 2),
-                    'max_prostrel_pct': round(s.max_prostrel_pct, 2), 'freq_per_day': round(s.freq_per_day, 2),
-                    'entry_long_pct': round(s.entry_long_pct, 2), 'max_leverage': s.max_leverage,
+                    'symbol': s.symbol,
+                    'avg_prostrel_pct': round(s.avg_prostrel_pct, 2),
+                    'max_prostrel_pct': round(s.max_prostrel_pct, 2),
+                    'freq_per_day': round(s.freq_per_day, 2),
+                    'entry_long_pct': round(s.entry_long_pct, 2),
+                    'max_leverage': s.max_leverage,
                 }
                 for s in r.scalars().all()
             ]
@@ -90,11 +128,20 @@ async def api_trades(limit: int = 100):
         return {
             'items': [
                 {
-                    'id': t.id, 'symbol': t.symbol, 'side': t.side, 'entry_price': t.entry_price,
-                    'avg_entry_price': t.avg_entry_price, 'current_price': t.current_price,
-                    'grid_step': t.grid_step, 'total_qty': t.total_qty, 'total_margin': t.total_margin,
-                    'status': t.status, 'pnl': t.pnl, 'leverage': t.leverage,
+                    'id': t.id,
+                    'symbol': t.symbol,
+                    'side': t.side,
+                    'entry_price': t.entry_price,
+                    'avg_entry_price': t.avg_entry_price,
+                    'current_price': t.current_price,
+                    'grid_step': t.grid_step,
+                    'total_qty': t.total_qty,
+                    'total_margin': t.total_margin,
+                    'status': t.status,
+                    'pnl': t.pnl,
+                    'leverage': t.leverage,
                     'opened_at': t.opened_at.isoformat() if t.opened_at else None,
+                    'closed_at': t.closed_at.isoformat() if t.closed_at else None,
                 }
                 for t in r.scalars().all()
             ]
@@ -107,10 +154,15 @@ async def api_get_configs():
         return {
             'items': [
                 {
-                    'symbol': c.symbol, 'entry_pct': c.entry_pct, 'min_entry_pct': c.min_entry_pct,
-                    'grid_step_pct': c.grid_step_pct, 'grid_step_multiplier': c.grid_step_multiplier,
-                    'max_steps': c.max_steps, 'initial_exit_pct': c.initial_exit_pct,
-                    'exit_contract_pct': c.exit_contract_pct, 'max_margin': c.max_margin,
+                    'symbol': c.symbol,
+                    'entry_pct': c.entry_pct,
+                    'min_entry_pct': c.min_entry_pct,
+                    'grid_step_pct': c.grid_step_pct,
+                    'grid_step_multiplier': c.grid_step_multiplier,
+                    'max_steps': c.max_steps,
+                    'initial_exit_pct': c.initial_exit_pct,
+                    'exit_contract_pct': c.exit_contract_pct,
+                    'max_margin': c.max_margin,
                 }
                 for c in r.scalars().all()
             ]
