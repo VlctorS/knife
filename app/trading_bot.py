@@ -125,7 +125,7 @@ class TradingBot:
                     cfg = cfg_res.scalars().first()
                     stat = await session.get(SymbolStat, sym)
                     st = state.symbols.get(sym)
-                    if not st or st.ma is None:
+                    if not st or st.ma is None or st.last_price <= 0:
                         continue
                     
                     # Логика порога
@@ -142,9 +142,12 @@ class TradingBot:
                         if len(kl) < VOLUME_LOOKBACK + 2:
                             continue
                         
+                        # ВАЖНО: Берем последнюю ЗАКРЫТУЮ свечу. 
+                        # Так как get_kline переворачивает список, то последняя свеча (текущая незакрытая) находится в конце (kl[-1]).
+                        # Предпоследняя (закрытая) - это kl[-2].
                         last_closed = kl[-2]
                         open_price = float(last_closed[1])
-                        close_price = float(last_closed[4])
+                        close_price_candle = float(last_closed[4]) # Цена закрытия свечи (для расчета сигнала)
                         high_price = float(last_closed[2])
                         low_price = float(last_closed[3])
                         volume = float(last_closed[5])
@@ -156,7 +159,8 @@ class TradingBot:
                         if avg_vol <= 0 or volume < avg_vol:
                             continue
                         
-                        change_pct = (close_price - open_price) / open_price * 100
+                        # Считаем процент изменения по СВЕЧЕ (для сигнала)
+                        change_pct = (close_price_candle - open_price) / open_price * 100
                         
                         if abs(change_pct) >= threshold:
                             candle_id = f"{sym}_{tf}_{last_closed[0]}"
@@ -167,35 +171,33 @@ class TradingBot:
                             kind = 'PUMP' if change_pct > 0 else 'DUMP'
                             side = 'SHORT' if change_pct > 0 else 'LONG'
                             
-                            # Проверка: не входим внизу/сверху всплеска
+                            # Проверка: используем ТЕКУЩУЮ цену из WebSocket, а не из свечи
+                            current_price = st.last_price
                             spike_center = (high_price + low_price) / 2
                             
                             if side == 'LONG':
-                                if st.ma is None or close_price >= st.ma:
-                                    log.info(f'SKIP LONG {sym}: price {close_price} >= MA {st.ma}')
+                                if st.ma is None or current_price >= st.ma:
                                     continue
-                                if close_price < spike_center:
-                                    log.info(f'SKIP LONG {sym}: price {close_price} < spike center {spike_center}')
+                                if current_price < spike_center:
                                     continue
                             else:  # SHORT
-                                if st.ma is None or close_price <= st.ma:
-                                    log.info(f'SKIP SHORT {sym}: price {close_price} <= MA {st.ma}')
+                                if st.ma is None or current_price <= st.ma:
                                     continue
-                                if close_price > spike_center:
-                                    log.info(f'SKIP SHORT {sym}: price {close_price} > spike center {spike_center}')
+                                if current_price > spike_center:
                                     continue
                             
                             tf_label = {'60': '1h', '240': '4h', 'D': '1d'}.get(tf, tf)
                             
                             state.add_alert(Alert(
                                 ts=time.time(), symbol=sym, kind=kind,
-                                price_now=close_price, ref_price=open_price, ma=st.ma,
+                                price_now=current_price, ref_price=open_price, ma=st.ma,
                                 change_pct=change_pct, timeframe=tf_label
                             ))
                             
-                            await self._open_trade(session, sym, side, close_price, st.max_leverage, cfg, gs, change_pct)
+                            # ОТКРЫВАЕМ СДЕЛКУ ПО РЕАЛЬНОЙ ТЕКУЩЕЙ ЦЕНЕ
+                            await self._open_trade(session, sym, side, current_price, st.max_leverage, cfg, gs, change_pct)
                             
-                            log.info(f'SIGNAL {kind} {sym} ({tf_label}) {change_pct:.2f}% (vol {volume:.0f} > avg {avg_vol:.0f}) -> OPEN {side}')
+                            log.info(f'SIGNAL {kind} {sym} ({tf_label}) {change_pct:.2f}% (vol {volume:.0f} > avg {avg_vol:.0f}) -> OPEN {side} at {current_price}')
                             
                             open_syms.add(sym)
                             break
@@ -224,7 +226,7 @@ class TradingBot:
             symbol=sym, side=side, entry_price=price, avg_entry_price=price,
             total_qty=qty, total_margin=margin, initial_margin=margin, status='OPEN',
             grid_step=0, max_steps=max_steps,
-            leverage=max_lev, current_price=price,
+            leverage=max_lev, current_price=price, exit_step=0
         )
         session.add(trade)
         await session.flush()
@@ -309,13 +311,14 @@ class TradingBot:
                 total_commission = position_size * (fee_pct / 100.0) * 2
                 t.pnl = (t.total_margin * (change_pct / 100.0) * t.leverage) - total_commission
                 
-                # --- 3. СТУПЕНЧАТЫЙ ВЫХОД (С МНОЖИТЕЛЕМ) ---
-                start_exit = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 3.0))
+                # --- 3. СТУПЕНЧАТЫЙ ВЫХОД ---
+                start_exit = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 15.0))
                 exit_mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs and gs.grid_step_multiplier > 0 else 2.5))
                 close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
                 
-                # Считаем порог с учетом шага выхода
-                target_exit_pct = start_exit * (exit_mult ** t.exit_step)
+                # Если exit_step None (для старых сделок), считаем его 0
+                current_exit_step = t.exit_step if t.exit_step is not None else 0
+                target_exit_pct = start_exit * (exit_mult ** current_exit_step)
                 
                 if change_pct >= target_exit_pct:
                     closed_qty = t.total_qty * (close_pct / 100.0)
@@ -327,7 +330,7 @@ class TradingBot:
                         t.closed_at = datetime.datetime.utcnow()
                     else:
                         action = 'PARTIAL_CLOSE'
-                        t.exit_step += 1  # <--- УВЕЛИЧИВАЕМ ШАГ ВЫХОДА
+                        t.exit_step = current_exit_step + 1
                     
                     if t.side == 'LONG':
                         closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
