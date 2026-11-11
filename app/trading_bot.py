@@ -34,10 +34,12 @@ class TradingBot:
                     kl = await self.rest.get_kline_1h(sym, limit=720)
                     if len(kl) < 24: continue
                     
+                    # Считаем средний прострел (High-Low) за 1h свечи
                     prostrels = [(float(k[2]) - float(k[3])) / float(k[3]) * 100 for k in kl if float(k[3]) > 0]
                     if not prostrels: continue
                     
                     avg_p = sum(prostrels) / len(prostrels)
+                    # Авто-порог = 85% от среднего, но не менее 3%
                     auto_entry = max(3.0, avg_p * 0.85)
                     
                     values = dict(
@@ -50,6 +52,7 @@ class TradingBot:
                     stmt = _get_upsert(SymbolStat, values, 'symbol')
                     await session.execute(stmt)
                     
+                    # Создаем дефолтные настройки (min_entry_pct = 5.0)
                     res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == sym))
                     if not res.scalars().first():
                         session.add(SymbolConfig(symbol=sym, min_entry_pct=5.0))
@@ -67,7 +70,7 @@ class TradingBot:
         log.info('History scan complete. Symbols in DB: %d', ok)
 
     async def check_for_entries(self):
-        # Проверяем раз в 60 секунд
+        # Сканируем свечи раз в 60 секунд
         now = time.time()
         if now - self._last_scan_ts < 60:
             return
@@ -81,10 +84,23 @@ class TradingBot:
             if not symbols_to_check:
                 return
 
-            intervals = ['1', '5', '15'] # 1m, 5m, 15m
+            intervals = ['1', '5', '15']
             
             for sym in symbols_to_check:
                 try:
+                    # 1. Получаем настройки для монеты
+                    cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == sym))
+                    cfg = cfg_res.scalars().first()
+                    
+                    # 2. Получаем статистику (средний прострел)
+                    stat = await session.get(SymbolStat, sym)
+                    
+                    # 3. Рассчитываем порог: max(85% от среднего, min_entry_pct)
+                    auto_th = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else 5.0
+                    min_th = cfg.min_entry_pct if cfg and cfg.min_entry_pct > 0 else 5.0
+                    threshold = max(auto_th, min_th)
+                    
+                    # 4. Проверяем свечи
                     for tf in intervals:
                         kl = await self.rest.get_kline(sym, interval=tf, limit=2)
                         if len(kl) < 2: continue
@@ -96,8 +112,8 @@ class TradingBot:
                         if open_price <= 0: continue
                         change_pct = (close_price - open_price) / open_price * 100
                         
-                        # Проверяем порог из настроек (по умолчанию 10%)
-                        if abs(change_pct) >= settings.threshold * 100:
+                        # 5. Если всплеск больше порога
+                        if abs(change_pct) >= threshold:
                             candle_id = f"{sym}_{tf}_{last_candle[0]}"
                             if candle_id in self._seen_candles:
                                 continue
@@ -112,12 +128,9 @@ class TradingBot:
                                 change_pct=change_pct, timeframe=tf + 'm'
                             ))
                             
-                            cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == sym))
-                            cfg = cfg_res.scalars().first()
-                            
                             await self._open_trade(session, sym, side, close_price, state.symbols[sym].max_leverage, cfg)
                             
-                            log.info(f'SIGNAL {kind} {sym} ({tf}m) {change_pct:.2f}% -> OPEN {side}')
+                            log.info(f'SIGNAL {kind} {sym} ({tf}m) {change_pct:.2f}% (threshold {threshold:.2f}%) -> OPEN {side}')
                             
                 except Exception as e:
                     log.warning(f'Check entries failed for {sym}: {e}')
