@@ -120,8 +120,7 @@ async def api_stats(limit: int = 50):
                 effective_entry = cfg.entry_pct
             else:
                 auto_th = s.avg_prostrel_pct * 0.85 if s.avg_prostrel_pct > 0 else 5.0
-                min_th = cfg.min_entry_pct if cfg and cfg.min_entry_pct > 0 else 5.0
-                effective_entry = max(auto_th, min_th)
+                effective_entry = max(auto_th, 5.0)
             
             items.append({
                 'symbol': s.symbol,
@@ -129,7 +128,7 @@ async def api_stats(limit: int = 50):
                 'max_prostrel_pct': round(s.max_prostrel_pct, 2),
                 'freq_per_day': round(s.freq_per_day, 2),
                 'entry_long_pct': round(effective_entry, 2),
-                'is_manual': is_manual,  # <-- Флаг
+                'is_manual': is_manual,
                 'max_leverage': s.max_leverage,
             })
             

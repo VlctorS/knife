@@ -97,7 +97,6 @@ button:hover { background:#1d4ed8; }
     <input type="hidden" id="cfg-symbol">
     
     <p class="muted">Жесткий % входа (0 = авто): <input type="number" id="cfg-entry_pct" step="0.1" style="width:80px;"></p>
-    <p class="muted">Мин. % входа: <input type="number" id="cfg-min_entry_pct" step="0.1" style="width:80px;"></p>
     <hr style="border-color:#252b36;">
     <p class="muted">Шаг сетки %: <input type="number" id="cfg-grid_step_pct" step="0.1" style="width:80px;"></p>
     <p class="muted">Множитель: <input type="number" id="cfg-grid_step_multiplier" step="0.1" style="width:80px;"></p>
@@ -186,7 +185,6 @@ async function loadStats() {
     '</tr>';
   }).join('');
 }
-
 
 async function loadTrades() {
   const d = await (await fetch('/api/trades?limit=100')).json();
@@ -285,11 +283,9 @@ async function openConfig(symbol) {
   let cfg = d.items.find(i => i.symbol === symbol);
   
   if (!cfg) {
-    // Если записи нет — подставляем дефолтные значения
     cfg = {
       symbol: symbol,
       entry_pct: 0,
-      min_entry_pct: 5,
       grid_step_pct: 5,
       grid_step_multiplier: 2.5,
       max_steps: 10,
@@ -299,12 +295,10 @@ async function openConfig(symbol) {
       position_size_grid: 6
     };
   }
-
   
   document.getElementById('modal-title').textContent = 'Настройки ' + symbol;
   document.getElementById('cfg-symbol').value = symbol;
   document.getElementById('cfg-entry_pct').value = cfg.entry_pct;
-  document.getElementById('cfg-min_entry_pct').value = cfg.min_entry_pct;
   document.getElementById('cfg-grid_step_pct').value = cfg.grid_step_pct;
   document.getElementById('cfg-grid_step_multiplier').value = cfg.grid_step_multiplier;
   document.getElementById('cfg-max_steps').value = cfg.max_steps;
@@ -325,7 +319,6 @@ async function saveConfig() {
   const data = {
     symbol: symbol,
     entry_pct: parseFloat(document.getElementById('cfg-entry_pct').value),
-    min_entry_pct: parseFloat(document.getElementById('cfg-min_entry_pct').value),
     grid_step_pct: parseFloat(document.getElementById('cfg-grid_step_pct').value),
     grid_step_multiplier: parseFloat(document.getElementById('cfg-grid_step_multiplier').value),
     max_steps: parseInt(document.getElementById('cfg-max_steps').value),

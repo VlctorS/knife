@@ -54,7 +54,7 @@ class TradingBot:
                     
                     res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == sym))
                     if not res.scalars().first():
-                        session.add(SymbolConfig(symbol=sym, min_entry_pct=5.0))
+                        session.add(SymbolConfig(symbol=sym))
                         
                     ok += 1
                     if ok % 20 == 0:
@@ -90,14 +90,14 @@ class TradingBot:
                     cfg = cfg_res.scalars().first()
                     stat = await session.get(SymbolStat, sym)
                     
-                    # --- ЛОГИКА ВХОДА ---
+                    # ЛОГИКА ВХОДА
                     if cfg and cfg.entry_pct > 0:
+                        # Жесткий процент (приоритет)
                         threshold = cfg.entry_pct
                     else:
-                        auto_th = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else 5.0
-                        min_th = cfg.min_entry_pct if cfg and cfg.min_entry_pct > 0 else 5.0
-                        threshold = max(auto_th, min_th)
-                    # --------------------
+                        # Авто-расчет (85% от среднего, но не меньше 5%)
+                        threshold = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else 5.0
+                        threshold = max(threshold, 5.0)
                     
                     for tf in intervals:
                         kl = await self.rest.get_kline(sym, interval=tf, limit=2)
@@ -129,7 +129,6 @@ class TradingBot:
                             
                             log.info(f'SIGNAL {kind} {sym} ({tf}m) {change_pct:.2f}% (threshold {threshold:.2f}%) -> OPEN {side}')
                             
-                            # ЗАЩИТА ОТ ДУБЛИКАТОВ: добавляем в список открытых и выходим из цикла по ТФ
                             open_syms.add(sym)
                             break
                             
@@ -138,7 +137,6 @@ class TradingBot:
             await session.commit()
 
     async def _open_trade(self, session, sym, side, price, max_lev, cfg):
-        # Размер позиции на вход
         pos_size = 0.0
         if cfg and cfg.position_size_entry > 0:
             pos_size = cfg.position_size_entry
@@ -146,10 +144,8 @@ class TradingBot:
             gs = await session.get(Settings, 1)
             pos_size = gs.position_size_entry if gs else MIN_POS_SIZE
         
-        # Проверка минимума
         pos_size = max(MIN_POS_SIZE, pos_size)
                 
-        # Маржа = размер позиции / плечо
         margin = pos_size / max_lev
         qty = pos_size / price
 
@@ -190,7 +186,6 @@ class TradingBot:
                     if (t.side == 'LONG' and price <= t.entry_price * (1 - step_pct / 100)) or \
                        (t.side == 'SHORT' and price >= t.entry_price * (1 + step_pct / 100)):
                         
-                        # Размер позиции на усреднение
                         add_pos_size = 0.0
                         if cfg and cfg.position_size_grid > 0:
                             add_pos_size = cfg.position_size_grid
@@ -198,7 +193,6 @@ class TradingBot:
                             gs = await session.get(Settings, 1)
                             add_pos_size = gs.position_size_grid if gs else MIN_POS_SIZE
                         
-                        # Проверка минимума
                         add_pos_size = max(MIN_POS_SIZE, add_pos_size)
                         
                         add_margin = add_pos_size / t.leverage
