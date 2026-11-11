@@ -30,9 +30,8 @@ class Settings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     min_turnover: Mapped[float] = mapped_column(Float, default=5.0)
     min_leverage: Mapped[float] = mapped_column(Float, default=10.0)
-    position_size_entry: Mapped[float] = mapped_column(Float, default=25.0)  # Размер позиции на вход
-    position_size_grid: Mapped[float] = mapped_column(Float, default=25.0)   # Размер позиции на усреднение
-
+    position_size_entry: Mapped[float] = mapped_column(Float, default=6.0)
+    position_size_grid: Mapped[float] = mapped_column(Float, default=6.0)
 
 class SymbolStat(Base):
     __tablename__ = 'symbol_stats'
@@ -55,10 +54,9 @@ class SymbolConfig(Base):
     max_steps: Mapped[int] = mapped_column(Integer, default=10)
     initial_exit_pct: Mapped[float] = mapped_column(Float, default=15.0)
     exit_contract_pct: Mapped[float] = mapped_column(Float, default=50.0)
-    position_size_entry: Mapped[float] = mapped_column(Float, default=0.0)  # 0 = использовать глобальное
-    position_size_grid: Mapped[float] = mapped_column(Float, default=0.0)   # 0 = использовать глобальное
+    position_size_entry: Mapped[float] = mapped_column(Float, default=0.0)
+    position_size_grid: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
-
 
 class Trade(Base):
     __tablename__ = 'trades'

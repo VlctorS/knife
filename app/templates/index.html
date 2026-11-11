@@ -76,11 +76,11 @@ button:hover { background:#1d4ed8; }
       <p class="muted">Мин. макс. плечо:</p>
       <div class="form-row"><input type="number" id="min-lev" step="1"></div>
       
-      <p class="muted">Размер позиции на ВХОД (USDT):</p>
-      <div class="form-row"><input type="number" id="pos-size-entry" step="1"></div>
+      <p class="muted">Размер позиции на ВХОД (USDT, мин. 6):</p>
+      <div class="form-row"><input type="number" id="pos-size-entry" step="1" min="6"></div>
       
-      <p class="muted">Размер позиции на УСРЕДНЕНИЕ (USDT):</p>
-      <div class="form-row"><input type="number" id="pos-size-grid" step="1"></div>
+      <p class="muted">Размер позиции на УСРЕДНЕНИЕ (USDT, мин. 6):</p>
+      <div class="form-row"><input type="number" id="pos-size-grid" step="1" min="6"></div>
       
       <div style="margin-top:24px">
         <button onclick="saveSettings()">Сохранить</button>

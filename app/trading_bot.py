@@ -13,6 +13,8 @@ from .config import settings
 
 log = logging.getLogger(__name__)
 
+MIN_POS_SIZE = 6.0  # Минимальный размер позиции (USDT)
+
 def _get_upsert(model, values, pk_col):
     is_pg = engine.url.drivername.startswith('postgresql')
     if is_pg:
@@ -138,7 +140,10 @@ class TradingBot:
             pos_size = cfg.position_size_entry
         else:
             gs = await session.get(Settings, 1)
-            pos_size = gs.position_size_entry if gs else 25.0
+            pos_size = gs.position_size_entry if gs else MIN_POS_SIZE
+        
+        # Проверка минимума
+        pos_size = max(MIN_POS_SIZE, pos_size)
                 
         # Маржа = размер позиции / плечо
         margin = pos_size / max_lev
@@ -155,7 +160,7 @@ class TradingBot:
         
         history = TradeHistory(
             trade_id=trade.id, action='OPEN', price=price, qty=qty,
-            margin=margin, pnl=0.0, notes=f'{side} open (size: {pos_size} USDT)'
+            margin=margin, pnl=0.0, notes=f'{side} open (size: {pos_size:.2f} USDT)'
         )
         session.add(history)
         log.info('OPEN %s %s @ %.6f (size: %.2f USDT, margin: %.2f, lev: %.0fx)', side, sym, price, pos_size, margin, max_lev)
@@ -187,7 +192,10 @@ class TradingBot:
                             add_pos_size = cfg.position_size_grid
                         else:
                             gs = await session.get(Settings, 1)
-                            add_pos_size = gs.position_size_grid if gs else 25.0
+                            add_pos_size = gs.position_size_grid if gs else MIN_POS_SIZE
+                        
+                        # Проверка минимума
+                        add_pos_size = max(MIN_POS_SIZE, add_pos_size)
                         
                         add_margin = add_pos_size / t.leverage
                         add_qty = add_pos_size / price
@@ -200,7 +208,7 @@ class TradingBot:
                         
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
-                            margin=add_margin, pnl=0.0, notes=f'step {t.grid_step} (size: {add_pos_size} USDT)'
+                            margin=add_margin, pnl=0.0, notes=f'step {t.grid_step} (size: {add_pos_size:.2f} USDT)'
                         )
                         session.add(history)
                         log.info('GRID ADD %s %s @ %.6f (step %d)', t.side, t.symbol, price, t.grid_step)
