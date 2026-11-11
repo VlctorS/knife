@@ -248,7 +248,7 @@ class TradingBot:
                 session.add(gs)
                 await session.commit()
             
-            fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055  # Комиссия в %
+            fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
             
             result = await session.execute(select(Trade).where(Trade.status == 'OPEN'))
             for t in result.scalars().all():
@@ -263,7 +263,7 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
                 
-                # --- УСРЕДНЕНИЕ ---
+                # --- 1. ЛОГИКА УСРЕДНЕНИЯ ---
                 if t.grid_step < t.max_steps:
                     start_pct = (cfg.grid_step_pct if cfg and cfg.grid_step_pct > 0 else (gs.grid_step_pct if gs else 5.0))
                     mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs else 2.5))
@@ -288,7 +288,6 @@ class TradingBot:
                         t.total_margin += add_margin
                         t.avg_entry_price = (t.avg_entry_price * old_qty + price * add_qty) / t.total_qty
                         
-                        # Комиссия за усреднение
                         add_commission = add_pos_size * (fee_pct / 100.0)
                         
                         history = TradeHistory(
@@ -297,23 +296,24 @@ class TradingBot:
                         )
                         session.add(history)
                         log.info('GRID ADD %s %s @ %.6f (step %d, fee %.4f)', t.side, t.symbol, price, t.grid_step, add_commission)
-                        await session.commit()
+                        
+                        # ВАЖНО: НЕ делаем здесь commit, чтобы не сбить расчет ниже.
+                        # Или делаем, но тогда нужно обновить t после коммита.
+                        # Лучше закоммитить в конце, либо пересчитать avg_entry_price в памяти.
+                        await session.commit() # Оставляем, но теперь мы гарантируем, что проверка на закрытие будет отдельной
 
-                # --- РАСЧЕТ PnL (с учетом комиссии) ---
+                # --- 2. РАСЧЕТ PnL (с учетом комиссии) ---
                 if t.side == 'LONG':
                     change_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
                     change_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
                 
-                # Комиссия на вход (уже была оплачена при открытии) + комиссия на выход (если закроем сейчас)
-                # Упрощенно: комиссия = (total_margin * leverage * fee_pct / 100) * 2 (вход + выход)
                 position_size = t.total_margin * t.leverage
                 total_commission = position_size * (fee_pct / 100.0) * 2
                 
-                # Виртуальный PnL в USDT минус комиссия
                 t.pnl = (t.total_margin * (change_pct / 100.0) * t.leverage) - total_commission
                 
-                # --- ВЫХОД ---
+                # --- 3. ЛОГИКА ВЫХОДА (ТЕПЕРЬ С ФЛАГОМ) ---
                 exit_pct = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 15.0))
                 
                 if t.total_qty < 0.001:
@@ -322,15 +322,20 @@ class TradingBot:
                     await session.commit()
                     continue
                 
+                # Проверяем историю только для того, чтобы не спамить закрытиями каждые 2 секунды
                 last_history = await session.execute(
                     select(TradeHistory).where(TradeHistory.trade_id == t.id).order_by(TradeHistory.ts.desc()).limit(1)
                 )
                 last_h = last_history.scalars().first()
+                
+                # Если последнее действие было PARTIAL_CLOSE и прошло меньше 10 секунд — пропускаем
+                # (увеличил с 5 минут до 10 секунд, чтобы не блокировать закрытие, если цена реально держится)
                 already_partial = (
                     last_h and last_h.action == 'PARTIAL_CLOSE' and 
-                    (time.time() - last_h.ts.timestamp()) < 300
+                    (time.time() - last_h.ts.timestamp()) < 10 
                 )
                 
+                # Если цена достигла цели и это не флаг "already_partial"
                 if change_pct >= exit_pct and not already_partial:
                     close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
                     closed_qty = t.total_qty * (close_pct / 100.0)
@@ -348,7 +353,7 @@ class TradingBot:
                     t.total_qty -= closed_qty
                     t.total_margin -= (closed_qty * t.avg_entry_price / t.leverage)
                     
-                    # Накопленный PnL
+                    # Накапливаем PnL
                     t.pnl = (t.pnl or 0) + closed_pnl
                     
                     if t.total_qty < 0.001 or close_pct >= 100:
@@ -357,7 +362,7 @@ class TradingBot:
                         action = 'FULL_CLOSE'
                         log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
                     else:
-                        t.grid_step = 0
+                        t.grid_step = 0  # Сбрасываем сетку
                         action = 'PARTIAL_CLOSE'
                         log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT, grid reset', t.side, t.symbol, price, close_pct, closed_pnl)
                     
@@ -366,7 +371,10 @@ class TradingBot:
                         margin=t.total_margin, pnl=closed_pnl, notes=f'close {close_pct}% (change {change_pct:.2f}%, fee {close_commission:.4f})'
                     )
                     session.add(history)
-            await session.commit()
+                    await session.commit() # Коммитим сразу, чтобы состояние сохранилось
+            
+            await session.commit() # Финальный коммит для оставшихся обновлений
+
 
 
 trading_bot = None
