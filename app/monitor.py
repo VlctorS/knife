@@ -173,13 +173,13 @@ class Monitor:
         while not self._stop.is_set():
             try:
                 self._check_all()
-                # Вызовы симулятора
+                # Вызовы торгового бота
                 import sys
                 main_mod = sys.modules.get('app.main')
-                sim = getattr(main_mod, 'simulator', None) if main_mod else None
-                if sim:
-                    await sim.check_for_entries()
-                    await sim.update_open_trades()
+                bot = getattr(main_mod, 'trading_bot', None) if main_mod else None
+                if bot:
+                    await bot.check_for_entries()
+                    await bot.update_open_trades()
             except Exception:
                 log.exception('check loop')
             await asyncio.sleep(2)
