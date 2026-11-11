@@ -116,9 +116,9 @@ button:hover { background:#1d4ed8; }
 
 <!-- Модальное окно истории сделки -->
 <div class="modal" id="history-modal">
-  <div class="modal-content" style="width: 600px;">
+  <div class="modal-content" style="width: 900px; max-width: 95vw;">
     <h2 id="history-title">История сделки</h2>
-    <div id="history-content"></div>
+    <div id="history-content" style="overflow-x: auto;"></div>
     <div style="margin-top:24px;">
       <button onclick="closeHistory()" style="background:#4b5563;">Закрыть</button>
     </div>
