@@ -22,6 +22,7 @@ th { color:#8a93a6; font-weight:500; font-size:12px; }
 .muted { color:#8a93a6; } .empty { padding:24px; text-align:center; color:#8a93a6; }
 .form-row { display:flex; gap:12px; align-items:center; margin-bottom:16px; }
 input { background:#0e1117; border:1px solid #252b36; color:#e6e6e6; padding:8px; border-radius:6px; width:100px;}
+input::placeholder { color: #4b5563; }
 button { background:#2563eb; border:none; color:white; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:600; }
 button:hover { background:#1d4ed8; }
 .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); justify-content:center; align-items:center; z-index: 1000;}
@@ -134,7 +135,7 @@ button:hover { background:#1d4ed8; }
   </div>
 </div>
 
-<!-- Модальное окно истории сделки (РАСШИРЕНО) -->
+<!-- Модальное окно истории сделки -->
 <div class="modal" id="history-modal">
   <div class="modal-content" style="width: 900px; max-width: 95vw;">
     <h2 id="history-title">История сделки</h2>
@@ -158,7 +159,6 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   if (t.dataset.tab === 'settings') loadSettings();
 }));
 
-// Закрытие модальных окон по Esc
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     document.getElementById('config-modal').classList.remove('active');
@@ -318,7 +318,8 @@ async function saveSettings() {
     body: JSON.stringify(data)
   });
   alert('Настройки сохранены. Список монет обновляется...');
-  setTimeout(() => { loadStatus(); loadStats(); }, 2000);
+  // Перезагружаем и статус, и статистику, чтобы применились новые глобальные значения
+  setTimeout(() => { loadStatus(); loadStats(); loadSettings(); }, 2000);
 }
 
 async function clearData() {
@@ -329,50 +330,79 @@ async function clearData() {
 }
 
 async function openConfig(symbol) {
-  const d = await (await fetch('/api/configs')).json();
-  let cfg = d.items.find(i => i.symbol === symbol);
+  // Загружаем и конфиг монеты, и глобальные настройки (для placeholder)
+  const [cfgData, globalData] = await Promise.all([
+    fetch('/api/configs').then(r => r.json()),
+    fetch('/api/settings').then(r => r.json())
+  ]);
+  
+  let cfg = cfgData.items.find(i => i.symbol === symbol);
   
   if (!cfg) {
     cfg = {
-      symbol: symbol,
-      entry_pct: 0,
-      grid_step_pct: 0,
-      grid_step_multiplier: 0,
-      max_steps: 0,
-      initial_exit_pct: 0,
-      exit_contract_pct: 0,
-      position_size_entry: 0,
-      position_size_grid: 0
+      symbol: symbol, entry_pct: 0, grid_step_pct: 0, grid_step_multiplier: 0,
+      max_steps: 0, initial_exit_pct: 0, exit_contract_pct: 0,
+      position_size_entry: 0, position_size_grid: 0
     };
   }
   
   document.getElementById('modal-title').textContent = 'Настройки ' + symbol;
   document.getElementById('cfg-symbol').value = symbol;
-  document.getElementById('cfg-entry_pct').value = cfg.entry_pct;
-  document.getElementById('cfg-grid_step_pct').value = cfg.grid_step_pct;
-  document.getElementById('cfg-grid_step_multiplier').value = cfg.grid_step_multiplier;
-  document.getElementById('cfg-max_steps').value = cfg.max_steps;
-  document.getElementById('cfg-initial_exit_pct').value = cfg.initial_exit_pct;
-  document.getElementById('cfg-exit_contract_pct').value = cfg.exit_contract_pct;
-  document.getElementById('cfg-position_size_entry').value = Math.max(6, cfg.position_size_entry || 6);
-  document.getElementById('cfg-position_size_grid').value = Math.max(6, cfg.position_size_grid || 6);
+  
+  // Поля: если 0 — оставляем пусто, но ставим placeholder с глобальным значением
+  const setField = (id, value, globalValue) => {
+    const el = document.getElementById(id);
+    if (value > 0) {
+      el.value = value;
+      el.placeholder = '';
+    } else {
+      el.value = '';
+      el.placeholder = globalValue != null ? String(globalValue) : '';
+    }
+  };
+  
+  setField('cfg-entry_pct', cfg.entry_pct, globalData.entry_pct);
+  setField('cfg-grid_step_pct', cfg.grid_step_pct, globalData.grid_step_pct);
+  setField('cfg-grid_step_multiplier', cfg.grid_step_multiplier, globalData.grid_step_multiplier);
+  setField('cfg-max_steps', cfg.max_steps, globalData.max_steps);
+  setField('cfg-initial_exit_pct', cfg.initial_exit_pct, globalData.initial_exit_pct);
+  setField('cfg-exit_contract_pct', cfg.exit_contract_pct, globalData.exit_contract_pct);
+  
+  // Для размеров позиции: всегда минимум 6 (или глобальное, если оно > 6)
+  const setPosField = (id, value, globalValue) => {
+    const el = document.getElementById(id);
+    if (value > 0) {
+      el.value = Math.max(6, value);
+      el.placeholder = '';
+    } else {
+      el.value = '';
+      el.placeholder = String(Math.max(6, globalValue || 6));
+    }
+  };
+  
+  setPosField('cfg-position_size_entry', cfg.position_size_entry, globalData.position_size_entry);
+  setPosField('cfg-position_size_grid', cfg.position_size_grid, globalData.position_size_grid);
+  
   document.getElementById('config-modal').classList.add('active');
 }
 
 async function saveConfig() {
   const symbol = document.getElementById('cfg-symbol').value;
   
-  const posEntry = Math.max(6, parseFloat(document.getElementById('cfg-position_size_entry').value) || 6);
-  const posGrid = Math.max(6, parseFloat(document.getElementById('cfg-position_size_grid').value) || 6);
+  const posEntryRaw = document.getElementById('cfg-position_size_entry').value;
+  const posGridRaw = document.getElementById('cfg-position_size_grid').value;
+  
+  const posEntry = posEntryRaw === '' ? 0 : Math.max(6, parseFloat(posEntryRaw));
+  const posGrid = posGridRaw === '' ? 0 : Math.max(6, parseFloat(posGridRaw));
   
   const data = {
     symbol: symbol,
-    entry_pct: parseFloat(document.getElementById('cfg-entry_pct').value),
-    grid_step_pct: parseFloat(document.getElementById('cfg-grid_step_pct').value),
-    grid_step_multiplier: parseFloat(document.getElementById('cfg-grid_step_multiplier').value),
-    max_steps: parseInt(document.getElementById('cfg-max_steps').value),
-    initial_exit_pct: parseFloat(document.getElementById('cfg-initial_exit_pct').value),
-    exit_contract_pct: parseFloat(document.getElementById('cfg-exit_contract_pct').value),
+    entry_pct: parseFloat(document.getElementById('cfg-entry_pct').value) || 0,
+    grid_step_pct: parseFloat(document.getElementById('cfg-grid_step_pct').value) || 0,
+    grid_step_multiplier: parseFloat(document.getElementById('cfg-grid_step_multiplier').value) || 0,
+    max_steps: parseInt(document.getElementById('cfg-max_steps').value) || 0,
+    initial_exit_pct: parseFloat(document.getElementById('cfg-initial_exit_pct').value) || 0,
+    exit_contract_pct: parseFloat(document.getElementById('cfg-exit_contract_pct').value) || 0,
     position_size_entry: posEntry,
     position_size_grid: posGrid
   };
