@@ -12,7 +12,7 @@ from sqlalchemy import select
 from .config import settings
 from .monitor import monitor
 from .state import state
-from .db import init_db, SessionLocal, SymbolStat, Trade, Settings, SymbolConfig
+from .db import init_db, SessionLocal, SymbolStat, Trade, Settings, SymbolConfig, TradeHistory
 from .trading_bot import TradingBot
 
 logging.basicConfig(level=settings.log_level, format='%(asctime)s %(levelname)s %(name)s | %(message)s')
@@ -144,6 +144,27 @@ async def api_trades(limit: int = 100):
                     'closed_at': t.closed_at.isoformat() if t.closed_at else None,
                 }
                 for t in r.scalars().all()
+            ]
+        }
+
+@app.get('/api/trade_history')
+async def api_trade_history(trade_id: int):
+    async with SessionLocal() as session:
+        r = await session.execute(
+            select(TradeHistory).where(TradeHistory.trade_id == trade_id).order_by(TradeHistory.ts)
+        )
+        return {
+            'items': [
+                {
+                    'ts': h.ts.isoformat(),
+                    'action': h.action,
+                    'price': h.price,
+                    'qty': h.qty,
+                    'margin': h.margin,
+                    'pnl': h.pnl,
+                    'notes': h.notes,
+                }
+                for h in r.scalars().all()
             ]
         }
 

@@ -73,6 +73,18 @@ class Trade(Base):
     opened_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
     closed_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=True)
 
+class TradeHistory(Base):
+    __tablename__ = 'trade_history'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_id: Mapped[int] = mapped_column(Integer, index=True)
+    ts: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
+    action: Mapped[str] = mapped_column(String)  # OPEN, GRID_ADD, PARTIAL_CLOSE, FULL_CLOSE
+    price: Mapped[float] = mapped_column(Float)
+    qty: Mapped[float] = mapped_column(Float)
+    margin: Mapped[float] = mapped_column(Float)
+    pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    notes: Mapped[str] = mapped_column(String, default='')
+
 async def init_db():
     os.makedirs('data', exist_ok=True)
     async with engine.begin() as conn:

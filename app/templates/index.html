@@ -79,7 +79,7 @@ button:hover { background:#1d4ed8; }
   </div></div>
 </main>
 
-<!-- Модальное окно -->
+<!-- Модальное окно настроек монеты -->
 <div class="modal" id="config-modal">
   <div class="modal-content">
     <h2 id="modal-title">Настройки</h2>
@@ -98,6 +98,17 @@ button:hover { background:#1d4ed8; }
     <div style="margin-top:24px; display:flex; gap:12px;">
       <button onclick="saveConfig()">Сохранить</button>
       <button onclick="closeModal()" style="background:#4b5563;">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- Модальное окно истории сделки -->
+<div class="modal" id="history-modal">
+  <div class="modal-content" style="width: 600px;">
+    <h2 id="history-title">История сделки</h2>
+    <div id="history-content"></div>
+    <div style="margin-top:24px;">
+      <button onclick="closeHistory()" style="background:#4b5563;">Закрыть</button>
     </div>
   </div>
 </div>
@@ -145,11 +156,10 @@ async function loadTrades() {
   const d = await (await fetch('/api/trades?limit=100')).json();
   const tb = document.getElementById('trades');
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="10" class="empty">Нет сделок</td></tr>'; return; }
+  
   tb.innerHTML = d.items.map(t => {
-    // Размер позиции = кол-во * текущая цена
     const position_size = (t.total_qty * t.current_price).toFixed(2);
-    
-    return '<tr>'+
+    return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
       '<td class="muted">'+(t.opened_at?new Date(t.opened_at).toLocaleTimeString():'—')+'</td>'+
       '<td>'+t.symbol+'</td>'+
       '<td class="'+(t.side==='LONG'?'pump':'dump')+'">'+t.side+'</td>'+
@@ -162,6 +172,43 @@ async function loadTrades() {
       '<td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td>'+
     '</tr>';
   }).join('');
+}
+
+async function openHistory(tradeId, symbol) {
+  document.getElementById('history-title').textContent = 'История: ' + symbol;
+  document.getElementById('history-content').innerHTML = '<p class="muted">Загрузка...</p>';
+  document.getElementById('history-modal').classList.add('active');
+  
+  const d = await (await fetch('/api/trade_history?trade_id=' + tradeId)).json();
+  if (!d.items.length) {
+    document.getElementById('history-content').innerHTML = '<p class="muted">Нет операций</p>';
+    return;
+  }
+  
+  document.getElementById('history-content').innerHTML = `
+    <table style="width:100%">
+      <thead><tr><th>Время</th><th>Действие</th><th>Цена</th><th>Кол-во</th><th>PnL</th></tr></thead>
+      <tbody>
+        ${d.items.map(h => `
+          <tr>
+            <td class="muted">${new Date(h.ts).toLocaleString()}</td>
+            <td>${h.action} (${h.notes})</td>
+            <td>${fmtNum(h.price)}</td>
+            <td>${fmtNum(h.qty, 2)}</td>
+            <td class="${h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : '')}">${fmtNum(h.pnl, 4)}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function closeHistory() {
+  document.getElementById('history-modal').classList.remove('active');
+}
+
+function closeModal() {
+  document.getElementById('config-modal').classList.remove('active');
 }
 
 async function loadSettings() {
@@ -203,10 +250,6 @@ async function openConfig(symbol) {
   document.getElementById('config-modal').classList.add('active');
 }
 
-function closeModal() {
-  document.getElementById('config-modal').classList.remove('active');
-}
-
 async function saveConfig() {
   const symbol = document.getElementById('cfg-symbol').value;
   const data = {
@@ -233,7 +276,6 @@ async function saveConfig() {
 async function tick() { 
   try { 
     await loadStatus(); 
-    // Обновляем данные на активной вкладке каждые 5 секунд
     if(document.getElementById('tab-trades').classList.contains('active')) await loadTrades();
     if(document.getElementById('tab-alerts').classList.contains('active')) await loadAlerts();
     if(document.getElementById('tab-stats').classList.contains('active')) await loadStats();
@@ -241,7 +283,6 @@ async function tick() {
 }
 tick(); 
 setInterval(tick, 5000);
-
 </script>
 </body>
 </html>

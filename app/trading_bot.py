@@ -7,25 +7,17 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .bybit import BybitREST
-from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, engine
+from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, TradeHistory, engine
 from .state import state, Alert
 from .config import settings
 
 log = logging.getLogger(__name__)
 
-
 def _get_upsert(model, values, pk_col):
     is_pg = engine.url.drivername.startswith('postgresql')
     if is_pg:
-        return pg_insert(model).values(**values).on_conflict_do_update(
-            index_elements=[pk_col],
-            set_={k: v for k, v in values.items() if k != pk_col}
-        )
-    return sqlite_insert(model).values(**values).on_conflict_do_update(
-        index_elements=[pk_col],
-        set_={k: v for k, v in values.items() if k != pk_col}
-    )
-
+        return pg_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
+    return sqlite_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
 
 class TradingBot:
     def __init__(self, rest):
@@ -57,12 +49,8 @@ class TradingBot:
                     await session.execute(stmt)
                     
                     res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == sym))
-                    cfg = res.scalars().first()
-                    if not cfg:
+                    if not res.scalars().first():
                         session.add(SymbolConfig(symbol=sym, min_entry_pct=5.0))
-                    else:
-                        cfg.min_entry_pct = max(cfg.min_entry_pct, 5.0) 
-                        # (опционально: мы можем обновлять min_entry_pct, если оно не задано, но лучше оставить 5.0)
                         
                     ok += 1
                     if ok % 20 == 0:
@@ -93,18 +81,13 @@ class TradingBot:
                 
                 dist = (price - ma) / ma * 100
                 
-                # --- ЛОГИКА ВХОДА ---
-                # 1. Жесткий вход (если задан)
+                # ЛОГИКА ВХОДА
                 if cfg and cfg.entry_pct > 0:
                     threshold = cfg.entry_pct
-                # 2. Минимальный порог из настроек (если задан)
                 elif cfg and cfg.min_entry_pct > 0:
                     threshold = cfg.min_entry_pct
-                # 3. Глобальный порог (но не меньше 5%)
                 else:
-                    global_th = settings.threshold * 100  # 10% из .env
-                    threshold = max(global_th, 5.0)       # но не меньше 5%
-                # --------------------
+                    threshold = max(settings.threshold * 100, 5.0)
 
                 if dist <= -threshold:
                     state.add_alert(Alert(ts=time.time(), symbol=sym, kind='DUMP', price_now=price, ref_price=ma, ma=ma, change_pct=dist))
@@ -126,6 +109,14 @@ class TradingBot:
             leverage=max_lev, current_price=price,
         )
         session.add(trade)
+        await session.flush()
+        
+        history = TradeHistory(
+            trade_id=trade.id, action='OPEN', price=price, qty=qty,
+            margin=margin, pnl=0.0, notes=f'{side} open'
+        )
+        session.add(history)
+        
         log.info('OPEN %s %s @ %.6f (dist: %.2f%%, size: %.2f USDT, lev: %.0fx)', 
                  side, sym, price, ((price - state.symbols[sym].ma)/state.symbols[sym].ma*100), position_size, max_lev)
 
@@ -156,6 +147,12 @@ class TradingBot:
                         t.total_qty += add_qty
                         t.avg_entry_price = (t.avg_entry_price * old_qty + price * add_qty) / t.total_qty
                         
+                        history = TradeHistory(
+                            trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
+                            margin=t.total_margin, pnl=0.0, notes=f'step {t.grid_step}'
+                        )
+                        session.add(history)
+                        
                         log.info('GRID ADD %s %s @ %.6f (step %d, dist %.2f%%)', t.side, t.symbol, price, t.grid_step, step_pct)
                         await session.commit()
 
@@ -163,7 +160,6 @@ class TradingBot:
                     pnl_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
                     pnl_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
-
                 t.pnl = t.total_margin * (pnl_pct / 100.0) * t.leverage
                 
                 exit_pct = cfg.initial_exit_pct if cfg else 15.0
@@ -179,10 +175,18 @@ class TradingBot:
                     if close_pct >= 100:
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
+                        action = 'FULL_CLOSE'
                         log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
                     else:
                         t.total_qty -= closed_qty
+                        action = 'PARTIAL_CLOSE'
                         log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT', t.side, t.symbol, price, close_pct, closed_pnl)
+                    
+                    history = TradeHistory(
+                        trade_id=t.id, action=action, price=price, qty=closed_qty,
+                        margin=t.total_margin, pnl=closed_pnl, notes=f'close {close_pct}%'
+                    )
+                    session.add(history)
             await session.commit()
 
 trading_bot = None
