@@ -64,11 +64,11 @@ button:hover { background:#1d4ed8; }
   <div id="tab-trades" class="tab-content"><div class="panel"><h2>Виртуальные сделки (Сетка)</h2>
     <table><thead><tr>
       <th>Время (МСК)</th><th>Символ</th><th>Тип</th>
-      <th>Ср. цена</th><th>Тек. цена</th>
+      <th>Ср. цена</th><th>Тек. цена</th><th>Изм. %</th>
       <th>Кол-во</th><th>Размер (USDT)</th>
       <th>Сетка</th><th>Плечо</th><th>PnL</th><th></th>
     </tr></thead>
-    <tbody id="trades"><tr><td colspan="11" class="empty">Нет сделок</td></tr></tbody></table></div></div>
+    <tbody id="trades"><tr><td colspan="12" class="empty">Нет сделок</td></tr></tbody></table></div></div>
     
   <div id="tab-settings" class="tab-content"><div class="panel"><h2>Глобальные настройки</h2>
     <div style="padding:16px">
@@ -211,17 +211,19 @@ async function loadStats() {
 async function loadTrades() {
   const d = await (await fetch('/api/trades?limit=100')).json();
   const tb = document.getElementById('trades');
-  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="11" class="empty">Нет сделок</td></tr>'; return; }
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="12" class="empty">Нет сделок</td></tr>'; return; }
   
   tb.innerHTML = d.items.map(t => {
     const position_size = (t.total_qty * t.current_price).toFixed(2);
     const timeStr = t.opened_at ? new Date(t.opened_at).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
+    const changeClass = t.change_pct > 0 ? 'pump' : (t.change_pct < 0 ? 'dump' : '');
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
       '<td class="muted">'+timeStr+'</td>'+
       '<td>'+t.symbol+'</td>'+
       '<td class="'+(t.side==='LONG'?'pump':'dump')+'">'+t.side+'</td>'+
       '<td>'+fmtNum(t.avg_entry_price)+'</td>'+
       '<td>'+fmtNum(t.current_price)+'</td>'+
+      '<td class="'+changeClass+'">'+(t.change_pct>0?'+':'')+t.change_pct.toFixed(2)+'%</td>'+
       '<td>'+fmtNum(t.total_qty, 2)+'</td>'+
       '<td>'+position_size+'</td>'+
       '<td class="'+(t.grid_step>0?'pump':'')+'">'+t.grid_step+'</td>'+
@@ -250,11 +252,11 @@ async function openHistory(tradeId, symbol) {
     if (match) openChange = parseFloat(match[1]);
   }
   
-  if (openChange !== null) {
-    document.getElementById('history-title').textContent = `История: ${symbol} (вход при ${openChange.toFixed(2)}%)`;
-  } else {
-    document.getElementById('history-title').textContent = `История: ${symbol}`;
-  }
+  let title = `История: ${symbol}`;
+  if (openChange !== null) title += ` (вход при ${openChange.toFixed(2)}%)`;
+  
+  document.getElementById('history-title').innerHTML = title +
+    `<div style="font-size:12px; color:#8a93a6; font-weight:400; margin-top:6px;">Следующее уср. при изм. цены = ${d.next_step_pct}% (шаг ${d.current_grid_step} из ${d.max_steps})</div>`;
   
   document.getElementById('history-content').innerHTML = `
     <table style="width:100%">
@@ -318,7 +320,6 @@ async function saveSettings() {
     body: JSON.stringify(data)
   });
   alert('Настройки сохранены. Список монет обновляется...');
-  // Перезагружаем и статус, и статистику, чтобы применились новые глобальные значения
   setTimeout(() => { loadStatus(); loadStats(); loadSettings(); }, 2000);
 }
 
@@ -330,7 +331,6 @@ async function clearData() {
 }
 
 async function openConfig(symbol) {
-  // Загружаем и конфиг монеты, и глобальные настройки (для placeholder)
   const [cfgData, globalData] = await Promise.all([
     fetch('/api/configs').then(r => r.json()),
     fetch('/api/settings').then(r => r.json())
@@ -349,7 +349,6 @@ async function openConfig(symbol) {
   document.getElementById('modal-title').textContent = 'Настройки ' + symbol;
   document.getElementById('cfg-symbol').value = symbol;
   
-  // Поля: если 0 — оставляем пусто, но ставим placeholder с глобальным значением
   const setField = (id, value, globalValue) => {
     const el = document.getElementById(id);
     if (value > 0) {
@@ -368,7 +367,6 @@ async function openConfig(symbol) {
   setField('cfg-initial_exit_pct', cfg.initial_exit_pct, globalData.initial_exit_pct);
   setField('cfg-exit_contract_pct', cfg.exit_contract_pct, globalData.exit_contract_pct);
   
-  // Для размеров позиции: всегда минимум 6 (или глобальное, если оно > 6)
   const setPosField = (id, value, globalValue) => {
     const el = document.getElementById(id);
     if (value > 0) {

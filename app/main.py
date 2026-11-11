@@ -116,7 +116,6 @@ async def api_stats(limit: int = 50):
         for s in r.scalars().all():
             cfg = configs.get(s.symbol)
             
-            # Приоритет: индивидуальный > глобальный > авто
             if cfg and cfg.entry_pct > 0:
                 effective_entry = cfg.entry_pct
                 is_manual = True
@@ -144,27 +143,35 @@ async def api_stats(limit: int = 50):
 async def api_trades(limit: int = 100):
     async with SessionLocal() as session:
         r = await session.execute(select(Trade).order_by(Trade.opened_at.desc()).limit(limit))
-        return {
-            'items': [
-                {
-                    'id': t.id,
-                    'symbol': t.symbol,
-                    'side': t.side,
-                    'entry_price': t.entry_price,
-                    'avg_entry_price': t.avg_entry_price,
-                    'current_price': t.current_price,
-                    'grid_step': t.grid_step,
-                    'total_qty': t.total_qty,
-                    'total_margin': t.total_margin,
-                    'status': t.status,
-                    'pnl': t.pnl,
-                    'leverage': t.leverage,
-                    'opened_at': t.opened_at.isoformat() if t.opened_at else None,
-                    'closed_at': t.closed_at.isoformat() if t.closed_at else None,
-                }
-                for t in r.scalars().all()
-            ]
-        }
+        items = []
+        for t in r.scalars().all():
+            # Изменение от средней цены входа
+            if t.avg_entry_price > 0 and t.current_price > 0:
+                if t.side == 'LONG':
+                    change_pct = (t.current_price - t.avg_entry_price) / t.avg_entry_price * 100
+                else:
+                    change_pct = (t.avg_entry_price - t.current_price) / t.avg_entry_price * 100
+            else:
+                change_pct = 0
+            
+            items.append({
+                'id': t.id,
+                'symbol': t.symbol,
+                'side': t.side,
+                'entry_price': t.entry_price,
+                'avg_entry_price': t.avg_entry_price,
+                'current_price': t.current_price,
+                'grid_step': t.grid_step,
+                'total_qty': t.total_qty,
+                'total_margin': t.total_margin,
+                'status': t.status,
+                'pnl': t.pnl,
+                'leverage': t.leverage,
+                'change_pct': round(change_pct, 2),
+                'opened_at': t.opened_at.isoformat() if t.opened_at else None,
+                'closed_at': t.closed_at.isoformat() if t.closed_at else None,
+            })
+        return {'items': items}
 
 @app.get('/api/trade_history')
 async def api_trade_history(trade_id: int):
@@ -173,6 +180,22 @@ async def api_trade_history(trade_id: int):
         if not trade:
             return {"items": []}
             
+        cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == trade.symbol))
+        cfg = cfg_res.scalars().first()
+        gs = await session.get(Settings, 1)
+        
+        if cfg and cfg.grid_step_pct > 0:
+            start_pct = cfg.grid_step_pct
+        else:
+            start_pct = gs.grid_step_pct if gs else 5.0
+        
+        if cfg and cfg.grid_step_multiplier > 0:
+            mult = cfg.grid_step_multiplier
+        else:
+            mult = gs.grid_step_multiplier if gs else 2.5
+        
+        next_step_pct = start_pct * (mult ** trade.grid_step)
+        
         r = await session.execute(
             select(TradeHistory).where(TradeHistory.trade_id == trade_id).order_by(TradeHistory.ts)
         )
@@ -196,7 +219,12 @@ async def api_trade_history(trade_id: int):
                 'notes': h.notes,
             })
             
-        return {'items': items}
+        return {
+            'items': items,
+            'next_step_pct': round(next_step_pct, 2),
+            'current_grid_step': trade.grid_step,
+            'max_steps': trade.max_steps,
+        }
 
 @app.get("/api/configs")
 async def api_get_configs():
