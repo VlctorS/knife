@@ -21,13 +21,16 @@ th { color:#8a93a6; font-weight:500; font-size:12px; }
 .pump { color:#22c55e; font-weight:600; } .dump { color:#ef4444; font-weight:600; }
 .muted { color:#8a93a6; } .empty { padding:24px; text-align:center; color:#8a93a6; }
 .form-row { display:flex; gap:12px; align-items:center; margin-bottom:16px; }
-input { background:#0e1117; border:1px solid #252b36; color:#e6e6e6; padding:8px; border-radius:6px; width:100px; }
+input { background:#0e1117; border:1px solid #252b36; color:#e6e6e6; padding:8px; border-radius:6px; width:100px;}
 button { background:#2563eb; border:none; color:white; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:600; }
 button:hover { background:#1d4ed8; }
+.modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); justify-content:center; align-items:center; }
+.modal.active { display:flex; }
+.modal-content { background:#171b23; padding:24px; border-radius:12px; width:400px; border:1px solid #252b36; }
 </style></head>
 <body>
 <header>
-  <h1 style="margin:0;font-size:18px;">Knife Monitor</h1>
+  <h1 style="margin:0;font-size:18px;">Knife Bot</h1>
   <span class="pill" id="p-threshold">—</span>
   <span class="pill" id="p-window">—</span>
   <span class="pill" id="p-ma">—</span>
@@ -40,37 +43,57 @@ button:hover { background:#1d4ed8; }
     <div class="stat"><div class="k">Алертов</div><div class="v" id="s-alerts">—</div></div>
     <div class="stat"><div class="k">Uptime</div><div class="v" id="s-uptime">—</div></div>
   </div>
+  
   <div class="tabs">
     <div class="tab active" data-tab="alerts">Сигналы</div>
     <div class="tab" data-tab="stats">Статистика</div>
     <div class="tab" data-tab="trades">Сделки</div>
     <div class="tab" data-tab="settings">Настройки</div>
   </div>
+  
   <div id="tab-alerts" class="tab-content active"><div class="panel"><h2>Сигналы пампов/дампов</h2>
     <table><thead><tr><th>Время</th><th>Символ</th><th>Тип</th><th>Изм</th><th>Цена</th></tr></thead>
     <tbody id="alerts"><tr><td colspan="5" class="empty">Нет сигналов</td></tr></tbody></table></div></div>
-  <div id="tab-stats" class="tab-content"><div class="panel"><h2>Статистика прострелов</h2>
-    <table><thead><tr><th>Символ</th><th>Ср. прострел</th><th>Макс</th><th>Точка входа</th><th>Плечо</th></tr></thead>
-    <tbody id="stats"><tr><td colspan="5" class="empty">Загрузка...</td></tr></tbody></table></div></div>
+    
+  <div id="tab-stats" class="tab-content"><div class="panel"><h2>Статистика монет</h2>
+    <table><thead><tr><th>Символ</th><th>Ср. прострел</th><th>Макс</th><th>Точка входа</th><th>Плечо</th><th>Действие</th></tr></thead>
+    <tbody id="stats"><tr><td colspan="6" class="empty">Загрузка...</td></tr></tbody></table></div></div>
+    
   <div id="tab-trades" class="tab-content"><div class="panel"><h2>Виртуальные сделки (Сетка)</h2>
     <table><thead><tr><th>Время</th><th>Символ</th><th>Тип</th><th>Вход</th><th>Тек.</th><th>Сетка</th><th>Плечо</th><th>PnL</th></tr></thead>
     <tbody id="trades"><tr><td colspan="8" class="empty">Нет сделок</td></tr></tbody></table></div></div>
-  <div id="tab-settings" class="tab-content"><div class="panel"><h2>Настройки фильтра</h2>
+    
+  <div id="tab-settings" class="tab-content"><div class="panel"><h2>Глобальные настройки</h2>
     <div style="padding:16px">
-      <p class="muted">Минимальный оборот за 24ч (млн USDT):</p>
-      <div class="form-row">
-        <input type="number" id="min-turnover" value="" step="0.1" placeholder="...">
-      </div>
-      <p class="muted">Минимальное макс. плечо:</p>
-      <div class="form-row">
-        <input type="number" id="min-lev" value="" step="1" placeholder="...">
-      </div>
-      <div style="margin-top:24px">
-        <button onclick="saveSettings()">Сохранить</button>
-      </div>
+      <p class="muted">Мин. оборот за 24ч (млн USDT):</p>
+      <div class="form-row"><input type="number" id="min-turnover" value="5" step="0.1"></div>
+      <p class="muted">Мин. макс. плечо:</p>
+      <div class="form-row"><input type="number" id="min-lev" value="10" step="1"></div>
+      <div style="margin-top:24px"><button onclick="saveSettings()">Сохранить</button></div>
     </div>
   </div></div>
 </main>
+
+<!-- Модальное окно настроек монеты -->
+<div class="modal" id="config-modal">
+  <div class="modal-content">
+    <h2 id="modal-title">Настройки</h2>
+    <input type="hidden" id="cfg-symbol">
+    <p class="muted">Вход % (0 = авто): <input type="number" id="cfg-entry_pct" step="0.1"></p>
+    <p class="muted">Мин. вход %: <input type="number" id="cfg-min_entry_pct" step="0.1"></p>
+    <p class="muted">Шаг сетки %: <input type="number" id="cfg-grid_step_pct" step="0.1"></p>
+    <p class="muted">Множитель: <input type="number" id="cfg-grid_step_multiplier" step="0.1"></p>
+    <p class="muted">Макс. шагов: <input type="number" id="cfg-max_steps" step="1"></p>
+    <p class="muted">Выход %: <input type="number" id="cfg-initial_exit_pct" step="0.1"></p>
+    <p class="muted">% контрактов на выход: <input type="number" id="cfg-exit_contract_pct" step="1"></p>
+    <p class="muted">Маржа (USDT): <input type="number" id="cfg-max_margin" step="0.1"></p>
+    <div style="margin-top:24px; display:flex; gap:12px;">
+      <button onclick="saveConfig()">Сохранить</button>
+      <button onclick="closeModal()" style="background:#4b5563;">Отмена</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const fmtNum = (n, d=6) => n==null ? "—" : Number(n).toLocaleString(undefined,{maximumFractionDigits:d});
 const fmtPnl = (n) => n==null ? "0.0000" : Number(n).toFixed(4);
@@ -95,48 +118,92 @@ async function loadStatus() {
   document.getElementById('s-uptime').textContent = d.uptime_sec + 'с';
   document.getElementById('updated').textContent = 'обновлено ' + new Date().toLocaleTimeString();
 }
+
 async function loadAlerts() {
   const d = await (await fetch('/api/alerts?limit=100')).json();
   const tb = document.getElementById('alerts');
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">Нет сигналов</td></tr>'; return; }
   tb.innerHTML = d.items.map(a => '<tr><td class="muted">'+new Date(a.ts*1000).toLocaleTimeString()+'</td><td>'+a.symbol+'</td><td class="'+(a.kind==='PUMP'?'pump':'dump')+'">'+a.kind+'</td><td>'+a.change_pct.toFixed(2)+'%</td><td>'+fmtNum(a.price_now)+'</td></tr>').join('');
 }
+
 async function loadStats() {
   const d = await (await fetch('/api/stats?limit=50')).json();
   const tb = document.getElementById('stats');
-  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">Нет данных</td></tr>'; return; }
-  tb.innerHTML = d.items.map(s => '<tr><td>'+s.symbol+'</td><td>'+s.avg_prostrel_pct+'%</td><td>'+s.max_prostrel_pct+'%</td><td>'+s.entry_long_pct+'%</td><td>'+(s.max_leverage||10)+'x</td></tr>').join('');
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Нет данных</td></tr>'; return; }
+  tb.innerHTML = d.items.map(s => '<tr><td>'+s.symbol+'</td><td>'+s.avg_prostrel_pct+'%</td><td>'+s.max_prostrel_pct+'%</td><td>'+s.entry_long_pct+'%</td><td>'+(s.max_leverage||10)+'x</td><td><button style="padding:4px 8px; font-size:12px;" onclick="openConfig(\''+s.symbol+'\')">Настроить</button></td></tr>').join('');
 }
+
 async function loadTrades() {
   const d = await (await fetch('/api/trades?limit=100')).json();
   const tb = document.getElementById('trades');
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">Нет сделок</td></tr>'; return; }
   tb.innerHTML = d.items.map(t => '<tr><td class="muted">'+(t.opened_at?new Date(t.opened_at).toLocaleTimeString():'—')+'</td><td>'+t.symbol+'</td><td class="'+(t.side==='LONG'?'pump':'dump')+'">'+t.side+'</td><td>'+fmtNum(t.avg_entry_price)+'</td><td>'+fmtNum(t.current_price)+'</td><td class="'+(t.grid_step>0?'pump':'')+'">'+t.grid_step+'</td><td>'+(t.leverage||10)+'x</td><td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td></tr>').join('');
 }
+
 async function loadSettings() {
   const d = await (await fetch('/api/settings')).json();
   document.getElementById('min-turnover').value = d.min_turnover;
   document.getElementById('min-lev').value = d.min_leverage;
 }
+
 async function saveSettings() {
   const turnover = parseFloat(document.getElementById('min-turnover').value);
   const lev = parseFloat(document.getElementById('min-lev').value);
-  try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({min_turnover: turnover, min_leverage: lev})
-    });
-    if (res.ok) {
-      alert('Настройки сохранены! Изменения вступят в силу при следующем обновлении списка монет (раз в час).');
-    } else {
-      alert('Ошибка ' + res.status);
-    }
-  } catch (e) {
-    alert('Ошибка сети: ' + e);
-  }
+  await fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({min_turnover: turnover, min_leverage: lev})
+  });
+  alert('Настройки сохранены. Список монет обновляется...');
+  setTimeout(() => { loadStatus(); loadStats(); }, 2000);
 }
-async function tick() { try { await loadStatus(); if(document.getElementById('tab-trades').classList.contains('active')) await loadTrades(); } catch(e) { console.error(e); } }
+
+async function openConfig(symbol) {
+  const d = await (await fetch('/api/configs')).json();
+  const cfg = d.items.find(i => i.symbol === symbol);
+  if (!cfg) return;
+  
+  document.getElementById('modal-title').textContent = 'Настройки ' + symbol;
+  document.getElementById('cfg-symbol').value = symbol;
+  document.getElementById('cfg-entry_pct').value = cfg.entry_pct;
+  document.getElementById('cfg-min_entry_pct').value = cfg.min_entry_pct;
+  document.getElementById('cfg-grid_step_pct').value = cfg.grid_step_pct;
+  document.getElementById('cfg-grid_step_multiplier').value = cfg.grid_step_multiplier;
+  document.getElementById('cfg-max_steps').value = cfg.max_steps;
+  document.getElementById('cfg-initial_exit_pct').value = cfg.initial_exit_pct;
+  document.getElementById('cfg-exit_contract_pct').value = cfg.exit_contract_pct;
+  document.getElementById('cfg-max_margin').value = cfg.max_margin;
+  document.getElementById('config-modal').classList.add('active');
+}
+
+function closeModal() {
+  document.getElementById('config-modal').classList.remove('active');
+}
+
+async function saveConfig() {
+  const symbol = document.getElementById('cfg-symbol').value;
+  const data = {
+    symbol: symbol,
+    entry_pct: parseFloat(document.getElementById('cfg-entry_pct').value),
+    min_entry_pct: parseFloat(document.getElementById('cfg-min_entry_pct').value),
+    grid_step_pct: parseFloat(document.getElementById('cfg-grid_step_pct').value),
+    grid_step_multiplier: parseFloat(document.getElementById('cfg-grid_step_multiplier').value),
+    max_steps: parseInt(document.getElementById('cfg-max_steps').value),
+    initial_exit_pct: parseFloat(document.getElementById('cfg-initial_exit_pct').value),
+    exit_contract_pct: parseFloat(document.getElementById('cfg-exit_contract_pct').value),
+    max_margin: parseFloat(document.getElementById('cfg-max_margin').value)
+  };
+  
+  await fetch('/api/configs', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  });
+  alert('Настройки для ' + symbol + ' сохранены!');
+  closeModal();
+}
+
+async function tick() { try { await loadStatus(); } catch(e) { console.error(e); } }
 tick(); setInterval(tick, 5000);
 </script>
 </body>

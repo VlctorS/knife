@@ -11,11 +11,19 @@ from .state import state
 
 log = logging.getLogger(__name__)
 
+
 def _get_upsert(model, values, pk_col):
     is_pg = engine.url.drivername.startswith('postgresql')
     if is_pg:
-        return pg_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
-    return sqlite_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
+        return pg_insert(model).values(**values).on_conflict_do_update(
+            index_elements=[pk_col],
+            set_={k: v for k, v in values.items() if k != pk_col}
+        )
+    return sqlite_insert(model).values(**values).on_conflict_do_update(
+        index_elements=[pk_col],
+        set_={k: v for k, v in values.items() if k != pk_col}
+    )
+
 
 class TradingBot:
     def __init__(self, rest):
@@ -29,6 +37,7 @@ class TradingBot:
                 try:
                     kl = await self.rest.get_kline_1h(sym, limit=720)
                     if len(kl) < 24: continue
+                    
                     prostrels = [(float(k[2]) - float(k[3])) / float(k[3]) * 100 for k in kl if float(k[3]) > 0]
                     if not prostrels: continue
                     
@@ -45,6 +54,7 @@ class TradingBot:
                     stmt = _get_upsert(SymbolStat, values, 'symbol')
                     await session.execute(stmt)
                     
+                    # Создаем дефолтные настройки, если их нет
                     res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == sym))
                     if not res.scalars().first():
                         session.add(SymbolConfig(symbol=sym, min_entry_pct=entry_l))
@@ -91,7 +101,7 @@ class TradingBot:
 
     async def _open_trade(self, session, sym, side, price, max_lev, cfg):
         margin = cfg.max_margin if cfg else 1.0
-        position_size = margin * max_lev
+        position_size = margin * max_lev  # Размер позиции в USDT
         qty = position_size / price
 
         trade = Trade(
@@ -117,6 +127,7 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
                 
+                # Сетка
                 if t.grid_step < t.max_steps:
                     start_pct = cfg.grid_step_pct if cfg else 5.0
                     mult = cfg.grid_step_multiplier if cfg else 2.5
@@ -134,25 +145,39 @@ class TradingBot:
                         log.info('GRID ADD %s %s @ %.6f (step %d, dist %.2f%%)', t.side, t.symbol, price, t.grid_step, step_pct)
                         await session.commit()
 
+                # Расчет PnL (виртуальный, обновляется каждые 2 секунды)
+                if t.side == 'LONG':
+                    pnl_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
+                else:
+                    pnl_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
+
+                # Сохраняем PnL в базу
+                t.pnl = t.total_margin * (pnl_pct / 100.0) * t.leverage
+                
+                # Проверка выхода (тейк-профит)
                 exit_pct = cfg.initial_exit_pct if cfg else 15.0
-                pnl_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100 if t.side == 'LONG' else (t.avg_entry_price - price) / t.avg_entry_price * 100
-                    
                 if pnl_pct >= exit_pct:
                     close_pct = cfg.exit_contract_pct if cfg else 50.0
                     closed_qty = t.total_qty * (close_pct / 100.0)
-                    pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price) if t.side == 'LONG' else (closed_qty * t.avg_entry_price) - (closed_qty * price)
+                    
+                    if t.side == 'LONG':
+                        closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
+                    else:
+                        closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
                     
                     if close_pct >= 100:
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
-                        log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, pnl)
+                        log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
                     else:
                         t.total_qty -= closed_qty
-                        log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT', t.side, t.symbol, price, close_pct, pnl)
+                        log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT', t.side, t.symbol, price, close_pct, closed_pnl)
             await session.commit()
+
 
 def run_history_scan_sync(symbols_data):
     asyncio.run(_scan_async(symbols_data))
+
 
 async def _scan_async(symbols_data):
     import aiohttp
@@ -163,5 +188,6 @@ async def _scan_async(symbols_data):
         for sym, lev in symbols_data:
             state.symbols[sym] = SymbolState(symbol=sym, max_leverage=lev)
         await bot.run_history_scan()
+
 
 trading_bot = None
