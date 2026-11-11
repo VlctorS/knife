@@ -69,7 +69,7 @@ class Monitor:
         db_min_lev = settings.min_max_leverage
         db_min_turnover = 5.0
         async with SessionLocal() as session:
-            s = await session.get(Settings, 1)
+            s = await SessionLocal().get(Settings, 1)
             if s:
                 db_min_lev = s.min_leverage
                 db_min_turnover = s.min_turnover
@@ -80,25 +80,29 @@ class Monitor:
             ml = lev_map.get(sym)
             if ml is None:
                 continue
-            if ml < db_min_lev:
+            
+            # Сохраняем реальное плечо (например, 25, 50, 100)
+            real_leverage = ml 
+            
+            if real_leverage < db_min_lev:
                 continue
                 
-            turnover = turnover_map.get(sym, 0) / 1_000_000  # в миллионы
+            turnover = turnover_map.get(sym, 0) / 1_000_000
             if turnover < db_min_turnover:
                 continue
                 
-            filtered.append({'symbol': sym, 'maxLeverage': ml})
+            # Передаем реальное плечо в стейт
+            filtered.append({'symbol': sym, 'maxLeverage': real_leverage})
             
         filtered.sort(key=lambda x: x['symbol'])
 
         if not filtered:
-            log.warning('No symbols after filter')
+            log.warning('No symbols after filter (minLev=%s, minTurnover=%sM)', db_min_lev, db_min_turnover)
             return
 
         state.set_symbols(filtered)
         state.last_symbols_refresh = time.time()
-        log.info('Symbols loaded: %d (filter maxLeverage>=%s)',
-                 len(filtered), settings.min_max_leverage)
+        log.info('Symbols loaded: %d (filter maxLeverage>=%s)', len(filtered), db_min_lev)
 
         await self._rebuild_ws([d['symbol'] for d in filtered])
         await self._load_ma()
