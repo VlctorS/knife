@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><title>Knife Bot</title>
+<style>
+body { margin:0; font-family: sans-serif; background:#0e1117; color:#e6e6e6; }
+header { padding:16px 24px; border-bottom:1px solid #252b36; display:flex; gap:16px; align-items:center; }
+.pill { background:#171b23; border:1px solid #252b36; border-radius:999px; padding:4px 12px; font-size:12px; color:#8a93a6; }
+main { padding:24px; }
+.row { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap:12px; margin-bottom:24px; }
+.stat { background:#171b23; border:1px solid #252b36; border-radius:12px; padding:14px 16px; }
+.k { font-size:12px; color:#8a93a6; } .v { font-size:20px; font-weight:600; }
+.tabs { display:flex; gap:8px; margin-bottom:16px; }
+.tab { padding:8px 16px; border-radius:8px; background:#171b23; color:#8a93a6; cursor:pointer; border:1px solid #252b36; }
+.tab.active { background:#252b36; color:#e6e6e6; font-weight:600; }
+.tab-content { display:none; } .tab-content.active { display:block; }
+.panel { background:#171b23; border:1px solid #252b36; border-radius:12px; overflow:hidden; }
+h2 { margin:0; padding:12px 16px; font-size:14px; font-weight:600; border-bottom:1px solid #252b36; color:#8a93a6; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { padding:10px 16px; text-align:left; border-bottom:1px solid #252b36; }
+th { color:#8a93a6; font-weight:500; font-size:12px; }
+.pump { color:#22c55e; font-weight:600; } .dump { color:#ef4444; font-weight:600; }
+.muted { color:#8a93a6; } .empty { padding:24px; text-align:center; color:#8a93a6; }
+.form-row { display:flex; gap:12px; align-items:center; margin-bottom:16px; }
+input { background:#0e1117; border:1px solid #252b36; color:#e6e6e6; padding:8px; border-radius:6px; width:100px; }
+button { background:#2563eb; border:none; color:white; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:600; }
+button:hover { background:#1d4ed8; }
+</style></head>
+<body>
+<header>
+  <h1 style="margin:0;font-size:18px;">Knife Monitor</h1>
+  <span class="pill" id="p-threshold">—</span>
+  <span class="pill" id="p-window">—</span>
+  <span class="pill" id="p-ma">—</span>
+  <span class="pill" id="p-lev">—</span>
+  <span id="updated" style="margin-left:auto;font-size:12px;color:#8a93a6;">—</span>
+</header>
+<main>
+  <div class="row">
+    <div class="stat"><div class="k">Символов</div><div class="v" id="s-symbols">—</div></div>
+    <div class="stat"><div class="k">Алертов</div><div class="v" id="s-alerts">—</div></div>
+    <div class="stat"><div class="k">Uptime</div><div class="v" id="s-uptime">—</div></div>
+  </div>
+  <div class="tabs">
+    <div class="tab active" data-tab="alerts">Сигналы</div>
+    <div class="tab" data-tab="stats">Статистика</div>
+    <div class="tab" data-tab="trades">Сделки</div>
+    <div class="tab" data-tab="settings">Настройки</div>
+  </div>
+  <div id="tab-alerts" class="tab-content active"><div class="panel"><h2>Сигналы пампов/дампов</h2>
+    <table><thead><tr><th>Время</th><th>Символ</th><th>Тип</th><th>Изм</th><th>Цена</th></tr></thead>
+    <tbody id="alerts"><tr><td colspan="5" class="empty">Нет сигналов</td></tr></tbody></table></div></div>
+  <div id="tab-stats" class="tab-content"><div class="panel"><h2>Статистика прострелов</h2>
+    <table><thead><tr><th>Символ</th><th>Ср. прострел</th><th>Макс</th><th>Точка входа</th><th>Плечо</th></tr></thead>
+    <tbody id="stats"><tr><td colspan="5" class="empty">Загрузка...</td></tr></tbody></table></div></div>
+  <div id="tab-trades" class="tab-content"><div class="panel"><h2>Виртуальные сделки (Сетка)</h2>
+    <table><thead><tr><th>Время</th><th>Символ</th><th>Тип</th><th>Вход</th><th>Тек.</th><th>Сетка</th><th>Плечо</th><th>PnL</th></tr></thead>
+    <tbody id="trades"><tr><td colspan="8" class="empty">Нет сделок</td></tr></tbody></table></div></div>
+  <div id="tab-settings" class="tab-content"><div class="panel"><h2>Настройки фильтра</h2>
+    <div style="padding:16px">
+      <p class="muted">Минимальный оборот за 24ч (млн USDT):</p>
+      <div class="form-row">
+        <input type="number" id="min-turnover" value="" step="0.1" placeholder="...">
+      </div>
+      <p class="muted">Минимальное макс. плечо:</p>
+      <div class="form-row">
+        <input type="number" id="min-lev" value="" step="1" placeholder="...">
+      </div>
+      <div style="margin-top:24px">
+        <button onclick="saveSettings()">Сохранить</button>
+      </div>
+    </div>
+  </div></div>
+</main>
+<script>
+const fmtNum = (n, d=6) => n==null ? "—" : Number(n).toLocaleString(undefined,{maximumFractionDigits:d});
+const fmtPnl = (n) => n==null ? "0.0000" : Number(n).toFixed(4);
+
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.tab === t.dataset.tab));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + t.dataset.tab));
+  if (t.dataset.tab === 'stats') loadStats();
+  if (t.dataset.tab === 'alerts') loadAlerts();
+  if (t.dataset.tab === 'trades') loadTrades();
+  if (t.dataset.tab === 'settings') loadSettings();
+}));
+
+async function loadStatus() {
+  const d = await (await fetch('/api/status')).json();
+  document.getElementById('p-threshold').textContent = 'Порог ±' + d.threshold_pct + '%';
+  document.getElementById('p-window').textContent = 'Окно ' + d.window_minutes + 'м';
+  document.getElementById('p-ma').textContent = 'MA ' + d.ma_period + 'ч';
+  document.getElementById('p-lev').textContent = 'Плечо ≥ ' + d.min_max_leverage;
+  document.getElementById('s-symbols').textContent = d.symbols_count;
+  document.getElementById('s-alerts').textContent = d.alerts_count;
+  document.getElementById('s-uptime').textContent = d.uptime_sec + 'с';
+  document.getElementById('updated').textContent = 'обновлено ' + new Date().toLocaleTimeString();
+}
+async function loadAlerts() {
+  const d = await (await fetch('/api/alerts?limit=100')).json();
+  const tb = document.getElementById('alerts');
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">Нет сигналов</td></tr>'; return; }
+  tb.innerHTML = d.items.map(a => '<tr><td class="muted">'+new Date(a.ts*1000).toLocaleTimeString()+'</td><td>'+a.symbol+'</td><td class="'+(a.kind==='PUMP'?'pump':'dump')+'">'+a.kind+'</td><td>'+a.change_pct.toFixed(2)+'%</td><td>'+fmtNum(a.price_now)+'</td></tr>').join('');
+}
+async function loadStats() {
+  const d = await (await fetch('/api/stats?limit=50')).json();
+  const tb = document.getElementById('stats');
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">Нет данных</td></tr>'; return; }
+  tb.innerHTML = d.items.map(s => '<tr><td>'+s.symbol+'</td><td>'+s.avg_prostrel_pct+'%</td><td>'+s.max_prostrel_pct+'%</td><td>'+s.entry_long_pct+'%</td><td>'+(s.max_leverage||10)+'x</td></tr>').join('');
+}
+async function loadTrades() {
+  const d = await (await fetch('/api/trades?limit=100')).json();
+  const tb = document.getElementById('trades');
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">Нет сделок</td></tr>'; return; }
+  tb.innerHTML = d.items.map(t => '<tr><td class="muted">'+(t.opened_at?new Date(t.opened_at).toLocaleTimeString():'—')+'</td><td>'+t.symbol+'</td><td class="'+(t.side==='LONG'?'pump':'dump')+'">'+t.side+'</td><td>'+fmtNum(t.avg_entry_price)+'</td><td>'+fmtNum(t.current_price)+'</td><td class="'+(t.grid_step>0?'pump':'')+'">'+t.grid_step+'</td><td>'+(t.leverage||10)+'x</td><td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td></tr>').join('');
+}
+async function loadSettings() {
+  const d = await (await fetch('/api/settings')).json();
+  document.getElementById('min-turnover').value = d.min_turnover;
+  document.getElementById('min-lev').value = d.min_leverage;
+}
+async function saveSettings() {
+  const turnover = parseFloat(document.getElementById('min-turnover').value);
+  const lev = parseFloat(document.getElementById('min-lev').value);
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({min_turnover: turnover, min_leverage: lev})
+    });
+    if (res.ok) {
+      alert('Настройки сохранены! Изменения вступят в силу при следующем обновлении списка монет (раз в час).');
+    } else {
+      alert('Ошибка ' + res.status);
+    }
+  } catch (e) {
+    alert('Ошибка сети: ' + e);
+  }
+}
+async function tick() { try { await loadStatus(); if(document.getElementById('tab-trades').classList.contains('active')) await loadTrades(); } catch(e) { console.error(e); } }
+tick(); setInterval(tick, 5000);
+</script>
+</body>
+</html>

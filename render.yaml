@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: knife
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: THRESHOLD
+        value: "0.5"
+      - key: WINDOW_MINUTES
+        value: "60"
+      - key: MA_PERIOD
+        value: "24"
+      - key: MIN_MAX_LEVERAGE
+        value: "10"
+      - key: MAX_ALERTS
+        value: "200"
+      - key: SYMBOLS_REFRESH_SEC
+        value: "3600"
+      - key: LOG_LEVEL
+        value: "INFO"
