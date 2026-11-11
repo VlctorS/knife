@@ -125,8 +125,7 @@ class TradingBot:
                                 change_pct=change_pct, timeframe=tf + 'm'
                             ))
                             
-                            await self._open_trade(session, sym, side, close_price, state.symbols[sym].max_leverage, cfg)
-                            
+                            await self._open_trade(session, sym, side, close_price, state.symbols[sym].max_leverage, cfg, change_pct)                            
                             log.info(f'SIGNAL {kind} {sym} ({tf}m) {change_pct:.2f}% (threshold {threshold:.2f}%) -> OPEN {side}')
                             
                             open_syms.add(sym)
@@ -136,7 +135,7 @@ class TradingBot:
                     log.warning(f'Check entries failed for {sym}: {e}')
             await session.commit()
 
-    async def _open_trade(self, session, sym, side, price, max_lev, cfg):
+    async def _open_trade(self, session, sym, side, price, max_lev, cfg, change_pct=None):
         pos_size = 0.0
         if cfg and cfg.position_size_entry > 0:
             pos_size = cfg.position_size_entry
@@ -160,7 +159,7 @@ class TradingBot:
         
         history = TradeHistory(
             trade_id=trade.id, action='OPEN', price=price, qty=qty,
-            margin=margin, pnl=0.0, notes=f'{side} open (size: {pos_size:.2f} USDT)'
+            margin=margin, pnl=0.0, notes=f'{side} open (size: {pos_size:.2f} USDT, change: {change_pct:.2f}%)' if change_pct else f'{side} open (size: {pos_size:.2f} USDT)'
         )
         session.add(history)
         log.info('OPEN %s %s @ %.6f (size: %.2f USDT, margin: %.2f, lev: %.0fx)', side, sym, price, pos_size, margin, max_lev)

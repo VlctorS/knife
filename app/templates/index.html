@@ -226,6 +226,23 @@ async function openHistory(tradeId, symbol) {
     return;
   }
   
+  // Ищем запись OPEN и извлекаем процент
+  const openRecord = d.items.find(h => h.action === 'OPEN');
+  let openChange = null;
+  
+  // Парсим notes на наличие "change: X.XX%"
+  if (openRecord && openRecord.notes) {
+    const match = openRecord.notes.match(/change: ([\-\d\.]+)%/);
+    if (match) openChange = parseFloat(match[1]);
+  }
+  
+  // Меняем заголовок
+  if (openChange !== null) {
+    document.getElementById('history-title').textContent = `История: ${symbol} (вход при ${openChange.toFixed(2)}%)`;
+  } else {
+    document.getElementById('history-title').textContent = `История: ${symbol}`;
+  }
+  
   document.getElementById('history-content').innerHTML = `
     <table style="width:100%">
       <thead><tr><th>Время (МСК)</th><th>Действие</th><th>Цена</th><th>Кол-во</th><th>PnL</th></tr></thead>
