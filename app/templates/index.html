@@ -230,8 +230,18 @@ async function saveConfig() {
   closeModal();
 }
 
-async function tick() { try { await loadStatus(); if(document.getElementById('tab-trades').classList.contains('active')) await loadTrades(); } catch(e) { console.error(e); } }
-tick(); setInterval(tick, 5000);
+async function tick() { 
+  try { 
+    await loadStatus(); 
+    // Обновляем данные на активной вкладке каждые 5 секунд
+    if(document.getElementById('tab-trades').classList.contains('active')) await loadTrades();
+    if(document.getElementById('tab-alerts').classList.contains('active')) await loadAlerts();
+    if(document.getElementById('tab-stats').classList.contains('active')) await loadStats();
+  } catch(e) { console.error(e); } 
+}
+tick(); 
+setInterval(tick, 5000);
+
 </script>
 </body>
 </html>
