@@ -248,6 +248,8 @@ class TradingBot:
                 session.add(gs)
                 await session.commit()
             
+            fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055  # Комиссия в %
+            
             result = await session.execute(select(Trade).where(Trade.status == 'OPEN'))
             for t in result.scalars().all():
                 st = state.symbols.get(t.symbol)
@@ -261,7 +263,7 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
                 
-                # --- УСРЕДНЕНИЕ (только если цена ниже MA для LONG / выше MA для SHORT) ---
+                # --- УСРЕДНЕНИЕ ---
                 if t.grid_step < t.max_steps:
                     start_pct = (cfg.grid_step_pct if cfg and cfg.grid_step_pct > 0 else (gs.grid_step_pct if gs else 5.0))
                     mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs else 2.5))
@@ -286,34 +288,40 @@ class TradingBot:
                         t.total_margin += add_margin
                         t.avg_entry_price = (t.avg_entry_price * old_qty + price * add_qty) / t.total_qty
                         
+                        # Комиссия за усреднение
+                        add_commission = add_pos_size * (fee_pct / 100.0)
+                        
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
-                            margin=add_margin, pnl=0.0, notes=f'step {t.grid_step} (size: {add_pos_size:.2f} USDT)'
+                            margin=add_margin, pnl=-add_commission, notes=f'step {t.grid_step} (size: {add_pos_size:.2f} USDT, fee: {add_commission:.4f})'
                         )
                         session.add(history)
-                        log.info('GRID ADD %s %s @ %.6f (step %d)', t.side, t.symbol, price, t.grid_step)
+                        log.info('GRID ADD %s %s @ %.6f (step %d, fee %.4f)', t.side, t.symbol, price, t.grid_step, add_commission)
                         await session.commit()
 
-                # --- РАСЧЕТ PnL И ИЗМЕНЕНИЯ ЦЕНЫ ---
+                # --- РАСЧЕТ PnL (с учетом комиссии) ---
                 if t.side == 'LONG':
                     change_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
                     change_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
                 
-                # Виртуальный PnL в USDT
-                t.pnl = t.total_margin * (change_pct / 100.0) * t.leverage
+                # Комиссия на вход (уже была оплачена при открытии) + комиссия на выход (если закроем сейчас)
+                # Упрощенно: комиссия = (total_margin * leverage * fee_pct / 100) * 2 (вход + выход)
+                position_size = t.total_margin * t.leverage
+                total_commission = position_size * (fee_pct / 100.0) * 2
+                
+                # Виртуальный PnL в USDT минус комиссия
+                t.pnl = (t.total_margin * (change_pct / 100.0) * t.leverage) - total_commission
                 
                 # --- ВЫХОД ---
                 exit_pct = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 15.0))
                 
-                # Если позиция уже пуста — закрываем
                 if t.total_qty < 0.001:
                     t.status = 'CLOSED'
                     t.closed_at = datetime.datetime.utcnow()
                     await session.commit()
                     continue
                 
-                # Проверяем, было ли уже частичное закрытие недавно (в последние 5 минут)
                 last_history = await session.execute(
                     select(TradeHistory).where(TradeHistory.trade_id == t.id).order_by(TradeHistory.ts.desc()).limit(1)
                 )
@@ -323,16 +331,19 @@ class TradingBot:
                     (time.time() - last_h.ts.timestamp()) < 300
                 )
                 
-                log.info(f'CHECK {t.symbol}: change_pct={change_pct:.2f}%, exit_pct={exit_pct}% (cfg={cfg.initial_exit_pct if cfg else None}, gs={gs.initial_exit_pct if gs else None}), partial={already_partial}')
-                
                 if change_pct >= exit_pct and not already_partial:
                     close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
                     closed_qty = t.total_qty * (close_pct / 100.0)
                     
                     if t.side == 'LONG':
-                        closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
+                        gross_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
                     else:
-                        closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
+                        gross_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
+                    
+                    # Комиссия за выход (на закрытую часть)
+                    closed_position_size = closed_qty * price
+                    close_commission = closed_position_size * (fee_pct / 100.0)
+                    closed_pnl = gross_pnl - close_commission
                     
                     t.total_qty -= closed_qty
                     t.total_margin -= (closed_qty * t.avg_entry_price / t.leverage)
@@ -341,17 +352,18 @@ class TradingBot:
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
                         action = 'FULL_CLOSE'
-                        log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
+                        log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT (fee %.4f)', t.side, t.symbol, price, closed_pnl, close_commission)
                     else:
-                        t.grid_step = 0  # Сброс сетки
+                        t.grid_step = 0
                         action = 'PARTIAL_CLOSE'
-                        log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT, grid reset', t.side, t.symbol, price, close_pct, closed_pnl)
+                        log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT (fee %.4f)', t.side, t.symbol, price, close_pct, closed_pnl, close_commission)
                     
                     history = TradeHistory(
                         trade_id=t.id, action=action, price=price, qty=closed_qty,
-                        margin=t.total_margin, pnl=closed_pnl, notes=f'close {close_pct}% (change {change_pct:.2f}%)'
+                        margin=t.total_margin, pnl=closed_pnl, notes=f'close {close_pct}% (change {change_pct:.2f}%, fee {close_commission:.4f})'
                     )
                     session.add(history)
             await session.commit()
+
 
 trading_bot = None

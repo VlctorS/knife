@@ -39,6 +39,7 @@ class Settings(Base):
     exit_contract_pct: Mapped[float] = mapped_column(Float, default=50.0)
     position_size_entry: Mapped[float] = mapped_column(Float, default=6.0)
     position_size_grid: Mapped[float] = mapped_column(Float, default=6.0)
+    fee_pct: Mapped[float] = mapped_column(Float, default=0.055)  # <-- Комиссия в %
 
 class SymbolStat(Base):
     __tablename__ = 'symbol_stats'
