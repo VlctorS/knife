@@ -265,7 +265,7 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
                 
-                # --- 1. УСРЕДНЕНИЕ ---
+                # --- 1. ЛОГИКА УСРЕДНЕНИЯ ---
                 if t.grid_step < t.max_steps:
                     start_pct = (cfg.grid_step_pct if cfg and cfg.grid_step_pct > 0 else (gs.grid_step_pct if gs else 5.0))
                     mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs else 2.5))
@@ -280,6 +280,7 @@ class TradingBot:
                     if can_grid:
                         add_pos_size = (cfg.position_size_grid if cfg and cfg.position_size_grid > 0 else (gs.position_size_grid if gs else MIN_POS_SIZE))
                         add_pos_size = max(MIN_POS_SIZE, add_pos_size)
+                        
                         add_margin = add_pos_size / t.leverage
                         add_qty = add_pos_size / price
                         
@@ -290,6 +291,7 @@ class TradingBot:
                         t.avg_entry_price = (t.avg_entry_price * old_qty + price * add_qty) / t.total_qty
                         
                         add_commission = add_pos_size * (fee_pct / 100.0)
+                        
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
                             margin=add_margin, pnl=-add_commission, notes=f'step {t.grid_step} (size: {add_pos_size:.2f} USDT)'
@@ -297,7 +299,7 @@ class TradingBot:
                         session.add(history)
                         await session.commit() 
 
-                # --- 2. PnL ---
+                # --- 2. РАСЧЕТ PnL ---
                 if t.side == 'LONG':
                     change_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
@@ -307,11 +309,12 @@ class TradingBot:
                 total_commission = position_size * (fee_pct / 100.0) * 2
                 t.pnl = (t.total_margin * (change_pct / 100.0) * t.leverage) - total_commission
                 
-                # --- 3. СТУПЕНЧАТЫЙ ВЫХОД ---
+                # --- 3. СТУПЕНЧАТЫЙ ВЫХОД (С МНОЖИТЕЛЕМ) ---
                 start_exit = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 3.0))
                 exit_mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs and gs.grid_step_multiplier > 0 else 2.5))
                 close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
                 
+                # Считаем порог с учетом шага выхода
                 target_exit_pct = start_exit * (exit_mult ** t.exit_step)
                 
                 if change_pct >= target_exit_pct:
@@ -324,7 +327,7 @@ class TradingBot:
                         t.closed_at = datetime.datetime.utcnow()
                     else:
                         action = 'PARTIAL_CLOSE'
-                        t.exit_step += 1
+                        t.exit_step += 1  # <--- УВЕЛИЧИВАЕМ ШАГ ВЫХОДА
                     
                     if t.side == 'LONG':
                         closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
