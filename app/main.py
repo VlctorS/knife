@@ -127,13 +127,13 @@ async def api_stats(limit: int = 50):
 @app.get('/api/trades')
 async def api_trades(limit: int = 100):
     async with SessionLocal() as session:
-        # Только открытые (PARTIAL тоже считаем открытыми, пока не закрыты полностью)
         r = await session.execute(
             select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL'])).order_by(Trade.opened_at.desc()).limit(limit)
         )
         items = []
         for t in r.scalars().all():
-            if t.avg_entry_price > 0 and t.current_price > 0:
+            # Безопасный расчет change_pct
+            if t.avg_entry_price and t.current_price and t.avg_entry_price > 0:
                 if t.side == 'LONG':
                     change_pct = (t.current_price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
@@ -142,13 +142,21 @@ async def api_trades(limit: int = 100):
                 change_pct = 0
             
             items.append({
-                'id': t.id, 'symbol': t.symbol, 'side': t.side,
-                'entry_price': t.entry_price, 'avg_entry_price': t.avg_entry_price,
-                'current_price': t.current_price, 'grid_step': t.grid_step,
-                'total_qty': t.total_qty, 'total_margin': t.total_margin,
-                'status': t.status, 'pnl': t.pnl, 'leverage': t.leverage,
+                'id': t.id,
+                'symbol': t.symbol,
+                'side': t.side,
+                'entry_price': t.entry_price or 0,
+                'avg_entry_price': t.avg_entry_price or 0,
+                'current_price': t.current_price or 0,
+                'grid_step': t.grid_step or 0,
+                'total_qty': t.total_qty or 0,
+                'total_margin': t.total_margin or 0,
+                'status': t.status or 'OPEN',
+                'pnl': t.pnl or 0,
+                'leverage': t.leverage or 10,
                 'change_pct': round(change_pct, 2),
                 'opened_at': t.opened_at.isoformat() if t.opened_at else None,
+                'closed_at': t.closed_at.isoformat() if t.closed_at else None,
             })
         return {'items': items}
 
