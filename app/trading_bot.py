@@ -91,11 +91,14 @@ class TradingBot:
                     stat = await session.get(SymbolStat, sym)
                     
                     # --- ЛОГИКА ВХОДА ---
+                                        # 1. Приоритет: жесткий ручной % входа
                     if cfg and cfg.entry_pct > 0:
                         threshold = cfg.entry_pct
                     else:
+                        # 2. Авто-расчет
                         auto_th = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else 5.0
-                        min_th = cfg.min_entry_pct if cfg and cfg.min_entry_pct > 0 else 5.0
+                        # 3. Нижняя граница из настроек (или 5%)
+                        min_th = cfg.min_entry_pct if (cfg and cfg.min_entry_pct > 0) else 5.0
                         threshold = max(auto_th, min_th)
                     # --------------------
                     
