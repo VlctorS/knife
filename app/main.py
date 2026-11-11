@@ -149,6 +149,7 @@ async def api_stats(limit: int = 50):
                     "max_prostrel_pct": round(s.max_prostrel_pct, 2),
                     "freq_per_day": round(s.freq_per_day, 2),
                     "entry_long_pct": round(s.entry_long_pct, 2),
+                    "max_leverage": s.max_leverage,  # <-- ДОБАВИТЬ ЭТУ СТРОКУ
                 }
                 for s in r.scalars().all()
             ]
