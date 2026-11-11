@@ -1,6 +1,11 @@
 import asyncio
 import json
 import logging
+import os
+import time
+import hmac
+import hashlib
+from urllib.parse import urlencode
 from typing import List
 
 import aiohttp
@@ -8,8 +13,12 @@ import websockets
 
 log = logging.getLogger(__name__)
 
-REST_BASE = 'https://api.bytick.com'
-WS_URL = 'wss://stream.bytick.com/v5/public/linear'
+REST_BASE = 'https://api.bybit.com'
+WS_URL = 'wss://stream.bybit.com/v5/public/linear'
+
+# API-ключи (берутся из Render Environment)
+API_KEY = os.getenv('BYBIT_API_KEY', '')
+API_SECRET = os.getenv('BYBIT_API_SECRET', '')
 
 
 async def _read_json(resp):
@@ -19,9 +28,42 @@ async def _read_json(resp):
     return json.loads(raw)
 
 
+def _sign_request(params: dict) -> dict:
+    """Добавляет заголовки с подписью для авторизации на Bybit."""
+    if not API_KEY or not API_SECRET:
+        return {}
+    timestamp = str(int(time.time() * 1000))
+    param_str = urlencode(params)
+    # Для GET-запросов подпись формируется из timestamp + API_KEY + RECV_WINDOW + queryString
+    payload = timestamp + API_KEY + '5000' + param_str
+    signature = hmac.new(
+        API_SECRET.encode('utf-8'),
+        payload.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    return {
+        'X-BAPI-API-KEY': API_KEY,
+        'X-BAPI-TIMESTAMP': timestamp,
+        'X-BAPI-RECV-WINDOW': '5000',
+        'X-BAPI-SIGN': signature,
+    }
+
+
 class BybitREST:
     def __init__(self, session):
         self._s = session
+        self._s.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Accept': 'application/json',
+        })
+
+    async def _get(self, path: str, params: dict):
+        headers = _sign_request(params)
+        async with self._s.get(REST_BASE + path, params=params, headers=headers) as r:
+            if r.status == 403:
+                log.error('403 Forbidden on %s. API keys: %s', path, 'SET' if API_KEY else 'NOT SET')
+            r.raise_for_status()
+            return await _read_json(r)
 
     async def get_instruments(self):
         out = []
@@ -30,9 +72,7 @@ class BybitREST:
             params = {'category': 'linear'}
             if cursor:
                 params['cursor'] = cursor
-            async with self._s.get(REST_BASE + '/v5/market/instruments-info', params=params) as r:
-                r.raise_for_status()
-                data = await _read_json(r)
+            data = await self._get('/v5/market/instruments-info', params)
             if data.get('retCode') != 0:
                 log.warning('instruments retCode=%s', data.get('retCode'))
                 break
@@ -59,9 +99,7 @@ class BybitREST:
             if cursor:
                 params['cursor'] = cursor
             try:
-                async with self._s.get(REST_BASE + '/v5/market/risk-limit', params=params) as r:
-                    r.raise_for_status()
-                    data = await _read_json(r)
+                data = await self._get('/v5/market/risk-limit', params)
             except Exception as e:
                 log.warning('risk-limit page %d failed: %r', pages, e)
                 break
@@ -95,21 +133,14 @@ class BybitREST:
             'interval': '60',
             'limit': str(min(limit, 1000)),
         }
-        async with self._s.get(REST_BASE + '/v5/market/kline', params=params) as r:
-            r.raise_for_status()
-            data = await _read_json(r)
+        data = await self._get('/v5/market/kline', params)
         lst = data.get('result', {}).get('list', [])
         lst.reverse()
         return lst
 
-
     async def get_tickers(self):
         params = {'category': 'linear'}
-        async with self._s.get(
-            f'{REST_BASE}/v5/market/tickers', params=params
-        ) as r:
-            r.raise_for_status()
-            data = await _read_json(r)
+        data = await self._get('/v5/market/tickers', params)
         if data.get('retCode') != 0:
             log.warning('tickers retCode=%s retMsg=%s',
                         data.get('retCode'), data.get('retMsg'))

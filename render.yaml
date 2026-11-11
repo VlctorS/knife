@@ -21,3 +21,10 @@ services:
         value: "3600"
       - key: LOG_LEVEL
         value: "INFO"
+      # Секретные переменные (значения добавятся в Render)
+      - key: DATABASE_URL
+        sync: false
+      - key: BYBIT_API_KEY
+        sync: false
+      - key: BYBIT_API_SECRET
+        sync: false
