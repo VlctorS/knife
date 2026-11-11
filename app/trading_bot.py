@@ -97,11 +97,13 @@ class TradingBot:
                 # 1. Жесткий вход (если задан)
                 if cfg and cfg.entry_pct > 0:
                     threshold = cfg.entry_pct
+                # 2. Минимальный порог из настроек (если задан)
+                elif cfg and cfg.min_entry_pct > 0:
+                    threshold = cfg.min_entry_pct
+                # 3. Глобальный порог (но не меньше 5%)
                 else:
-                    # 2. Авто-расчет (85% от истории), но не меньше min_entry_pct
-                    auto_th = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else 5.0
-                    min_th = cfg.min_entry_pct if cfg and cfg.min_entry_pct > 0 else 5.0
-                    threshold = max(auto_th, min_th)
+                    global_th = settings.threshold * 100  # 10% из .env
+                    threshold = max(global_th, 5.0)       # но не меньше 5%
                 # --------------------
 
                 if dist <= -threshold:
