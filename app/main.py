@@ -108,20 +108,30 @@ async def api_symbols():
 async def api_stats(limit: int = 50):
     async with SessionLocal() as session:
         r = await session.execute(select(SymbolStat).order_by(SymbolStat.entry_long_pct.desc()).limit(limit))
-        return {
-            'items': [
-                {
-                    'symbol': s.symbol,
-                    'avg_prostrel_pct': round(s.avg_prostrel_pct, 2),
-                    'max_prostrel_pct': round(s.max_prostrel_pct, 2),
-                    'freq_per_day': round(s.freq_per_day, 2),
-                    'entry_long_pct': round(s.entry_long_pct, 2),
-                    'auto_threshold': round(max(3.0, s.avg_prostrel_pct * 0.85), 2), # <-- авто-порог
-                    'max_leverage': s.max_leverage,
-                }
-                for s in r.scalars().all()
-            ]
-        }
+        configs_res = await session.execute(select(SymbolConfig))
+        configs = {c.symbol: c for c in configs_res.scalars().all()}
+        
+        items = []
+        for s in r.scalars().all():
+            cfg = configs.get(s.symbol)
+            
+            if cfg and cfg.entry_pct > 0:
+                effective_entry = cfg.entry_pct
+            else:
+                auto_th = s.avg_prostrel_pct * 0.85 if s.avg_prostrel_pct > 0 else 5.0
+                min_th = cfg.min_entry_pct if cfg and cfg.min_entry_pct > 0 else 5.0
+                effective_entry = max(auto_th, min_th)
+            
+            items.append({
+                'symbol': s.symbol,
+                'avg_prostrel_pct': round(s.avg_prostrel_pct, 2),
+                'max_prostrel_pct': round(s.max_prostrel_pct, 2),
+                'freq_per_day': round(s.freq_per_day, 2),
+                'entry_long_pct': round(effective_entry, 2),
+                'max_leverage': s.max_leverage,
+            })
+            
+        return {'items': items}
 
 @app.get('/api/trades')
 async def api_trades(limit: int = 100):
@@ -250,7 +260,6 @@ async def api_post_settings(request: Request):
 
 @app.post("/api/clear_data")
 async def api_clear_data():
-    """Очищает базу сделок и сигналов."""
     async with SessionLocal() as session:
         await session.execute(delete(Trade))
         await session.execute(delete(TradeHistory))

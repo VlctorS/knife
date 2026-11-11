@@ -139,6 +139,14 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   if (t.dataset.tab === 'settings') loadSettings();
 }));
 
+// Закрытие модальных окон по Esc
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    document.getElementById('config-modal').classList.remove('active');
+    document.getElementById('history-modal').classList.remove('active');
+  }
+});
+
 async function loadStatus() {
   const d = await (await fetch('/api/status')).json();
   document.getElementById('p-threshold').textContent = 'Порог ±' + d.threshold_pct + '%';
