@@ -8,8 +8,8 @@ import websockets
 
 log = logging.getLogger(__name__)
 
-REST_BASE = 'https://api.bybit.com'
-WS_URL = 'wss://stream.bybit.com/v5/public/linear'
+REST_BASE = 'https://api.bytick.com'
+WS_URL = 'wss://stream.bytick.com/v5/public/linear'
 
 
 async def _read_json(resp):
