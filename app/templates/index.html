@@ -16,7 +16,7 @@ main { padding:24px; }
 .panel { background:#171b23; border:1px solid #252b36; border-radius:12px; overflow:hidden; }
 h2 { margin:0; padding:12px 16px; font-size:14px; font-weight:600; border-bottom:1px solid #252b36; color:#8a93a6; }
 table { width:100%; border-collapse:collapse; font-size:13px; }
-th, td { padding:10px 16px; text-align:left; border-bottom:1px solid #252b36; }
+th, td { padding:10px 16px; text-align:left; border-bottom:1px solid #252b36; white-space:nowrap; }
 th { color:#8a93a6; font-weight:500; font-size:12px; }
 .pump { color:#22c55e; font-weight:600; } .dump { color:#ef4444; font-weight:600; }
 .muted { color:#8a93a6; } .empty { padding:24px; text-align:center; color:#8a93a6; }
@@ -26,7 +26,7 @@ button { background:#2563eb; border:none; color:white; padding:8px 16px; border-
 button:hover { background:#1d4ed8; }
 .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); justify-content:center; align-items:center; z-index: 1000;}
 .modal.active { display:flex; }
-.modal-content { background:#171b23; padding:24px; border-radius:12px; width:400px; border:1px solid #252b36; }
+.modal-content { background:#171b23; padding:24px; border-radius:12px; width:400px; border:1px solid #252b36; max-height: 90vh; overflow-y: auto;}
 </style></head>
 <body>
 <header>
@@ -60,8 +60,13 @@ button:hover { background:#1d4ed8; }
     <tbody id="stats"><tr><td colspan="6" class="empty">Загрузка...</td></tr></tbody></table></div></div>
     
   <div id="tab-trades" class="tab-content"><div class="panel"><h2>Виртуальные сделки (Сетка)</h2>
-    <table><thead><tr><th>Время</th><th>Символ</th><th>Тип</th><th>Вход</th><th>Тек.</th><th>Сетка</th><th>Плечо</th><th>PnL</th></tr></thead>
-    <tbody id="trades"><tr><td colspan="8" class="empty">Нет сделок</td></tr></tbody></table></div></div>
+    <table><thead><tr>
+      <th>Время</th><th>Символ</th><th>Тип</th>
+      <th>Ср. цена</th><th>Тек. цена</th>
+      <th>Кол-во</th><th>Размер (USDT)</th>
+      <th>Сетка</th><th>Плечо</th><th>PnL</th>
+    </tr></thead>
+    <tbody id="trades"><tr><td colspan="10" class="empty">Нет сделок</td></tr></tbody></table></div></div>
     
   <div id="tab-settings" class="tab-content"><div class="panel"><h2>Глобальные настройки</h2>
     <div style="padding:16px">
@@ -139,8 +144,24 @@ async function loadStats() {
 async function loadTrades() {
   const d = await (await fetch('/api/trades?limit=100')).json();
   const tb = document.getElementById('trades');
-  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">Нет сделок</td></tr>'; return; }
-  tb.innerHTML = d.items.map(t => '<tr><td class="muted">'+(t.opened_at?new Date(t.opened_at).toLocaleTimeString():'—')+'</td><td>'+t.symbol+'</td><td class="'+(t.side==='LONG'?'pump':'dump')+'">'+t.side+'</td><td>'+fmtNum(t.avg_entry_price)+'</td><td>'+fmtNum(t.current_price)+'</td><td class="'+(t.grid_step>0?'pump':'')+'">'+t.grid_step+'</td><td>'+(t.leverage||10)+'x</td><td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td></tr>').join('');
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="10" class="empty">Нет сделок</td></tr>'; return; }
+  tb.innerHTML = d.items.map(t => {
+    // Размер позиции = кол-во * текущая цена
+    const position_size = (t.total_qty * t.current_price).toFixed(2);
+    
+    return '<tr>'+
+      '<td class="muted">'+(t.opened_at?new Date(t.opened_at).toLocaleTimeString():'—')+'</td>'+
+      '<td>'+t.symbol+'</td>'+
+      '<td class="'+(t.side==='LONG'?'pump':'dump')+'">'+t.side+'</td>'+
+      '<td>'+fmtNum(t.avg_entry_price)+'</td>'+
+      '<td>'+fmtNum(t.current_price)+'</td>'+
+      '<td>'+fmtNum(t.total_qty, 2)+'</td>'+
+      '<td>'+position_size+'</td>'+
+      '<td class="'+(t.grid_step>0?'pump':'')+'">'+t.grid_step+'</td>'+
+      '<td>'+(t.leverage||10)+'x</td>'+
+      '<td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td>'+
+    '</tr>';
+  }).join('');
 }
 
 async function loadSettings() {
@@ -209,7 +230,7 @@ async function saveConfig() {
   closeModal();
 }
 
-async function tick() { try { await loadStatus(); } catch(e) { console.error(e); } }
+async function tick() { try { await loadStatus(); if(document.getElementById('tab-trades').classList.contains('active')) await loadTrades(); } catch(e) { console.error(e); } }
 tick(); setInterval(tick, 5000);
 </script>
 </body>
