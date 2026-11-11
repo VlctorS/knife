@@ -210,13 +210,18 @@ async def api_post_settings(request: Request):
         if "min_leverage" in data:
             s.min_leverage = float(data["min_leverage"])
         await session.commit()
-        return {"ok": True, "min_turnover": s.min_turnover, "min_leverage": s.min_leverage}
+        
+    # Мгновенно перезагружаем список монет с новыми настройками!
+    asyncio.create_task(monitor._refresh_symbols())
+    
+    return {"ok": True, "min_turnover": s.min_turnover, "min_leverage": s.min_leverage}
 
 
 @app.get("/favicon.ico")
-
 async def favicon():
-    return Response(status_code=204)
+    from fastapi.responses import Response
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🔪</text></svg>'
+    return Response(content=svg, media_type="image/svg+xml")
 
 
 @app.get("/healthz")
