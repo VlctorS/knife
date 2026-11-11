@@ -115,7 +115,8 @@ async def api_stats(limit: int = 50):
         for s in r.scalars().all():
             cfg = configs.get(s.symbol)
             
-            if cfg and cfg.entry_pct > 0:
+            is_manual = bool(cfg and cfg.entry_pct > 0)
+            if is_manual:
                 effective_entry = cfg.entry_pct
             else:
                 auto_th = s.avg_prostrel_pct * 0.85 if s.avg_prostrel_pct > 0 else 5.0
@@ -128,6 +129,7 @@ async def api_stats(limit: int = 50):
                 'max_prostrel_pct': round(s.max_prostrel_pct, 2),
                 'freq_per_day': round(s.freq_per_day, 2),
                 'entry_long_pct': round(effective_entry, 2),
+                'is_manual': is_manual,  # <-- Флаг
                 'max_leverage': s.max_leverage,
             })
             

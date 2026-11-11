@@ -170,8 +170,23 @@ async function loadStats() {
   const d = await (await fetch('/api/stats?limit=50')).json();
   const tb = document.getElementById('stats');
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Нет данных</td></tr>'; return; }
-  tb.innerHTML = d.items.map(s => '<tr><td>'+s.symbol+'</td><td>'+s.avg_prostrel_pct+'%</td><td>'+s.max_prostrel_pct+'%</td><td>'+s.entry_long_pct+'%</td><td>'+(s.max_leverage||10)+'x</td><td><button style="padding:4px 8px; font-size:12px;" onclick="openConfig(\''+s.symbol+'\')">Настроить</button></td></tr>').join('');
+  
+  tb.innerHTML = d.items.map(s => {
+    // Если ручной — красный и со звездочкой, иначе обычный
+    const entryClass = s.is_manual ? 'style="color:#ef4444; font-weight:600;"' : '';
+    const entryText = s.is_manual ? s.entry_long_pct + '% *' : s.entry_long_pct + '%';
+    
+    return '<tr>' +
+      '<td>'+s.symbol+'</td>' +
+      '<td>'+s.avg_prostrel_pct+'%</td>' +
+      '<td>'+s.max_prostrel_pct+'%</td>' +
+      '<td '+entryClass+'>'+entryText+'</td>' +
+      '<td>'+(s.max_leverage||10)+'x</td>' +
+      '<td><button style="padding:4px 8px; font-size:12px;" onclick="openConfig(\''+s.symbol+'\')">Настроить</button></td>' +
+    '</tr>';
+  }).join('');
 }
+
 
 async function loadTrades() {
   const d = await (await fetch('/api/trades?limit=100')).json();
@@ -291,7 +306,6 @@ async function openConfig(symbol) {
 async function saveConfig() {
   const symbol = document.getElementById('cfg-symbol').value;
   
-  // Принудительно не меньше 6 перед отправкой
   const posEntry = Math.max(6, parseFloat(document.getElementById('cfg-position_size_entry').value) || 6);
   const posGrid = Math.max(6, parseFloat(document.getElementById('cfg-position_size_grid').value) || 6);
   
@@ -315,6 +329,11 @@ async function saveConfig() {
   });
   alert('Настройки для ' + symbol + ' сохранены!');
   closeModal();
+  
+  // Принудительно обновляем таблицу, если мы на вкладке "Статистика"
+  if (document.getElementById('tab-stats').classList.contains('active')) {
+    loadStats();
+  }
 }
 
 async function tick() { 
