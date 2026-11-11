@@ -206,8 +206,8 @@ async def api_get_configs():
                     'max_steps': c.max_steps,
                     'initial_exit_pct': c.initial_exit_pct,
                     'exit_contract_pct': c.exit_contract_pct,
-                    'margin_entry': c.margin_entry,
-                    'margin_grid': c.margin_grid,
+                    'position_size_entry': c.position_size_entry,
+                    'position_size_grid': c.position_size_grid,
                 }
                 for c in r.scalars().all()
             ]
@@ -221,7 +221,7 @@ async def api_post_configs(request: Request):
         if not cfg:
             cfg = SymbolConfig(symbol=data["symbol"])
             session.add(cfg)
-        for k in ["entry_pct", "min_entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_contract_pct", "margin_entry", "margin_grid"]:
+        for k in ["entry_pct", "min_entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_contract_pct", "position_size_entry", "position_size_grid"]:
             if k in data:
                 setattr(cfg, k, float(data[k]) if k != "max_steps" else int(data[k]))
         await session.commit()
@@ -238,8 +238,8 @@ async def api_get_settings():
         return {
             "min_turnover": s.min_turnover, 
             "min_leverage": s.min_leverage,
-            "margin_entry": s.margin_entry,
-            "margin_grid": s.margin_grid
+            "position_size_entry": s.position_size_entry,
+            "position_size_grid": s.position_size_grid
         }
 
 @app.post("/api/settings")
@@ -252,8 +252,8 @@ async def api_post_settings(request: Request):
             session.add(s)
         if "min_turnover" in data: s.min_turnover = float(data["min_turnover"])
         if "min_leverage" in data: s.min_leverage = float(data["min_leverage"])
-        if "margin_entry" in data: s.margin_entry = float(data["margin_entry"])
-        if "margin_grid" in data: s.margin_grid = float(data["margin_grid"])
+        if "position_size_entry" in data: s.position_size_entry = float(data["position_size_entry"])
+        if "position_size_grid" in data: s.position_size_grid = float(data["position_size_grid"])
         await session.commit()
     asyncio.create_task(monitor._refresh_symbols())
     return {"ok": True}

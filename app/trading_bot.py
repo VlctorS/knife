@@ -132,15 +132,17 @@ class TradingBot:
             await session.commit()
 
     async def _open_trade(self, session, sym, side, price, max_lev, cfg):
-        margin = 1.0
-        if cfg and cfg.margin_entry > 0:
-            margin = cfg.margin_entry
+        # Размер позиции на вход
+        pos_size = 0.0
+        if cfg and cfg.position_size_entry > 0:
+            pos_size = cfg.position_size_entry
         else:
             gs = await session.get(Settings, 1)
-            margin = gs.margin_entry if gs else 1.0
+            pos_size = gs.position_size_entry if gs else 25.0
                 
-        position_size = margin * max_lev
-        qty = position_size / price
+        # Маржа = размер позиции / плечо
+        margin = pos_size / max_lev
+        qty = pos_size / price
 
         trade = Trade(
             symbol=sym, side=side, entry_price=price, avg_entry_price=price,
@@ -153,10 +155,10 @@ class TradingBot:
         
         history = TradeHistory(
             trade_id=trade.id, action='OPEN', price=price, qty=qty,
-            margin=margin, pnl=0.0, notes=f'{side} open'
+            margin=margin, pnl=0.0, notes=f'{side} open (size: {pos_size} USDT)'
         )
         session.add(history)
-        log.info('OPEN %s %s @ %.6f (size: %.2f USDT, lev: %.0fx)', side, sym, price, position_size, max_lev)
+        log.info('OPEN %s %s @ %.6f (size: %.2f USDT, margin: %.2f, lev: %.0fx)', side, sym, price, pos_size, margin, max_lev)
 
     async def update_open_trades(self):
         async with SessionLocal() as session:
@@ -179,19 +181,26 @@ class TradingBot:
                     if (t.side == 'LONG' and price <= t.entry_price * (1 - step_pct / 100)) or \
                        (t.side == 'SHORT' and price >= t.entry_price * (1 + step_pct / 100)):
                         
+                        # Размер позиции на усреднение
+                        add_pos_size = 0.0
+                        if cfg and cfg.position_size_grid > 0:
+                            add_pos_size = cfg.position_size_grid
+                        else:
+                            gs = await session.get(Settings, 1)
+                            add_pos_size = gs.position_size_grid if gs else 25.0
+                        
+                        add_margin = add_pos_size / t.leverage
+                        add_qty = add_pos_size / price
+                        
                         old_qty = t.total_qty
                         t.grid_step += 1
-                        
-                        add_margin = cfg.margin_grid if (cfg and cfg.margin_grid > 0) else t.total_margin
-                        
-                        add_qty = (add_margin * t.leverage) / price
                         t.total_qty += add_qty
                         t.total_margin += add_margin
                         t.avg_entry_price = (t.avg_entry_price * old_qty + price * add_qty) / t.total_qty
                         
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
-                            margin=add_margin, pnl=0.0, notes=f'step {t.grid_step}'
+                            margin=add_margin, pnl=0.0, notes=f'step {t.grid_step} (size: {add_pos_size} USDT)'
                         )
                         session.add(history)
                         log.info('GRID ADD %s %s @ %.6f (step %d)', t.side, t.symbol, price, t.grid_step)
