@@ -27,6 +27,7 @@ button:hover { background:#1d4ed8; }
 .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); justify-content:center; align-items:center; z-index: 1000;}
 .modal.active { display:flex; }
 .modal-content { background:#171b23; padding:24px; border-radius:12px; width:400px; border:1px solid #252b36; max-height: 90vh; overflow-y: auto;}
+#history-content table { min-width: 700px; }
 </style></head>
 <body>
 <header>
@@ -52,7 +53,7 @@ button:hover { background:#1d4ed8; }
   </div>
   
   <div id="tab-alerts" class="tab-content active"><div class="panel"><h2>Сигналы пампов/дампов</h2>
-    <table><thead><tr><th>Время</th><th>Символ</th><th>Тип</th><th>ТФ</th><th>Изм</th><th>Цена</th></tr></thead>
+    <table><thead><tr><th>Время (МСК)</th><th>Символ</th><th>Тип</th><th>ТФ</th><th>Изм</th><th>Цена</th></tr></thead>
     <tbody id="alerts"><tr><td colspan="6" class="empty">Нет сигналов</td></tr></tbody></table></div></div>
     
   <div id="tab-stats" class="tab-content"><div class="panel"><h2>Статистика монет</h2>
@@ -61,7 +62,7 @@ button:hover { background:#1d4ed8; }
     
   <div id="tab-trades" class="tab-content"><div class="panel"><h2>Виртуальные сделки (Сетка)</h2>
     <table><thead><tr>
-      <th>Время</th><th>Символ</th><th>Тип</th>
+      <th>Время (МСК)</th><th>Символ</th><th>Тип</th>
       <th>Ср. цена</th><th>Тек. цена</th>
       <th>Кол-во</th><th>Размер (USDT)</th>
       <th>Сетка</th><th>Плечо</th><th>PnL</th><th></th>
@@ -114,7 +115,7 @@ button:hover { background:#1d4ed8; }
   </div>
 </div>
 
-<!-- Модальное окно истории сделки -->
+<!-- Модальное окно истории сделки (РАСШИРЕНО) -->
 <div class="modal" id="history-modal">
   <div class="modal-content" style="width: 900px; max-width: 95vw;">
     <h2 id="history-title">История сделки</h2>
@@ -155,14 +156,18 @@ async function loadStatus() {
   document.getElementById('s-symbols').textContent = d.symbols_count;
   document.getElementById('s-alerts').textContent = d.alerts_count;
   document.getElementById('s-uptime').textContent = d.uptime_sec + 'с';
-  document.getElementById('updated').textContent = 'обновлено ' + new Date().toLocaleTimeString();
+  document.getElementById('updated').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
 }
 
 async function loadAlerts() {
   const d = await (await fetch('/api/alerts?limit=100')).json();
   const tb = document.getElementById('alerts');
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Нет сигналов</td></tr>'; return; }
-  tb.innerHTML = d.items.map(a => '<tr><td class="muted">'+new Date(a.ts*1000).toLocaleTimeString()+'</td><td>'+a.symbol+'</td><td class="'+(a.kind==='PUMP'?'pump':'dump')+'">'+a.kind+'</td><td>'+(a.timeframe||'')+'</td><td>'+a.change_pct.toFixed(2)+'%</td><td>'+fmtNum(a.price_now)+'</td></tr>').join('');
+  tb.innerHTML = d.items.map(a => {
+    // Время в МСК
+    const timeStr = new Date(a.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
+    return '<tr><td class="muted">'+timeStr+'</td><td>'+a.symbol+'</td><td class="'+(a.kind==='PUMP'?'pump':'dump')+'">'+a.kind+'</td><td>'+(a.timeframe||'')+'</td><td>'+a.change_pct.toFixed(2)+'%</td><td>'+fmtNum(a.price_now)+'</td></tr>';
+  }).join('');
 }
 
 async function loadStats() {
@@ -193,8 +198,9 @@ async function loadTrades() {
   
   tb.innerHTML = d.items.map(t => {
     const position_size = (t.total_qty * t.current_price).toFixed(2);
+    const timeStr = t.opened_at ? new Date(t.opened_at).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
-      '<td class="muted">'+(t.opened_at?new Date(t.opened_at).toLocaleTimeString():'—')+'</td>'+
+      '<td class="muted">'+timeStr+'</td>'+
       '<td>'+t.symbol+'</td>'+
       '<td class="'+(t.side==='LONG'?'pump':'dump')+'">'+t.side+'</td>'+
       '<td>'+fmtNum(t.avg_entry_price)+'</td>'+
@@ -222,17 +228,21 @@ async function openHistory(tradeId, symbol) {
   
   document.getElementById('history-content').innerHTML = `
     <table style="width:100%">
-      <thead><tr><th>Время</th><th>Действие</th><th>Цена</th><th>Кол-во</th><th>PnL</th></tr></thead>
+      <thead><tr><th>Время (МСК)</th><th>Действие</th><th>Цена</th><th>Кол-во</th><th>PnL</th></tr></thead>
       <tbody>
-        ${d.items.map(h => `
-          <tr>
-            <td class="muted">${new Date(h.ts).toLocaleString()}</td>
-            <td>${h.action} (${h.notes})</td>
-            <td>${fmtNum(h.price)}</td>
-            <td>${fmtNum(h.qty, 2)}</td>
-            <td class="${h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : '')}">${fmtNum(h.pnl, 4)}</td>
-          </tr>
-        `).join('')}
+        ${d.items.map(h => {
+          // Время в МСК
+          const timeStr = new Date(h.ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+          return `
+            <tr>
+              <td class="muted">${timeStr}</td>
+              <td>${h.action} (${h.notes})</td>
+              <td>${fmtNum(h.price)}</td>
+              <td>${fmtNum(h.qty, 2)}</td>
+              <td class="${h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : '')}">${fmtNum(h.pnl, 4)}</td>
+            </tr>
+          `;
+        }).join('')}
       </tbody>
     </table>
   `;
