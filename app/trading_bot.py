@@ -13,7 +13,7 @@ from .config import settings
 
 log = logging.getLogger(__name__)
 
-MIN_POS_SIZE = 6.0  # Минимальный размер позиции (USDT)
+MIN_POS_SIZE = 6.0
 
 def _get_upsert(model, values, pk_col):
     is_pg = engine.url.drivername.startswith('postgresql')
@@ -82,6 +82,13 @@ class TradingBot:
             if not symbols_to_check:
                 return
 
+            # Глобальные настройки
+            gs = await session.get(Settings, 1)
+            if not gs:
+                gs = Settings(id=1)
+                session.add(gs)
+                await session.commit()
+
             intervals = ['1', '5', '15']
             
             for sym in symbols_to_check:
@@ -90,14 +97,16 @@ class TradingBot:
                     cfg = cfg_res.scalars().first()
                     stat = await session.get(SymbolStat, sym)
                     
-                    # ЛОГИКА ВХОДА
+                    # --- ЛОГИКА ВХОДА ---
+                    # Приоритет: индивидуальный entry_pct > глобальный entry_pct > авто-расчет
                     if cfg and cfg.entry_pct > 0:
-                        # Жесткий процент (приоритет)
                         threshold = cfg.entry_pct
+                    elif gs.entry_pct > 0:
+                        threshold = gs.entry_pct
                     else:
-                        # Авто-расчет (85% от среднего, но не меньше 5%)
                         threshold = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else 5.0
                         threshold = max(threshold, 5.0)
+                    # --------------------
                     
                     for tf in intervals:
                         kl = await self.rest.get_kline(sym, interval=tf, limit=2)
@@ -125,7 +134,8 @@ class TradingBot:
                                 change_pct=change_pct, timeframe=tf + 'm'
                             ))
                             
-                            await self._open_trade(session, sym, side, close_price, state.symbols[sym].max_leverage, cfg, change_pct)                            
+                            await self._open_trade(session, sym, side, close_price, state.symbols[sym].max_leverage, cfg, gs, change_pct)
+                            
                             log.info(f'SIGNAL {kind} {sym} ({tf}m) {change_pct:.2f}% (threshold {threshold:.2f}%) -> OPEN {side}')
                             
                             open_syms.add(sym)
@@ -135,12 +145,11 @@ class TradingBot:
                     log.warning(f'Check entries failed for {sym}: {e}')
             await session.commit()
 
-    async def _open_trade(self, session, sym, side, price, max_lev, cfg, change_pct=None):
-        pos_size = 0.0
+    async def _open_trade(self, session, sym, side, price, max_lev, cfg, gs, change_pct=None):
+        # Приоритет: индивидуальный > глобальный
         if cfg and cfg.position_size_entry > 0:
             pos_size = cfg.position_size_entry
         else:
-            gs = await session.get(Settings, 1)
             pos_size = gs.position_size_entry if gs else MIN_POS_SIZE
         
         pos_size = max(MIN_POS_SIZE, pos_size)
@@ -148,24 +157,39 @@ class TradingBot:
         margin = pos_size / max_lev
         qty = pos_size / price
 
+        # Определяем max_steps (приоритет: индивидуальный > глобальный)
+        if cfg and cfg.max_steps > 0:
+            max_steps = cfg.max_steps
+        else:
+            max_steps = gs.max_steps if gs else 10
+
         trade = Trade(
             symbol=sym, side=side, entry_price=price, avg_entry_price=price,
             total_qty=qty, total_margin=margin, status='OPEN',
-            grid_step=0, max_steps=cfg.max_steps if cfg else 10,
+            grid_step=0, max_steps=max_steps,
             leverage=max_lev, current_price=price,
         )
         session.add(trade)
         await session.flush()
         
+        notes = f'{side} open (size: {pos_size:.2f} USDT)'
+        if change_pct is not None:
+            notes += f', change: {change_pct:.2f}%'
+            
         history = TradeHistory(
             trade_id=trade.id, action='OPEN', price=price, qty=qty,
-            margin=margin, pnl=0.0, notes=f'{side} open (size: {pos_size:.2f} USDT, change: {change_pct:.2f}%)' if change_pct else f'{side} open (size: {pos_size:.2f} USDT)'
+            margin=margin, pnl=0.0, notes=notes
         )
         session.add(history)
         log.info('OPEN %s %s @ %.6f (size: %.2f USDT, margin: %.2f, lev: %.0fx)', side, sym, price, pos_size, margin, max_lev)
 
     async def update_open_trades(self):
         async with SessionLocal() as session:
+            # Глобальные настройки
+            gs = await session.get(Settings, 1)
+            if not gs:
+                gs = Settings(id=1)
+            
             result = await session.execute(select(Trade).where(Trade.status == 'OPEN'))
             for t in result.scalars().all():
                 st = state.symbols.get(t.symbol)
@@ -178,18 +202,26 @@ class TradingBot:
                 cfg = cfg_res.scalars().first()
                 
                 if t.grid_step < t.max_steps:
-                    start_pct = cfg.grid_step_pct if cfg else 5.0
-                    mult = cfg.grid_step_multiplier if cfg else 2.5
+                    # Приоритет: индивидуальный > глобальный
+                    if cfg and cfg.grid_step_pct > 0:
+                        start_pct = cfg.grid_step_pct
+                    else:
+                        start_pct = gs.grid_step_pct if gs else 5.0
+                    
+                    if cfg and cfg.grid_step_multiplier > 0:
+                        mult = cfg.grid_step_multiplier
+                    else:
+                        mult = gs.grid_step_multiplier if gs else 2.5
+                    
                     step_pct = start_pct * (mult ** t.grid_step)
                     
-                    if (t.side == 'LONG' and price <= t.entry_price * (1 - step_pct / 100)) or \
-                       (t.side == 'SHORT' and price >= t.entry_price * (1 + step_pct / 100)):
+                    # Триггер от средней цены
+                    if (t.side == 'LONG' and price <= t.avg_entry_price * (1 - step_pct / 100)) or \
+                       (t.side == 'SHORT' and price >= t.avg_entry_price * (1 + step_pct / 100)):
                         
-                        add_pos_size = 0.0
                         if cfg and cfg.position_size_grid > 0:
                             add_pos_size = cfg.position_size_grid
                         else:
-                            gs = await session.get(Settings, 1)
                             add_pos_size = gs.position_size_grid if gs else MIN_POS_SIZE
                         
                         add_pos_size = max(MIN_POS_SIZE, add_pos_size)
@@ -217,9 +249,18 @@ class TradingBot:
                     pnl_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
                 t.pnl = t.total_margin * (pnl_pct / 100.0) * t.leverage
                 
-                exit_pct = cfg.initial_exit_pct if cfg else 15.0
+                # Приоритет: индивидуальный > глобальный
+                if cfg and cfg.initial_exit_pct > 0:
+                    exit_pct = cfg.initial_exit_pct
+                else:
+                    exit_pct = gs.initial_exit_pct if gs else 15.0
+                    
                 if pnl_pct >= exit_pct:
-                    close_pct = cfg.exit_contract_pct if cfg else 50.0
+                    if cfg and cfg.exit_contract_pct > 0:
+                        close_pct = cfg.exit_contract_pct
+                    else:
+                        close_pct = gs.exit_contract_pct if gs else 50.0
+                        
                     closed_qty = t.total_qty * (close_pct / 100.0)
                     
                     if t.side == 'LONG':

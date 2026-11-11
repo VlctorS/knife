@@ -110,17 +110,23 @@ async def api_stats(limit: int = 50):
         r = await session.execute(select(SymbolStat).order_by(SymbolStat.entry_long_pct.desc()).limit(limit))
         configs_res = await session.execute(select(SymbolConfig))
         configs = {c.symbol: c for c in configs_res.scalars().all()}
+        gs = await session.get(Settings, 1)
         
         items = []
         for s in r.scalars().all():
             cfg = configs.get(s.symbol)
             
-            is_manual = bool(cfg and cfg.entry_pct > 0)
-            if is_manual:
+            # Приоритет: индивидуальный > глобальный > авто
+            if cfg and cfg.entry_pct > 0:
                 effective_entry = cfg.entry_pct
+                is_manual = True
+            elif gs and gs.entry_pct > 0:
+                effective_entry = gs.entry_pct
+                is_manual = True
             else:
                 auto_th = s.avg_prostrel_pct * 0.85 if s.avg_prostrel_pct > 0 else 5.0
                 effective_entry = max(auto_th, 5.0)
+                is_manual = False
             
             items.append({
                 'symbol': s.symbol,
@@ -201,7 +207,6 @@ async def api_get_configs():
                 {
                     'symbol': c.symbol,
                     'entry_pct': c.entry_pct,
-                    'min_entry_pct': c.min_entry_pct,
                     'grid_step_pct': c.grid_step_pct,
                     'grid_step_multiplier': c.grid_step_multiplier,
                     'max_steps': c.max_steps,
@@ -222,13 +227,9 @@ async def api_post_configs(request: Request):
         if not cfg:
             cfg = SymbolConfig(symbol=data["symbol"])
             session.add(cfg)
-        for k in ["entry_pct", "min_entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_contract_pct", "position_size_entry", "position_size_grid"]:
+        for k in ["entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_contract_pct", "position_size_entry", "position_size_grid"]:
             if k in data:
-                val = float(data[k]) if k != "max_steps" else int(data[k])
-                # Проверка минимума для размеров позиции
-                if k in ("position_size_entry", "position_size_grid"):
-                    val = max(6.0, val)
-                setattr(cfg, k, val)
+                setattr(cfg, k, float(data[k]) if k != "max_steps" else int(data[k]))
         await session.commit()
     return {"ok": True}
 
@@ -243,6 +244,12 @@ async def api_get_settings():
         return {
             "min_turnover": s.min_turnover, 
             "min_leverage": s.min_leverage,
+            "entry_pct": s.entry_pct,
+            "grid_step_pct": s.grid_step_pct,
+            "grid_step_multiplier": s.grid_step_multiplier,
+            "max_steps": s.max_steps,
+            "initial_exit_pct": s.initial_exit_pct,
+            "exit_contract_pct": s.exit_contract_pct,
             "position_size_entry": s.position_size_entry,
             "position_size_grid": s.position_size_grid
         }
@@ -255,15 +262,9 @@ async def api_post_settings(request: Request):
         if not s:
             s = Settings(id=1)
             session.add(s)
-        if "min_turnover" in data: s.min_turnover = float(data["min_turnover"])
-        if "min_leverage" in data: s.min_leverage = float(data["min_leverage"])
-        
-        # Проверка минимума 6 USDT
-        if "position_size_entry" in data:
-            s.position_size_entry = max(6.0, float(data["position_size_entry"]))
-        if "position_size_grid" in data:
-            s.position_size_grid = max(6.0, float(data["position_size_grid"]))
-            
+        for k in ["min_turnover", "min_leverage", "entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_contract_pct", "position_size_entry", "position_size_grid"]:
+            if k in data:
+                setattr(s, k, float(data[k]) if k != "max_steps" else int(data[k]))
         await session.commit()
     asyncio.create_task(monitor._refresh_symbols())
     return {"ok": True}

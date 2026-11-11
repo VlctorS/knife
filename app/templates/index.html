@@ -77,11 +77,30 @@ button:hover { background:#1d4ed8; }
       <p class="muted">Мин. макс. плечо:</p>
       <div class="form-row"><input type="number" id="min-lev" step="1"></div>
       
+      <hr style="border-color:#252b36;">
+      <p class="muted">Жесткий % входа (0 = авто):</p>
+      <div class="form-row"><input type="number" id="s-entry_pct" step="0.1"></div>
+      
+      <p class="muted">Шаг сетки %:</p>
+      <div class="form-row"><input type="number" id="s-grid_step_pct" step="0.1"></div>
+      
+      <p class="muted">Множитель:</p>
+      <div class="form-row"><input type="number" id="s-grid_step_multiplier" step="0.1"></div>
+      
+      <p class="muted">Макс. шагов:</p>
+      <div class="form-row"><input type="number" id="s-max_steps" step="1"></div>
+      
+      <p class="muted">Выход %:</p>
+      <div class="form-row"><input type="number" id="s-initial_exit_pct" step="0.1"></div>
+      
+      <p class="muted">% контрактов на выход:</p>
+      <div class="form-row"><input type="number" id="s-exit_contract_pct" step="1"></div>
+      
       <p class="muted">Размер позиции на ВХОД (USDT, мин. 6):</p>
-      <div class="form-row"><input type="number" id="pos-size-entry" step="1" min="6"></div>
+      <div class="form-row"><input type="number" id="s-pos-size-entry" step="1" min="6"></div>
       
       <p class="muted">Размер позиции на УСРЕДНЕНИЕ (USDT, мин. 6):</p>
-      <div class="form-row"><input type="number" id="pos-size-grid" step="1" min="6"></div>
+      <div class="form-row"><input type="number" id="s-pos-size-grid" step="1" min="6"></div>
       
       <div style="margin-top:24px">
         <button onclick="saveSettings()">Сохранить</button>
@@ -164,7 +183,6 @@ async function loadAlerts() {
   const tb = document.getElementById('alerts');
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Нет сигналов</td></tr>'; return; }
   tb.innerHTML = d.items.map(a => {
-    // Время в МСК
     const timeStr = new Date(a.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
     return '<tr><td class="muted">'+timeStr+'</td><td>'+a.symbol+'</td><td class="'+(a.kind==='PUMP'?'pump':'dump')+'">'+a.kind+'</td><td>'+(a.timeframe||'')+'</td><td>'+a.change_pct.toFixed(2)+'%</td><td>'+fmtNum(a.price_now)+'</td></tr>';
   }).join('');
@@ -176,7 +194,6 @@ async function loadStats() {
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Нет данных</td></tr>'; return; }
   
   tb.innerHTML = d.items.map(s => {
-    // Если ручной — красный и со звездочкой, иначе обычный
     const entryClass = s.is_manual ? 'style="color:#ef4444; font-weight:600;"' : '';
     const entryText = s.is_manual ? s.entry_long_pct + '% *' : s.entry_long_pct + '%';
     
@@ -226,17 +243,13 @@ async function openHistory(tradeId, symbol) {
     return;
   }
   
-  // Ищем запись OPEN и извлекаем процент
   const openRecord = d.items.find(h => h.action === 'OPEN');
   let openChange = null;
-  
-  // Парсим notes на наличие "change: X.XX%"
   if (openRecord && openRecord.notes) {
     const match = openRecord.notes.match(/change: ([\-\d\.]+)%/);
     if (match) openChange = parseFloat(match[1]);
   }
   
-  // Меняем заголовок
   if (openChange !== null) {
     document.getElementById('history-title').textContent = `История: ${symbol} (вход при ${openChange.toFixed(2)}%)`;
   } else {
@@ -248,7 +261,6 @@ async function openHistory(tradeId, symbol) {
       <thead><tr><th>Время (МСК)</th><th>Действие</th><th>Цена</th><th>Кол-во</th><th>PnL</th></tr></thead>
       <tbody>
         ${d.items.map(h => {
-          // Время в МСК
           const timeStr = new Date(h.ts).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
           return `
             <tr>
@@ -277,17 +289,28 @@ async function loadSettings() {
   const d = await (await fetch('/api/settings')).json();
   document.getElementById('min-turnover').value = d.min_turnover;
   document.getElementById('min-lev').value = d.min_leverage;
-  // Принудительно не меньше 6
-  document.getElementById('pos-size-entry').value = Math.max(6, d.position_size_entry || 6);
-  document.getElementById('pos-size-grid').value = Math.max(6, d.position_size_grid || 6);
+  document.getElementById('s-entry_pct').value = d.entry_pct;
+  document.getElementById('s-grid_step_pct').value = d.grid_step_pct;
+  document.getElementById('s-grid_step_multiplier').value = d.grid_step_multiplier;
+  document.getElementById('s-max_steps').value = d.max_steps;
+  document.getElementById('s-initial_exit_pct').value = d.initial_exit_pct;
+  document.getElementById('s-exit_contract_pct').value = d.exit_contract_pct;
+  document.getElementById('s-pos-size-entry').value = Math.max(6, d.position_size_entry || 6);
+  document.getElementById('s-pos-size-grid').value = Math.max(6, d.position_size_grid || 6);
 }
 
 async function saveSettings() {
   const data = {
     min_turnover: parseFloat(document.getElementById('min-turnover').value),
     min_leverage: parseFloat(document.getElementById('min-lev').value),
-    position_size_entry: parseFloat(document.getElementById('pos-size-entry').value),
-    position_size_grid: parseFloat(document.getElementById('pos-size-grid').value)
+    entry_pct: parseFloat(document.getElementById('s-entry_pct').value),
+    grid_step_pct: parseFloat(document.getElementById('s-grid_step_pct').value),
+    grid_step_multiplier: parseFloat(document.getElementById('s-grid_step_multiplier').value),
+    max_steps: parseInt(document.getElementById('s-max_steps').value),
+    initial_exit_pct: parseFloat(document.getElementById('s-initial_exit_pct').value),
+    exit_contract_pct: parseFloat(document.getElementById('s-exit_contract_pct').value),
+    position_size_entry: parseFloat(document.getElementById('s-pos-size-entry').value),
+    position_size_grid: parseFloat(document.getElementById('s-pos-size-grid').value)
   };
   await fetch('/api/settings', {
     method: 'POST',
@@ -313,13 +336,13 @@ async function openConfig(symbol) {
     cfg = {
       symbol: symbol,
       entry_pct: 0,
-      grid_step_pct: 5,
-      grid_step_multiplier: 2.5,
-      max_steps: 10,
-      initial_exit_pct: 15,
-      exit_contract_pct: 50,
-      position_size_entry: 6,
-      position_size_grid: 6
+      grid_step_pct: 0,
+      grid_step_multiplier: 0,
+      max_steps: 0,
+      initial_exit_pct: 0,
+      exit_contract_pct: 0,
+      position_size_entry: 0,
+      position_size_grid: 0
     };
   }
   
@@ -331,7 +354,6 @@ async function openConfig(symbol) {
   document.getElementById('cfg-max_steps').value = cfg.max_steps;
   document.getElementById('cfg-initial_exit_pct').value = cfg.initial_exit_pct;
   document.getElementById('cfg-exit_contract_pct').value = cfg.exit_contract_pct;
-  // Принудительно не меньше 6
   document.getElementById('cfg-position_size_entry').value = Math.max(6, cfg.position_size_entry || 6);
   document.getElementById('cfg-position_size_grid').value = Math.max(6, cfg.position_size_grid || 6);
   document.getElementById('config-modal').classList.add('active');
@@ -363,7 +385,6 @@ async function saveConfig() {
   alert('Настройки для ' + symbol + ' сохранены!');
   closeModal();
   
-  // Принудительно обновляем таблицу, если мы на вкладке "Статистика"
   if (document.getElementById('tab-stats').classList.contains('active')) {
     loadStats();
   }
