@@ -90,10 +90,9 @@ class TradingBot:
                     threshold = max(settings.threshold * 100, 5.0)
 
                 if dist <= -threshold:
-                    state.add_alert(Alert(ts=time.time(), symbol=sym, kind='DUMP', price_now=price, ref_price=ma, ma=ma, change_pct=dist))
-                    await self._open_trade(session, sym, 'LONG', price, st.max_leverage, cfg)
+                    state.add_alert(Alert(ts=time.time(), symbol=sym, kind='DUMP', price_now=price, ref_price=ma, ma=ma, change_pct=dist, timeframe='MA'))                    await self._open_trade(session, sym, 'LONG', price, st.max_leverage, cfg)
                 elif dist >= threshold:
-                    state.add_alert(Alert(ts=time.time(), symbol=sym, kind='PUMP', price_now=price, ref_price=ma, ma=ma, change_pct=dist))
+                    state.add_alert(Alert(ts=time.time(), symbol=sym, kind='PUMP', price_now=price, ref_price=ma, ma=ma, change_pct=dist, timeframe='MA'))
                     await self._open_trade(session, sym, 'SHORT', price, st.max_leverage, cfg)
             await session.commit()
 

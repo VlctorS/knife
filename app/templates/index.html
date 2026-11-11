@@ -52,8 +52,8 @@ button:hover { background:#1d4ed8; }
   </div>
   
   <div id="tab-alerts" class="tab-content active"><div class="panel"><h2>Сигналы пампов/дампов</h2>
-    <table><thead><tr><th>Время</th><th>Символ</th><th>Тип</th><th>Изм</th><th>Цена</th></tr></thead>
-    <tbody id="alerts"><tr><td colspan="5" class="empty">Нет сигналов</td></tr></tbody></table></div></div>
+    <table><thead><tr><th>Время</th><th>Символ</th><th>Тип</th><th>ТФ</th><th>Изм</th><th>Цена</th></tr></thead>
+    <tbody id="alerts"><tr><td colspan="6" class="empty">Нет сигналов</td></tr></tbody></table></div></div>
     
   <div id="tab-stats" class="tab-content"><div class="panel"><h2>Статистика монет</h2>
     <table><thead><tr><th>Символ</th><th>Ср. прострел</th><th>Макс</th><th>Авто-вход</th><th>Плечо</th><th>Действие</th></tr></thead>
@@ -141,8 +141,8 @@ async function loadStatus() {
 async function loadAlerts() {
   const d = await (await fetch('/api/alerts?limit=100')).json();
   const tb = document.getElementById('alerts');
-  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">Нет сигналов</td></tr>'; return; }
-  tb.innerHTML = d.items.map(a => '<tr><td class="muted">'+new Date(a.ts*1000).toLocaleTimeString()+'</td><td>'+a.symbol+'</td><td class="'+(a.kind==='PUMP'?'pump':'dump')+'">'+a.kind+'</td><td>'+a.change_pct.toFixed(2)+'%</td><td>'+fmtNum(a.price_now)+'</td></tr>').join('');
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Нет сигналов</td></tr>'; return; }
+  tb.innerHTML = d.items.map(a => '<tr><td class="muted">'+new Date(a.ts*1000).toLocaleTimeString()+'</td><td>'+a.symbol+'</td><td class="'+(a.kind==='PUMP'?'pump':'dump')+'">'+a.kind+'</td><td>'+a.timeframe+'</td><td>'+a.change_pct.toFixed(2)+'%</td><td>'+fmtNum(a.price_now)+'</td></tr>').join('');
 }
 
 async function loadStats() {

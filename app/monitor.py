@@ -65,11 +65,10 @@ class Monitor:
         log.info('instruments=%d, risk-limit symbols=%d, tickers=%d',
                  len(instr), len(lev_map), len(turnover_map))
 
-        # Читаем настройки из БД (или используем дефолт)
         db_min_lev = settings.min_max_leverage
         db_min_turnover = 5.0
         async with SessionLocal() as session:
-            s = await SessionLocal().get(Settings, 1)
+            s = await session.get(Settings, 1)
             if s:
                 db_min_lev = s.min_leverage
                 db_min_turnover = s.min_turnover
@@ -80,19 +79,14 @@ class Monitor:
             ml = lev_map.get(sym)
             if ml is None:
                 continue
-            
-            # Сохраняем реальное плечо (например, 25, 50, 100)
-            real_leverage = ml 
-            
-            if real_leverage < db_min_lev:
+            if ml < db_min_lev:
                 continue
                 
             turnover = turnover_map.get(sym, 0) / 1_000_000
             if turnover < db_min_turnover:
                 continue
                 
-            # Передаем реальное плечо в стейт
-            filtered.append({'symbol': sym, 'maxLeverage': real_leverage})
+            filtered.append({'symbol': sym, 'maxLeverage': ml})
             
         filtered.sort(key=lambda x: x['symbol'])
 
@@ -173,7 +167,6 @@ class Monitor:
         while not self._stop.is_set():
             try:
                 self._check_all()
-                # Вызовы торгового бота
                 import sys
                 main_mod = sys.modules.get('app.main')
                 bot = getattr(main_mod, 'trading_bot', None) if main_mod else None
@@ -198,6 +191,8 @@ class Monitor:
             if now - s.last_price_ts > 300:
                 continue
             kind = 'PUMP' if change > 0 else 'DUMP'
+            
+            # Дедупликация
             for a in state.alerts:
                 if a.symbol == sym and now - a.ts < 600:
                     break
@@ -211,6 +206,7 @@ class Monitor:
                         ref_price=ref,
                         ma=s.ma,
                         change_pct=change * 100,
+                        timeframe=f'{settings.window_minutes}m'  # Добавляем ТФ
                     )
                 )
                 log.warning('ALERT %s %s %+.2f%% (%.6f vs %.6f)',

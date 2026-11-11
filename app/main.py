@@ -150,23 +150,36 @@ async def api_trades(limit: int = 100):
 @app.get('/api/trade_history')
 async def api_trade_history(trade_id: int):
     async with SessionLocal() as session:
+        # Получаем саму сделку (нужна текущая цена и сторона)
+        trade = await session.get(Trade, trade_id)
+        if not trade:
+            return {"items": []}
+            
         r = await session.execute(
             select(TradeHistory).where(TradeHistory.trade_id == trade_id).order_by(TradeHistory.ts)
         )
-        return {
-            'items': [
-                {
-                    'ts': h.ts.isoformat(),
-                    'action': h.action,
-                    'price': h.price,
-                    'qty': h.qty,
-                    'margin': h.margin,
-                    'pnl': h.pnl,
-                    'notes': h.notes,
-                }
-                for h in r.scalars().all()
-            ]
-        }
+        
+        items = []
+        for h in r.scalars().all():
+            # Для открытых сделок считаем виртуальный PnL по текущей цене
+            current_pnl = h.pnl
+            if trade.status == 'OPEN' and trade.current_price > 0:
+                if trade.side == 'LONG':
+                    current_pnl = h.qty * (trade.current_price - h.price)
+                else:
+                    current_pnl = h.qty * (h.price - trade.current_price)
+            
+            items.append({
+                'ts': h.ts.isoformat(),
+                'action': h.action,
+                'price': h.price,
+                'qty': h.qty,
+                'margin': h.margin,
+                'pnl': current_pnl, # <-- виртуальный PnL
+                'notes': h.notes,
+            })
+            
+        return {'items': items}
 
 @app.get("/api/configs")
 async def api_get_configs():
