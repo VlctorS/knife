@@ -2,7 +2,7 @@ import asyncio
 import datetime
 import logging
 import time
-from sqlalchemy import select, delete
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -67,14 +67,13 @@ class TradingBot:
         log.info('History scan complete. Symbols in DB: %d', ok)
 
     async def check_for_entries(self):
-        # Сканируем свечи раз в 60 секунд
+        # Проверяем раз в 60 секунд
         now = time.time()
         if now - self._last_scan_ts < 60:
             return
         self._last_scan_ts = now
 
         async with SessionLocal() as session:
-            # Получаем открытые сделки, чтобы не дублировать
             result = await session.execute(select(Trade).where(Trade.status == 'OPEN'))
             open_syms = {t.symbol for t in result.scalars().all()}
 
@@ -90,7 +89,6 @@ class TradingBot:
                         kl = await self.rest.get_kline(sym, interval=tf, limit=2)
                         if len(kl) < 2: continue
                         
-                        # Берем последнюю закрытую свечу
                         last_candle = kl[-1] 
                         open_price = float(last_candle[1])
                         close_price = float(last_candle[4])
@@ -98,7 +96,7 @@ class TradingBot:
                         if open_price <= 0: continue
                         change_pct = (close_price - open_price) / open_price * 100
                         
-                        # Проверяем порог
+                        # Проверяем порог из настроек (по умолчанию 10%)
                         if abs(change_pct) >= settings.threshold * 100:
                             candle_id = f"{sym}_{tf}_{last_candle[0]}"
                             if candle_id in self._seen_candles:
@@ -153,7 +151,6 @@ class TradingBot:
         log.info('OPEN %s %s @ %.6f (size: %.2f USDT, lev: %.0fx)', side, sym, price, position_size, max_lev)
 
     async def update_open_trades(self):
-        # ... (логика сетки и PnL без изменений)
         async with SessionLocal() as session:
             result = await session.execute(select(Trade).where(Trade.status == 'OPEN'))
             for t in result.scalars().all():
