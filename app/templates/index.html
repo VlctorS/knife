@@ -29,6 +29,9 @@ button:hover { background:#1d4ed8; }
 .modal.active { display:flex; }
 .modal-content { background:#171b23; padding:24px; border-radius:12px; width:400px; border:1px solid #252b36; max-height: 90vh; overflow-y: auto;}
 #history-content table { min-width: 700px; }
+.stats-row { display:flex; gap:24px; align-items:center; padding:12px 16px; border-bottom:1px solid #252b36; font-size:13px; flex-wrap:wrap; }
+.stats-row .stat-item { color:#e6e6e6; }
+.stats-row .stat-item .lbl { color:#8a93a6; margin-right:4px; }
 </style></head>
 <body>
 <header>
@@ -71,7 +74,15 @@ button:hover { background:#1d4ed8; }
     </tr></thead>
     <tbody id="trades"><tr><td colspan="12" class="empty">Нет сделок</td></tr></tbody></table></div></div>
     
-  <div id="tab-closed" class="tab-content"><div class="panel"><h2>История закрытых сделок</h2>
+  <div id="tab-closed" class="tab-content"><div class="panel">
+    <h2>История закрытых сделок</h2>
+    <div class="stats-row" id="closed-stats">
+      <!-- Сюда JS вставит статистику -->
+    </div>
+    <div style="padding: 12px 16px; border-bottom:1px solid #252b36; display:flex; gap:12px;">
+      <button onclick="clearClosedTrades('today')" style="background:#f59e0b;">Очистить сегодня</button>
+      <button onclick="clearClosedTrades('all')" style="background:#ef4444;">Очистить всё</button>
+    </div>
     <table><thead><tr>
       <th>Закрыто (МСК)</th><th>Символ</th><th>Тип</th>
       <th>Ср. цена входа</th><th>Кол-во</th><th>Размер (USDT)</th>
@@ -179,7 +190,6 @@ async function loadAlerts() {
   const tb = document.getElementById('alerts');
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Нет сигналов</td></tr>'; return; }
   tb.innerHTML = d.items.map(a => {
-    // a.ts — Unix timestamp, уже в UTC, *1000 = мс
     const timeStr = new Date(a.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
     return '<tr><td class="muted">'+timeStr+'</td><td>'+a.symbol+'</td><td class="'+(a.kind==='PUMP'?'pump':'dump')+'">'+a.kind+'</td><td>'+(a.timeframe||'')+'</td><td>'+a.change_pct.toFixed(2)+'%</td><td>'+fmtNum(a.price_now)+'</td></tr>';
   }).join('');
@@ -203,7 +213,6 @@ async function loadTrades() {
   
   tb.innerHTML = d.items.map(t => {
     const position_size = (t.total_qty * t.current_price).toFixed(2);
-    // Время в МСК: добавляем 'Z' чтобы JS парсил как UTC
     const timeStr = t.opened_at ? new Date(t.opened_at + 'Z').toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
     const changeClass = t.change_pct > 0 ? 'pump' : (t.change_pct < 0 ? 'dump' : '');
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
@@ -227,13 +236,30 @@ async function loadTrades() {
 }
 
 async function loadClosedTrades() {
+  // Загружаем статистику
+  const stats = await (await fetch('/api/closed_stats')).json();
+  const statsDiv = document.getElementById('closed-stats');
+  
+  const pfClass = stats.profit_factor > 1 ? 'pump' : 'dump';
+  const pnlClass = stats.total_pnl >= 0 ? 'pump' : 'dump';
+  const todayPnlClass = stats.today_pnl >= 0 ? 'pump' : 'dump';
+  
+  statsDiv.innerHTML = `
+    <span class="stat-item"><span class="lbl">Общий PnL:</span><span class="${pnlClass}">${stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)} USDT</span></span>
+    <span class="stat-item"><span class="lbl">Сегодня:</span><span class="${todayPnlClass}">${stats.today_pnl >= 0 ? '+' : ''}${stats.today_pnl.toFixed(2)} USDT</span></span>
+    <span class="stat-item"><span class="lbl">Всего сделок:</span>${stats.total_count}</span>
+    <span class="stat-item"><span class="lbl">Сегодня:</span>${stats.today_count}</span>
+    <span class="stat-item"><span class="lbl">WinRate:</span>${stats.win_rate}% (${stats.win_count}W / ${stats.loss_count}L)</span>
+    <span class="stat-item"><span class="lbl">Profit Factor:</span><span class="${pfClass}">${stats.profit_factor}</span></span>
+  `;
+  
+  // Загружаем сделки
   const d = await (await fetch('/api/closed_trades?limit=100')).json();
   const tb = document.getElementById('closed');
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="9" class="empty">Нет закрытых сделок</td></tr>'; return; }
   
   tb.innerHTML = d.items.map(t => {
     const position_size = (t.total_qty * t.avg_entry_price).toFixed(2);
-    // Время в МСК: добавляем 'Z' чтобы JS парсил как UTC
     const timeStr = t.closed_at ? new Date(t.closed_at + 'Z').toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
       '<td class="muted">'+timeStr+'</td>'+
@@ -244,9 +270,37 @@ async function loadClosedTrades() {
       '<td>'+position_size+'</td>'+
       '<td>'+(t.leverage||10)+'x</td>'+
       '<td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td>'+
-      '<td><button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#8a93a6; cursor:pointer;" onclick="event.stopPropagation(); openHistory('+t.id+', \''+t.symbol+'\')">📋</button></td>'+
+      '<td style="display:flex; gap:8px;">'+
+        '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#8a93a6; cursor:pointer;" onclick="event.stopPropagation(); openHistory('+t.id+', \''+t.symbol+'\')">📋</button>'+
+        '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#ef4444; cursor:pointer; font-weight:600;" onclick="event.stopPropagation(); deleteClosedTrade('+t.id+')">✕</button>'+
+      '</td>'+
     '</tr>';
   }).join('');
+}
+
+async function deleteClosedTrade(tradeId) {
+  if (!confirm('Удалить эту сделку из истории?')) return;
+  const r = await fetch('/api/closed_trades/' + tradeId, { method: 'DELETE' });
+  const d = await r.json();
+  if (d.ok) {
+    loadClosedTrades();
+  } else {
+    alert('Ошибка удаления');
+  }
+}
+
+async function clearClosedTrades(mode) {
+  const text = mode === 'today' ? 'сегодняшние' : 'все';
+  if (!confirm('Удалить ' + text + ' закрытые сделки?')) return;
+  const r = await fetch('/api/clear_closed_trades', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({mode: mode})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    loadClosedTrades();
+  }
 }
 
 async function closeTrade(tradeId) {
@@ -295,7 +349,6 @@ async function openHistory(tradeId, symbol) {
       <thead><tr><th>Время (МСК)</th><th>Действие</th><th>Цена</th><th>Кол-во</th><th>PnL</th></tr></thead>
       <tbody>
         ${d.items.map(h => {
-          // Время в МСК: добавляем 'Z' чтобы JS парсил как UTC
           const timeStr = new Date(h.ts + 'Z').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
           return `
             <tr>

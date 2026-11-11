@@ -2,12 +2,13 @@ import asyncio
 import logging
 import os
 import time
-from contextlib import asynccontextmanager
 import datetime
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 
 from .config import settings
 from .monitor import monitor
@@ -132,7 +133,6 @@ async def api_trades(limit: int = 100):
         )
         items = []
         for t in r.scalars().all():
-            # Безопасный расчет change_pct
             if t.avg_entry_price and t.current_price and t.avg_entry_price > 0:
                 if t.side == 'LONG':
                     change_pct = (t.current_price - t.avg_entry_price) / t.avg_entry_price * 100
@@ -142,18 +142,11 @@ async def api_trades(limit: int = 100):
                 change_pct = 0
             
             items.append({
-                'id': t.id,
-                'symbol': t.symbol,
-                'side': t.side,
-                'entry_price': t.entry_price or 0,
-                'avg_entry_price': t.avg_entry_price or 0,
-                'current_price': t.current_price or 0,
-                'grid_step': t.grid_step or 0,
-                'total_qty': t.total_qty or 0,
-                'total_margin': t.total_margin or 0,
-                'status': t.status or 'OPEN',
-                'pnl': t.pnl or 0,
-                'leverage': t.leverage or 10,
+                'id': t.id, 'symbol': t.symbol, 'side': t.side,
+                'entry_price': t.entry_price, 'avg_entry_price': t.avg_entry_price,
+                'current_price': t.current_price, 'grid_step': t.grid_step,
+                'total_qty': t.total_qty, 'total_margin': t.total_margin,
+                'status': t.status, 'pnl': t.pnl, 'leverage': t.leverage,
                 'change_pct': round(change_pct, 2),
                 'opened_at': t.opened_at.isoformat() if t.opened_at else None,
                 'closed_at': t.closed_at.isoformat() if t.closed_at else None,
@@ -178,6 +171,69 @@ async def api_closed_trades(limit: int = 100):
             })
         return {'items': items}
 
+@app.get('/api/closed_stats')
+async def api_closed_stats():
+    async with SessionLocal() as session:
+        # Все закрытые сделки
+        r = await session.execute(
+            select(Trade).where(Trade.status == 'CLOSED')
+        )
+        all_trades = r.scalars().all()
+        
+        # Статистика по всем
+        total_pnl = sum(t.pnl or 0 for t in all_trades)
+        total_count = len(all_trades)
+        
+        wins = [t for t in all_trades if (t.pnl or 0) > 0]
+        losses = [t for t in all_trades if (t.pnl or 0) < 0]
+        
+        win_count = len(wins)
+        loss_count = len(losses)
+        
+        win_rate = (win_count / total_count * 100) if total_count > 0 else 0
+        
+        gross_profit = sum(t.pnl for t in wins if t.pnl)
+        gross_loss = abs(sum(t.pnl for t in losses if t.pnl))
+        
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (999.99 if gross_profit > 0 else 0)
+        
+        # Сегодня (с 00:00 по UTC, но можно и по МСК)
+        # Проще: с 00:00 текущего дня (UTC)
+        today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        today_trades = [t for t in all_trades if t.closed_at and t.closed_at >= today_start]
+        today_pnl = sum(t.pnl or 0 for t in today_trades)
+        today_count = len(today_trades)
+        
+        return {
+            'total_pnl': round(total_pnl, 4),
+            'total_count': total_count,
+            'win_count': win_count,
+            'loss_count': loss_count,
+            'win_rate': round(win_rate, 1),
+            'profit_factor': round(profit_factor, 2),
+            'today_pnl': round(today_pnl, 4),
+            'today_count': today_count,
+        }
+
+@app.post('/api/clear_closed_trades')
+async def api_clear_closed_trades(request: Request):
+    data = await request.json()
+    mode = data.get('mode', 'all')
+    
+    async with SessionLocal() as session:
+        if mode == 'today':
+            today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            result = await session.execute(
+                delete(Trade).where(Trade.status == 'CLOSED').where(Trade.closed_at >= today_start)
+            )
+        else:
+            result = await session.execute(delete(Trade).where(Trade.status == 'CLOSED'))
+        
+        await session.commit()
+        
+    return {'ok': True}
+
 @app.post('/api/close_trade')
 async def api_close_trade(request: Request):
     data = await request.json()
@@ -192,7 +248,6 @@ async def api_close_trade(request: Request):
         if price <= 0:
             return {'ok': False, 'error': 'No price'}
         
-        # Закрываем всю оставшуюся позицию
         closed_qty = t.total_qty
         if t.side == 'LONG':
             closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
@@ -202,6 +257,7 @@ async def api_close_trade(request: Request):
         t.status = 'CLOSED'
         t.closed_at = datetime.datetime.utcnow()
         t.current_price = price
+        t.pnl = closed_pnl
         
         history = TradeHistory(
             trade_id=t.id, action='MANUAL_CLOSE', price=price, qty=closed_qty,
@@ -211,6 +267,17 @@ async def api_close_trade(request: Request):
         await session.commit()
         log.info('MANUAL CLOSE %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
     return {'ok': True}
+
+@app.delete('/api/closed_trades/{trade_id}')
+async def api_delete_closed_trade(trade_id: int):
+    async with SessionLocal() as session:
+        t = await session.get(Trade, trade_id)
+        if t and t.status == 'CLOSED':
+            await session.execute(delete(TradeHistory).where(TradeHistory.trade_id == trade_id))
+            await session.delete(t)
+            await session.commit()
+            return {'ok': True}
+    return {'ok': False}
 
 @app.get('/api/trade_history')
 async def api_trade_history(trade_id: int):
