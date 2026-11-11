@@ -9,6 +9,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from .bybit import BybitREST
 from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, engine
 from .state import state, Alert
+from .config import settings
 
 log = logging.getLogger(__name__)
 
@@ -43,22 +44,25 @@ class TradingBot:
                     if not prostrels: continue
                     
                     avg_p = sum(prostrels) / len(prostrels)
-                    entry_l = max(3.0, avg_p * 0.85)
+                    auto_entry = max(3.0, avg_p * 0.85)
                     
                     values = dict(
                         symbol=sym, max_leverage=st.max_leverage,
                         avg_prostrel_pct=avg_p, max_prostrel_pct=max(prostrels),
                         freq_per_day=sum(1 for p in prostrels if p > 5.0) / 30.0,
-                        entry_long_pct=entry_l, entry_short_pct=entry_l,
+                        entry_long_pct=auto_entry, entry_short_pct=auto_entry,
                         updated_at=datetime.datetime.utcnow(),
                     )
                     stmt = _get_upsert(SymbolStat, values, 'symbol')
                     await session.execute(stmt)
                     
-                    # Создаем дефолтные настройки, если их нет
                     res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == sym))
-                    if not res.scalars().first():
-                        session.add(SymbolConfig(symbol=sym, min_entry_pct=entry_l))
+                    cfg = res.scalars().first()
+                    if not cfg:
+                        session.add(SymbolConfig(symbol=sym, min_entry_pct=5.0))
+                    else:
+                        cfg.min_entry_pct = max(cfg.min_entry_pct, 5.0) 
+                        # (опционально: мы можем обновлять min_entry_pct, если оно не задано, но лучше оставить 5.0)
                         
                     ok += 1
                     if ok % 20 == 0:
@@ -88,28 +92,23 @@ class TradingBot:
                 if ma is None or price <= 0: continue
                 
                 dist = (price - ma) / ma * 100
-                threshold = 5.0
-                if cfg:
-                    threshold = cfg.entry_pct if cfg.entry_pct > 0 else cfg.min_entry_pct
-                elif stat:
-                    threshold = stat.entry_long_pct
+                
+                # --- ЛОГИКА ВХОДА ---
+                # 1. Жесткий вход (если задан)
+                if cfg and cfg.entry_pct > 0:
+                    threshold = cfg.entry_pct
+                else:
+                    # 2. Авто-расчет (85% от истории), но не меньше min_entry_pct
+                    auto_th = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else 5.0
+                    min_th = cfg.min_entry_pct if cfg and cfg.min_entry_pct > 0 else 5.0
+                    threshold = max(auto_th, min_th)
+                # --------------------
 
                 if dist <= -threshold:
-                    # СОЗДАЕМ СИГНАЛ DUMP
-                    state.add_alert(Alert(
-                        ts=time.time(), symbol=sym, kind='DUMP',
-                        price_now=price, ref_price=ma, ma=ma,
-                        change_pct=dist
-                    ))
+                    state.add_alert(Alert(ts=time.time(), symbol=sym, kind='DUMP', price_now=price, ref_price=ma, ma=ma, change_pct=dist))
                     await self._open_trade(session, sym, 'LONG', price, st.max_leverage, cfg)
-                    
                 elif dist >= threshold:
-                    # СОЗДАЕМ СИГНАЛ PUMP
-                    state.add_alert(Alert(
-                        ts=time.time(), symbol=sym, kind='PUMP',
-                        price_now=price, ref_price=ma, ma=ma,
-                        change_pct=dist
-                    ))
+                    state.add_alert(Alert(ts=time.time(), symbol=sym, kind='PUMP', price_now=price, ref_price=ma, ma=ma, change_pct=dist))
                     await self._open_trade(session, sym, 'SHORT', price, st.max_leverage, cfg)
             await session.commit()
 
@@ -141,7 +140,6 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
                 
-                # Сетка
                 if t.grid_step < t.max_steps:
                     start_pct = cfg.grid_step_pct if cfg else 5.0
                     mult = cfg.grid_step_multiplier if cfg else 2.5
@@ -159,7 +157,6 @@ class TradingBot:
                         log.info('GRID ADD %s %s @ %.6f (step %d, dist %.2f%%)', t.side, t.symbol, price, t.grid_step, step_pct)
                         await session.commit()
 
-                # PnL
                 if t.side == 'LONG':
                     pnl_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
@@ -167,7 +164,6 @@ class TradingBot:
 
                 t.pnl = t.total_margin * (pnl_pct / 100.0) * t.leverage
                 
-                # Выход
                 exit_pct = cfg.initial_exit_pct if cfg else 15.0
                 if pnl_pct >= exit_pct:
                     close_pct = cfg.exit_contract_pct if cfg else 50.0
@@ -186,21 +182,5 @@ class TradingBot:
                         t.total_qty -= closed_qty
                         log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT', t.side, t.symbol, price, close_pct, closed_pnl)
             await session.commit()
-
-
-def run_history_scan_sync(symbols_data):
-    asyncio.run(_scan_async(symbols_data))
-
-
-async def _scan_async(symbols_data):
-    import aiohttp
-    async with aiohttp.ClientSession() as s:
-        rest = BybitREST(s)
-        bot = TradingBot(rest)
-        from .state import SymbolState
-        for sym, lev in symbols_data:
-            state.symbols[sym] = SymbolState(symbol=sym, max_leverage=lev)
-        await bot.run_history_scan()
-
 
 trading_bot = None
