@@ -282,11 +282,24 @@ async function clearData() {
 
 async function openConfig(symbol) {
   const d = await (await fetch('/api/configs')).json();
-  const cfg = d.items.find(i => i.symbol === symbol);
+  let cfg = d.items.find(i => i.symbol === symbol);
+  
   if (!cfg) {
-    alert('Настройки не найдены для ' + symbol);
-    return;
+    // Если записи нет — подставляем дефолтные значения
+    cfg = {
+      symbol: symbol,
+      entry_pct: 0,
+      min_entry_pct: 5,
+      grid_step_pct: 5,
+      grid_step_multiplier: 2.5,
+      max_steps: 10,
+      initial_exit_pct: 15,
+      exit_contract_pct: 50,
+      position_size_entry: 6,
+      position_size_grid: 6
+    };
   }
+
   
   document.getElementById('modal-title').textContent = 'Настройки ' + symbol;
   document.getElementById('cfg-symbol').value = symbol;

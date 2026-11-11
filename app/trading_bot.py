@@ -91,14 +91,11 @@ class TradingBot:
                     stat = await session.get(SymbolStat, sym)
                     
                     # --- ЛОГИКА ВХОДА ---
-                                        # 1. Приоритет: жесткий ручной % входа
                     if cfg and cfg.entry_pct > 0:
                         threshold = cfg.entry_pct
                     else:
-                        # 2. Авто-расчет
                         auto_th = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else 5.0
-                        # 3. Нижняя граница из настроек (или 5%)
-                        min_th = cfg.min_entry_pct if (cfg and cfg.min_entry_pct > 0) else 5.0
+                        min_th = cfg.min_entry_pct if cfg and cfg.min_entry_pct > 0 else 5.0
                         threshold = max(auto_th, min_th)
                     # --------------------
                     
@@ -131,6 +128,10 @@ class TradingBot:
                             await self._open_trade(session, sym, side, close_price, state.symbols[sym].max_leverage, cfg)
                             
                             log.info(f'SIGNAL {kind} {sym} ({tf}m) {change_pct:.2f}% (threshold {threshold:.2f}%) -> OPEN {side}')
+                            
+                            # ЗАЩИТА ОТ ДУБЛИКАТОВ: добавляем в список открытых и выходим из цикла по ТФ
+                            open_syms.add(sym)
+                            break
                             
                 except Exception as e:
                     log.warning(f'Check entries failed for {sym}: {e}')
