@@ -250,7 +250,6 @@ class TradingBot:
             
             fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
             
-            # Ищем ТОЛЬКО открытые сделки, где остаток больше минимального порога
             result = await session.execute(
                 select(Trade).where(Trade.status == 'OPEN').where(Trade.total_qty > 0.0001)
             )
@@ -266,7 +265,7 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
                 
-                # --- 1. ЛОГИКА УСРЕДНЕНИЯ ---
+                # --- 1. УСРЕДНЕНИЕ ---
                 if t.grid_step < t.max_steps:
                     start_pct = (cfg.grid_step_pct if cfg and cfg.grid_step_pct > 0 else (gs.grid_step_pct if gs else 5.0))
                     mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs else 2.5))
@@ -281,7 +280,6 @@ class TradingBot:
                     if can_grid:
                         add_pos_size = (cfg.position_size_grid if cfg and cfg.position_size_grid > 0 else (gs.position_size_grid if gs else MIN_POS_SIZE))
                         add_pos_size = max(MIN_POS_SIZE, add_pos_size)
-                        
                         add_margin = add_pos_size / t.leverage
                         add_qty = add_pos_size / price
                         
@@ -292,16 +290,14 @@ class TradingBot:
                         t.avg_entry_price = (t.avg_entry_price * old_qty + price * add_qty) / t.total_qty
                         
                         add_commission = add_pos_size * (fee_pct / 100.0)
-                        
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
-                            margin=add_margin, pnl=-add_commission, notes=f'step {t.grid_step} (size: {add_pos_size:.2f} USDT, fee: {add_commission:.4f})'
+                            margin=add_margin, pnl=-add_commission, notes=f'step {t.grid_step} (size: {add_pos_size:.2f} USDT)'
                         )
                         session.add(history)
-                        log.info('GRID ADD %s %s @ %.6f (step %d, fee %.4f)', t.side, t.symbol, price, t.grid_step, add_commission)
                         await session.commit() 
 
-                # --- 2. РАСЧЕТ PnL ---
+                # --- 2. PnL ---
                 if t.side == 'LONG':
                     change_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
@@ -309,40 +305,39 @@ class TradingBot:
                 
                 position_size = t.total_margin * t.leverage
                 total_commission = position_size * (fee_pct / 100.0) * 2
-                
                 t.pnl = (t.total_margin * (change_pct / 100.0) * t.leverage) - total_commission
                 
-                # --- 3. ЛОГИКА ВЫХОДА ---
-                exit_pct = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 15.0))
+                # --- 3. СТУПЕНЧАТЫЙ ВЫХОД ---
+                start_exit = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 3.0))
+                exit_mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs and gs.grid_step_multiplier > 0 else 2.5))
+                close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
                 
-                if change_pct >= exit_pct:
-                    close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
+                target_exit_pct = start_exit * (exit_mult ** t.exit_step)
+                
+                if change_pct >= target_exit_pct:
                     closed_qty = t.total_qty * (close_pct / 100.0)
                     
-                    # Если остаток меньше 1 USDT или кол-во меньше 0.001, закрываем ВСЁ принудительно
                     if closed_qty * price < 1.0 or (t.total_qty - closed_qty) < 0.001:
                         closed_qty = t.total_qty
+                        action = 'FULL_CLOSE'
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
-                        action = 'FULL_CLOSE'
                     else:
                         action = 'PARTIAL_CLOSE'
-                        t.grid_step = 0 
+                        t.exit_step += 1
                     
                     if t.side == 'LONG':
                         closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
                     else:
                         closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
                     
-                    closed_position_size = closed_qty * price
-                    close_commission = closed_position_size * (fee_pct / 100.0)
+                    close_commission = (closed_qty * price) * (fee_pct / 100.0)
                     closed_pnl -= close_commission
                     
                     t.total_qty -= closed_qty
                     t.total_margin -= (closed_qty * t.avg_entry_price / t.leverage)
                     t.pnl = (t.pnl or 0) + closed_pnl
                     
-                    # ЖЕСТКАЯ ЗАЧИСТКА НУЛЕЙ
                     if t.status == 'CLOSED' or t.total_qty <= 0.0001:
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
@@ -351,10 +346,10 @@ class TradingBot:
                     
                     history = TradeHistory(
                         trade_id=t.id, action=action, price=price, qty=closed_qty,
-                        margin=t.total_margin, pnl=closed_pnl, notes=f'close {close_pct}% (change {change_pct:.2f}%, fee {close_commission:.4f})'
+                        margin=t.total_margin, pnl=closed_pnl, 
+                        notes=f'close {close_pct}% (target {target_exit_pct:.1f}%, actual {change_pct:.2f}%, fee {close_commission:.4f})'
                     )
                     session.add(history)
-                    log.info('CLOSE %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
                     await session.commit()
             
             await session.commit()

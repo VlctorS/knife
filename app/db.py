@@ -74,15 +74,17 @@ class Trade(Base):
     avg_entry_price: Mapped[float] = mapped_column(Float)
     total_qty: Mapped[float] = mapped_column(Float, default=0.0)
     total_margin: Mapped[float] = mapped_column(Float, default=0.0)
-    initial_margin: Mapped[float] = mapped_column(Float, default=0.0)  # Для сброса сетки
+    initial_margin: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String, default='OPEN')
     pnl: Mapped[float] = mapped_column(Float, default=0.0)
     current_price: Mapped[float] = mapped_column(Float, default=0.0)
     grid_step: Mapped[int] = mapped_column(Integer, default=0)
+    exit_step: Mapped[int] = mapped_column(Integer, default=0)  # <--- ДОБАВИТЬ ЭТО
     max_steps: Mapped[int] = mapped_column(Integer, default=10)
     leverage: Mapped[float] = mapped_column(Float, default=10.0)
     opened_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
     closed_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=True)
+
 
 class TradeHistory(Base):
     __tablename__ = 'trade_history'
