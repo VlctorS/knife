@@ -240,7 +240,7 @@ class TradingBot:
         session.add(history)
         log.info('OPEN %s %s @ %.6f (size: %.2f USDT, margin: %.2f, lev: %.0fx)', side, sym, price, pos_size, margin, max_lev)
 
-        async def update_open_trades(self):
+    async def update_open_trades(self):
         async with SessionLocal() as session:
             gs = await session.get(Settings, 1)
             if not gs:
