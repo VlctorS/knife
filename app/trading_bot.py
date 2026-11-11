@@ -16,8 +16,12 @@ log = logging.getLogger(__name__)
 def _get_upsert(model, values, pk_col):
     is_pg = engine.url.drivername.startswith('postgresql')
     if is_pg:
-        return pg_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
-    return sqlite_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
+        return pg_insert(model).values(**values).on_conflict_do_update(
+            index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col}
+        )
+    return sqlite_insert(model).values(**values).on_conflict_do_update(
+        index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col}
+    )
 
 class TradingBot:
     def __init__(self, rest):
@@ -90,9 +94,18 @@ class TradingBot:
                     threshold = max(settings.threshold * 100, 5.0)
 
                 if dist <= -threshold:
-                    state.add_alert(Alert(ts=time.time(), symbol=sym, kind='DUMP', price_now=price, ref_price=ma, ma=ma, change_pct=dist, timeframe='MA'))                    await self._open_trade(session, sym, 'LONG', price, st.max_leverage, cfg)
+                    state.add_alert(Alert(
+                        ts=time.time(), symbol=sym, kind='DUMP', 
+                        price_now=price, ref_price=ma, ma=ma, 
+                        change_pct=dist, timeframe='MA'
+                    ))
+                    await self._open_trade(session, sym, 'LONG', price, st.max_leverage, cfg)
                 elif dist >= threshold:
-                    state.add_alert(Alert(ts=time.time(), symbol=sym, kind='PUMP', price_now=price, ref_price=ma, ma=ma, change_pct=dist, timeframe='MA'))
+                    state.add_alert(Alert(
+                        ts=time.time(), symbol=sym, kind='PUMP', 
+                        price_now=price, ref_price=ma, ma=ma, 
+                        change_pct=dist, timeframe='MA'
+                    ))
                     await self._open_trade(session, sym, 'SHORT', price, st.max_leverage, cfg)
             await session.commit()
 
@@ -132,6 +145,7 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
                 
+                # Сетка
                 if t.grid_step < t.max_steps:
                     start_pct = cfg.grid_step_pct if cfg else 5.0
                     mult = cfg.grid_step_multiplier if cfg else 2.5
@@ -161,6 +175,7 @@ class TradingBot:
                     pnl_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
                 t.pnl = t.total_margin * (pnl_pct / 100.0) * t.leverage
                 
+                # Выход
                 exit_pct = cfg.initial_exit_pct if cfg else 15.0
                 if pnl_pct >= exit_pct:
                     close_pct = cfg.exit_contract_pct if cfg else 50.0
