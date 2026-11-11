@@ -14,12 +14,26 @@ from .config import settings
 log = logging.getLogger(__name__)
 
 MIN_POS_SIZE = 6.0
+VOLUME_LOOKBACK = 20  # Средний объём за 20 свечей
+
 
 def _get_upsert(model, values, pk_col):
     is_pg = engine.url.drivername.startswith('postgresql')
     if is_pg:
         return pg_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
     return sqlite_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
+
+
+def _calc_avg_volume(candles, lookback=20):
+    """Средний объём за последние N свечей (исключая текущую)."""
+    if len(candles) < lookback + 1:
+        return 0.0
+    # candles: список [start, open, high, low, close, volume, turnover]
+    # Берем предыдущие N свечей (не включая последнюю)
+    prev = candles[-(lookback + 1):-1]
+    vols = [float(k[5]) for k in prev if float(k[5]) > 0]
+    return sum(vols) / len(vols) if vols else 0.0
+
 
 class TradingBot:
     def __init__(self, rest):
@@ -33,11 +47,31 @@ class TradingBot:
         async with SessionLocal() as session:
             for sym, st in state.symbols.items():
                 try:
+                    # 720 часовых свечей = 30 дней
                     kl = await self.rest.get_kline_1h(sym, limit=720)
-                    if len(kl) < 24: continue
+                    if len(kl) < VOLUME_LOOKBACK + 2:
+                        continue
                     
-                    prostrels = [(float(k[2]) - float(k[3])) / float(k[3]) * 100 for k in kl if float(k[3]) > 0]
-                    if not prostrels: continue
+                    # Считаем средний объём за 20 свечей (глобально по всей истории)
+                    all_vols = [float(k[5]) for k in kl if float(k[5]) > 0]
+                    if not all_vols:
+                        continue
+                    global_avg_vol = sum(all_vols) / len(all_vols)
+                    
+                    # Считаем прострелы ТОЛЬКО на свечах с объёмом > среднего
+                    prostrels = []
+                    for k in kl:
+                        high = float(k[2])
+                        low = float(k[3])
+                        vol = float(k[5])
+                        if low <= 0 or vol <= 0:
+                            continue
+                        if vol < global_avg_vol:
+                            continue
+                        prostrels.append((high - low) / low * 100)
+                    
+                    if not prostrels:
+                        continue
                     
                     avg_p = sum(prostrels) / len(prostrels)
                     auto_entry = max(3.0, avg_p * 0.85)
@@ -45,7 +79,7 @@ class TradingBot:
                     values = dict(
                         symbol=sym, max_leverage=st.max_leverage,
                         avg_prostrel_pct=avg_p, max_prostrel_pct=max(prostrels),
-                        freq_per_day=sum(1 for p in prostrels if p > 5.0) / 30.0,
+                        freq_per_day=len(prostrels) / 30.0,
                         entry_long_pct=auto_entry, entry_short_pct=auto_entry,
                         updated_at=datetime.datetime.utcnow(),
                     )
@@ -82,14 +116,14 @@ class TradingBot:
             if not symbols_to_check:
                 return
 
-            # Глобальные настройки
             gs = await session.get(Settings, 1)
             if not gs:
                 gs = Settings(id=1)
                 session.add(gs)
                 await session.commit()
 
-            intervals = ['1', '5', '15']
+            # ТФ для проверки: 1h, 4h, 1d
+            intervals = ['60', '240', 'D']
             
             for sym in symbols_to_check:
                 try:
@@ -97,8 +131,7 @@ class TradingBot:
                     cfg = cfg_res.scalars().first()
                     stat = await session.get(SymbolStat, sym)
                     
-                    # --- ЛОГИКА ВХОДА ---
-                    # Приоритет: индивидуальный entry_pct > глобальный entry_pct > авто-расчет
+                    # Логика порога
                     if cfg and cfg.entry_pct > 0:
                         threshold = cfg.entry_pct
                     elif gs.entry_pct > 0:
@@ -106,37 +139,56 @@ class TradingBot:
                     else:
                         threshold = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else 5.0
                         threshold = max(threshold, 5.0)
-                    # --------------------
                     
                     for tf in intervals:
-                        kl = await self.rest.get_kline(sym, interval=tf, limit=2)
-                        if len(kl) < 2: continue
+                        # Берем 22 свечи: 1 для проверки + 20 для среднего объёма + 1 запас
+                        kl = await self.rest.get_kline(sym, interval=tf, limit=22)
+                        if len(kl) < VOLUME_LOOKBACK + 2:
+                            continue
                         
-                        last_candle = kl[-1] 
-                        open_price = float(last_candle[1])
-                        close_price = float(last_candle[4])
+                        # Последняя закрытая свеча (перед текущей, которая еще не закрыта)
+                        # Bybit отдает от новых к старым. Последний элемент - самая старая.
+                        # kl[-1] - самая свежая (текущая, может быть не закрыта)
+                        # kl[-2] - последняя закрытая
+                        last_closed = kl[-2]
+                        open_price = float(last_closed[1])
+                        close_price = float(last_closed[4])
+                        volume = float(last_closed[5])
                         
-                        if open_price <= 0: continue
+                        if open_price <= 0 or volume <= 0:
+                            continue
+                        
+                        # Средний объём за 20 предыдущих свечей
+                        avg_vol = _calc_avg_volume(kl, VOLUME_LOOKBACK)
+                        if avg_vol <= 0:
+                            continue
+                        
+                        # Объем должен быть выше среднего
+                        if volume < avg_vol:
+                            continue
+                        
                         change_pct = (close_price - open_price) / open_price * 100
                         
                         if abs(change_pct) >= threshold:
-                            candle_id = f"{sym}_{tf}_{last_candle[0]}"
+                            candle_id = f"{sym}_{tf}_{last_closed[0]}"
                             if candle_id in self._seen_candles:
                                 continue
                             self._seen_candles.add(candle_id)
                             
                             kind = 'PUMP' if change_pct > 0 else 'DUMP'
                             side = 'SHORT' if change_pct > 0 else 'LONG'
-                                
+                            
+                            tf_label = {'60': '1h', '240': '4h', 'D': '1d'}.get(tf, tf)
+                            
                             state.add_alert(Alert(
                                 ts=time.time(), symbol=sym, kind=kind,
                                 price_now=close_price, ref_price=open_price, ma=0.0,
-                                change_pct=change_pct, timeframe=tf + 'm'
+                                change_pct=change_pct, timeframe=tf_label
                             ))
                             
                             await self._open_trade(session, sym, side, close_price, state.symbols[sym].max_leverage, cfg, gs, change_pct)
                             
-                            log.info(f'SIGNAL {kind} {sym} ({tf}m) {change_pct:.2f}% (threshold {threshold:.2f}%) -> OPEN {side}')
+                            log.info(f'SIGNAL {kind} {sym} ({tf_label}) {change_pct:.2f}% (vol {volume:.0f} > avg {avg_vol:.0f}) -> OPEN {side}')
                             
                             open_syms.add(sym)
                             break
@@ -146,7 +198,6 @@ class TradingBot:
             await session.commit()
 
     async def _open_trade(self, session, sym, side, price, max_lev, cfg, gs, change_pct=None):
-        # Приоритет: индивидуальный > глобальный
         if cfg and cfg.position_size_entry > 0:
             pos_size = cfg.position_size_entry
         else:
@@ -157,7 +208,6 @@ class TradingBot:
         margin = pos_size / max_lev
         qty = pos_size / price
 
-        # Определяем max_steps (приоритет: индивидуальный > глобальный)
         if cfg and cfg.max_steps > 0:
             max_steps = cfg.max_steps
         else:
@@ -185,7 +235,6 @@ class TradingBot:
 
     async def update_open_trades(self):
         async with SessionLocal() as session:
-            # Глобальные настройки
             gs = await session.get(Settings, 1)
             if not gs:
                 gs = Settings(id=1)
@@ -202,7 +251,6 @@ class TradingBot:
                 cfg = cfg_res.scalars().first()
                 
                 if t.grid_step < t.max_steps:
-                    # Приоритет: индивидуальный > глобальный
                     if cfg and cfg.grid_step_pct > 0:
                         start_pct = cfg.grid_step_pct
                     else:
@@ -215,7 +263,6 @@ class TradingBot:
                     
                     step_pct = start_pct * (mult ** t.grid_step)
                     
-                    # Триггер от средней цены
                     if (t.side == 'LONG' and price <= t.avg_entry_price * (1 - step_pct / 100)) or \
                        (t.side == 'SHORT' and price >= t.avg_entry_price * (1 + step_pct / 100)):
                         
@@ -249,7 +296,6 @@ class TradingBot:
                     pnl_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
                 t.pnl = t.total_margin * (pnl_pct / 100.0) * t.leverage
                 
-                # Приоритет: индивидуальный > глобальный
                 if cfg and cfg.initial_exit_pct > 0:
                     exit_pct = cfg.initial_exit_pct
                 else:
