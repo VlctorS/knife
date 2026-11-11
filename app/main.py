@@ -223,7 +223,11 @@ async def api_post_configs(request: Request):
             session.add(cfg)
         for k in ["entry_pct", "min_entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_contract_pct", "position_size_entry", "position_size_grid"]:
             if k in data:
-                setattr(cfg, k, float(data[k]) if k != "max_steps" else int(data[k]))
+                val = float(data[k]) if k != "max_steps" else int(data[k])
+                # Проверка минимума для размеров позиции
+                if k in ("position_size_entry", "position_size_grid"):
+                    val = max(6.0, val)
+                setattr(cfg, k, val)
         await session.commit()
     return {"ok": True}
 
@@ -252,8 +256,13 @@ async def api_post_settings(request: Request):
             session.add(s)
         if "min_turnover" in data: s.min_turnover = float(data["min_turnover"])
         if "min_leverage" in data: s.min_leverage = float(data["min_leverage"])
-        if "position_size_entry" in data: s.position_size_entry = float(data["position_size_entry"])
-        if "position_size_grid" in data: s.position_size_grid = float(data["position_size_grid"])
+        
+        # Проверка минимума 6 USDT
+        if "position_size_entry" in data:
+            s.position_size_entry = max(6.0, float(data["position_size_entry"]))
+        if "position_size_grid" in data:
+            s.position_size_grid = max(6.0, float(data["position_size_grid"]))
+            
         await session.commit()
     asyncio.create_task(monitor._refresh_symbols())
     return {"ok": True}

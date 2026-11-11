@@ -237,8 +237,9 @@ async function loadSettings() {
   const d = await (await fetch('/api/settings')).json();
   document.getElementById('min-turnover').value = d.min_turnover;
   document.getElementById('min-lev').value = d.min_leverage;
-  document.getElementById('pos-size-entry').value = d.position_size_entry;
-  document.getElementById('pos-size-grid').value = d.position_size_grid;
+  // Принудительно не меньше 6
+  document.getElementById('pos-size-entry').value = Math.max(6, d.position_size_entry || 6);
+  document.getElementById('pos-size-grid').value = Math.max(6, d.position_size_grid || 6);
 }
 
 async function saveSettings() {
@@ -281,13 +282,19 @@ async function openConfig(symbol) {
   document.getElementById('cfg-max_steps').value = cfg.max_steps;
   document.getElementById('cfg-initial_exit_pct').value = cfg.initial_exit_pct;
   document.getElementById('cfg-exit_contract_pct').value = cfg.exit_contract_pct;
-  document.getElementById('cfg-position_size_entry').value = cfg.position_size_entry;
-  document.getElementById('cfg-position_size_grid').value = cfg.position_size_grid;
+  // Принудительно не меньше 6
+  document.getElementById('cfg-position_size_entry').value = Math.max(6, cfg.position_size_entry || 6);
+  document.getElementById('cfg-position_size_grid').value = Math.max(6, cfg.position_size_grid || 6);
   document.getElementById('config-modal').classList.add('active');
 }
 
 async function saveConfig() {
   const symbol = document.getElementById('cfg-symbol').value;
+  
+  // Принудительно не меньше 6 перед отправкой
+  const posEntry = Math.max(6, parseFloat(document.getElementById('cfg-position_size_entry').value) || 6);
+  const posGrid = Math.max(6, parseFloat(document.getElementById('cfg-position_size_grid').value) || 6);
+  
   const data = {
     symbol: symbol,
     entry_pct: parseFloat(document.getElementById('cfg-entry_pct').value),
@@ -297,8 +304,8 @@ async function saveConfig() {
     max_steps: parseInt(document.getElementById('cfg-max_steps').value),
     initial_exit_pct: parseFloat(document.getElementById('cfg-initial_exit_pct').value),
     exit_contract_pct: parseFloat(document.getElementById('cfg-exit_contract_pct').value),
-    position_size_entry: parseFloat(document.getElementById('cfg-position_size_entry').value),
-    position_size_grid: parseFloat(document.getElementById('cfg-position_size_grid').value)
+    position_size_entry: posEntry,
+    position_size_grid: posGrid
   };
   
   await fetch('/api/configs', {
