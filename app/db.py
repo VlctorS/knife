@@ -30,6 +30,8 @@ class Settings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     min_turnover: Mapped[float] = mapped_column(Float, default=5.0)
     min_leverage: Mapped[float] = mapped_column(Float, default=10.0)
+    margin_entry: Mapped[float] = mapped_column(Float, default=1.0)  # Маржа на вход
+    margin_grid: Mapped[float] = mapped_column(Float, default=1.0)   # Маржа на усреднение
 
 class SymbolStat(Base):
     __tablename__ = 'symbol_stats'
@@ -52,7 +54,8 @@ class SymbolConfig(Base):
     max_steps: Mapped[int] = mapped_column(Integer, default=10)
     initial_exit_pct: Mapped[float] = mapped_column(Float, default=15.0)
     exit_contract_pct: Mapped[float] = mapped_column(Float, default=50.0)
-    max_margin: Mapped[float] = mapped_column(Float, default=1.0)
+    margin_entry: Mapped[float] = mapped_column(Float, default=1.0)  # Индивидуальная маржа на вход
+    margin_grid: Mapped[float] = mapped_column(Float, default=1.0)   # Индивидуальная маржа на усреднение
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
 
 class Trade(Base):
@@ -78,7 +81,7 @@ class TradeHistory(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_id: Mapped[int] = mapped_column(Integer, index=True)
     ts: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
-    action: Mapped[str] = mapped_column(String)  # OPEN, GRID_ADD, PARTIAL_CLOSE, FULL_CLOSE
+    action: Mapped[str] = mapped_column(String)
     price: Mapped[float] = mapped_column(Float)
     qty: Mapped[float] = mapped_column(Float)
     margin: Mapped[float] = mapped_column(Float)

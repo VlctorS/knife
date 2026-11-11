@@ -83,6 +83,7 @@ async def api_alerts(limit: int = 100):
                 'ref_price': a.ref_price,
                 'ma': a.ma,
                 'change_pct': a.change_pct,
+                'timeframe': a.timeframe,
             }
             for a in list(state.alerts)[:limit]
         ]
@@ -150,7 +151,6 @@ async def api_trades(limit: int = 100):
 @app.get('/api/trade_history')
 async def api_trade_history(trade_id: int):
     async with SessionLocal() as session:
-        # Получаем саму сделку (нужна текущая цена и сторона)
         trade = await session.get(Trade, trade_id)
         if not trade:
             return {"items": []}
@@ -161,7 +161,6 @@ async def api_trade_history(trade_id: int):
         
         items = []
         for h in r.scalars().all():
-            # Для открытых сделок считаем виртуальный PnL по текущей цене
             current_pnl = h.pnl
             if trade.status == 'OPEN' and trade.current_price > 0:
                 if trade.side == 'LONG':
@@ -175,7 +174,7 @@ async def api_trade_history(trade_id: int):
                 'price': h.price,
                 'qty': h.qty,
                 'margin': h.margin,
-                'pnl': current_pnl, # <-- виртуальный PnL
+                'pnl': current_pnl,
                 'notes': h.notes,
             })
             
@@ -196,7 +195,8 @@ async def api_get_configs():
                     'max_steps': c.max_steps,
                     'initial_exit_pct': c.initial_exit_pct,
                     'exit_contract_pct': c.exit_contract_pct,
-                    'max_margin': c.max_margin,
+                    'margin_entry': c.margin_entry,
+                    'margin_grid': c.margin_grid,
                 }
                 for c in r.scalars().all()
             ]
@@ -210,7 +210,7 @@ async def api_post_configs(request: Request):
         if not cfg:
             cfg = SymbolConfig(symbol=data["symbol"])
             session.add(cfg)
-        for k in ["entry_pct", "min_entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_contract_pct", "max_margin"]:
+        for k in ["entry_pct", "min_entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_contract_pct", "margin_entry", "margin_grid"]:
             if k in data:
                 setattr(cfg, k, float(data[k]) if k != "max_steps" else int(data[k]))
         await session.commit()
@@ -221,10 +221,15 @@ async def api_get_settings():
     async with SessionLocal() as session:
         s = await session.get(Settings, 1)
         if not s:
-            s = Settings(id=1, min_turnover=5.0, min_leverage=10.0)
+            s = Settings(id=1)
             session.add(s)
             await session.commit()
-        return {"min_turnover": s.min_turnover, "min_leverage": s.min_leverage}
+        return {
+            "min_turnover": s.min_turnover, 
+            "min_leverage": s.min_leverage,
+            "margin_entry": s.margin_entry,
+            "margin_grid": s.margin_grid
+        }
 
 @app.post("/api/settings")
 async def api_post_settings(request: Request):
@@ -236,6 +241,8 @@ async def api_post_settings(request: Request):
             session.add(s)
         if "min_turnover" in data: s.min_turnover = float(data["min_turnover"])
         if "min_leverage" in data: s.min_leverage = float(data["min_leverage"])
+        if "margin_entry" in data: s.margin_entry = float(data["margin_entry"])
+        if "margin_grid" in data: s.margin_grid = float(data["margin_grid"])
         await session.commit()
     asyncio.create_task(monitor._refresh_symbols())
     return {"ok": True}

@@ -7,7 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .bybit import BybitREST
-from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, TradeHistory, engine
+from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, TradeHistory, engine, Settings
 from .state import state, Alert
 from .config import settings
 
@@ -16,12 +16,8 @@ log = logging.getLogger(__name__)
 def _get_upsert(model, values, pk_col):
     is_pg = engine.url.drivername.startswith('postgresql')
     if is_pg:
-        return pg_insert(model).values(**values).on_conflict_do_update(
-            index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col}
-        )
-    return sqlite_insert(model).values(**values).on_conflict_do_update(
-        index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col}
-    )
+        return pg_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
+    return sqlite_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
 
 class TradingBot:
     def __init__(self, rest):
@@ -110,7 +106,12 @@ class TradingBot:
             await session.commit()
 
     async def _open_trade(self, session, sym, side, price, max_lev, cfg):
-        margin = cfg.max_margin if cfg else 1.0
+        margin = cfg.margin_entry if (cfg and cfg.margin_entry > 0) else 1.0
+        
+        if margin <= 0:
+            gs = await session.get(Settings, 1)
+            margin = gs.margin_entry if gs else 1.0
+                
         position_size = margin * max_lev
         qty = position_size / price
 
@@ -128,9 +129,7 @@ class TradingBot:
             margin=margin, pnl=0.0, notes=f'{side} open'
         )
         session.add(history)
-        
-        log.info('OPEN %s %s @ %.6f (dist: %.2f%%, size: %.2f USDT, lev: %.0fx)', 
-                 side, sym, price, ((price - state.symbols[sym].ma)/state.symbols[sym].ma*100), position_size, max_lev)
+        log.info('OPEN %s %s @ %.6f (size: %.2f USDT, lev: %.0fx)', side, sym, price, position_size, max_lev)
 
     async def update_open_trades(self):
         async with SessionLocal() as session:
@@ -145,7 +144,6 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
                 
-                # Сетка
                 if t.grid_step < t.max_steps:
                     start_pct = cfg.grid_step_pct if cfg else 5.0
                     mult = cfg.grid_step_multiplier if cfg else 2.5
@@ -156,17 +154,20 @@ class TradingBot:
                         
                         old_qty = t.total_qty
                         t.grid_step += 1
-                        add_qty = (t.total_margin * t.leverage) / price
+                        
+                        add_margin = cfg.margin_grid if (cfg and cfg.margin_grid > 0) else t.total_margin
+                        
+                        add_qty = (add_margin * t.leverage) / price
                         t.total_qty += add_qty
+                        t.total_margin += add_margin
                         t.avg_entry_price = (t.avg_entry_price * old_qty + price * add_qty) / t.total_qty
                         
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
-                            margin=t.total_margin, pnl=0.0, notes=f'step {t.grid_step}'
+                            margin=add_margin, pnl=0.0, notes=f'step {t.grid_step}'
                         )
                         session.add(history)
-                        
-                        log.info('GRID ADD %s %s @ %.6f (step %d, dist %.2f%%)', t.side, t.symbol, price, t.grid_step, step_pct)
+                        log.info('GRID ADD %s %s @ %.6f (step %d)', t.side, t.symbol, price, t.grid_step)
                         await session.commit()
 
                 if t.side == 'LONG':
@@ -175,7 +176,6 @@ class TradingBot:
                     pnl_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
                 t.pnl = t.total_margin * (pnl_pct / 100.0) * t.leverage
                 
-                # Выход
                 exit_pct = cfg.initial_exit_pct if cfg else 15.0
                 if pnl_pct >= exit_pct:
                     close_pct = cfg.exit_contract_pct if cfg else 50.0
