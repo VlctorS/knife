@@ -166,12 +166,10 @@ class TradingBot:
                             kind = 'PUMP' if change_pct > 0 else 'DUMP'
                             side = 'SHORT' if change_pct > 0 else 'LONG'
                             
-                            # --- ПРОВЕРКА: не входим внизу/сверху всплеска ---
-                            # Центр всплеска (mean of high/low)
+                            # Проверка: не входим внизу/сверху всплеска
                             spike_center = (high_price + low_price) / 2
                             
                             if side == 'LONG':
-                                # Для лонга: цена должна быть ниже MA, но выше центра всплеска (мы покупаем на отскоке от нижней части)
                                 if st.ma is None or close_price >= st.ma:
                                     log.info(f'SKIP LONG {sym}: price {close_price} >= MA {st.ma}')
                                     continue
@@ -179,7 +177,6 @@ class TradingBot:
                                     log.info(f'SKIP LONG {sym}: price {close_price} < spike center {spike_center}')
                                     continue
                             else:  # SHORT
-                                # Для шорта: цена должна быть выше MA, но ниже центра всплеска
                                 if st.ma is None or close_price <= st.ma:
                                     log.info(f'SKIP SHORT {sym}: price {close_price} <= MA {st.ma}')
                                     continue
@@ -305,14 +302,29 @@ class TradingBot:
                 # Виртуальный PnL в USDT
                 t.pnl = t.total_margin * (change_pct / 100.0) * t.leverage
                 
-                # --- 3. ВЫХОД (по изменению ЦЕНЫ, а не по PnL) ---
-                # Берем настройки: индивидуальные -> глобальные -> дефолт
+                # --- ВЫХОД ---
                 exit_pct = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 15.0))
                 
-                # ДИАГНОСТИЧЕСКИЙ ЛОГ
-                log.info(f'CHECK {t.symbol}: change_pct={change_pct:.2f}%, exit_pct={exit_pct}% (cfg={cfg.initial_exit_pct if cfg else None}, gs={gs.initial_exit_pct if gs else None})')
+                # Если позиция уже пуста — закрываем
+                if t.total_qty < 0.001:
+                    t.status = 'CLOSED'
+                    t.closed_at = datetime.datetime.utcnow()
+                    await session.commit()
+                    continue
                 
-                if change_pct >= exit_pct:
+                # Проверяем, было ли уже частичное закрытие недавно (в последние 5 минут)
+                last_history = await session.execute(
+                    select(TradeHistory).where(TradeHistory.trade_id == t.id).order_by(TradeHistory.ts.desc()).limit(1)
+                )
+                last_h = last_history.scalars().first()
+                already_partial = (
+                    last_h and last_h.action == 'PARTIAL_CLOSE' and 
+                    (time.time() - last_h.ts.timestamp()) < 300
+                )
+                
+                log.info(f'CHECK {t.symbol}: change_pct={change_pct:.2f}%, exit_pct={exit_pct}% (cfg={cfg.initial_exit_pct if cfg else None}, gs={gs.initial_exit_pct if gs else None}), partial={already_partial}')
+                
+                if change_pct >= exit_pct and not already_partial:
                     close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
                     closed_qty = t.total_qty * (close_pct / 100.0)
                     
@@ -321,14 +333,15 @@ class TradingBot:
                     else:
                         closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
                     
-                    if close_pct >= 100:
+                    t.total_qty -= closed_qty
+                    t.total_margin -= (closed_qty * t.avg_entry_price / t.leverage)
+                    
+                    if t.total_qty < 0.001 or close_pct >= 100:
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
                         action = 'FULL_CLOSE'
                         log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
                     else:
-                        t.total_qty -= closed_qty
-                        t.total_margin -= (closed_qty * t.avg_entry_price / t.leverage)
                         t.grid_step = 0  # Сброс сетки
                         action = 'PARTIAL_CLOSE'
                         log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT, grid reset', t.side, t.symbol, price, close_pct, closed_pnl)
