@@ -296,7 +296,7 @@ class TradingBot:
                         )
                         session.add(history)
                         log.info('GRID ADD %s %s @ %.6f (step %d, fee %.4f)', t.side, t.symbol, price, t.grid_step, add_commission)
-                        await session.commit() # Коммитим усреднение сразу
+                        await session.commit() 
 
                 # --- 2. РАСЧЕТ PnL ---
                 if t.side == 'LONG':
@@ -312,49 +312,40 @@ class TradingBot:
                 # --- 3. ЛОГИКА ВЫХОДА (ИСПРАВЛЕННАЯ) ---
                 exit_pct = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 15.0))
                 
+                # Если позиция уже меньше минимального порога, закрываем полностью
                 if t.total_qty < 0.001:
                     t.status = 'CLOSED'
                     t.closed_at = datetime.datetime.utcnow()
                     await session.commit()
                     continue
                 
-                # Проверяем историю, чтобы не спамить закрытиями, но ставим задержку 5 секунд (а не 5 минут)
-                last_history = await session.execute(
-                    select(TradeHistory).where(TradeHistory.trade_id == t.id).order_by(TradeHistory.ts.desc()).limit(1)
-                )
-                last_h = last_history.scalars().first()
-                
-                # Если последнее действие было PARTIAL_CLOSE и прошло меньше 5 секунд — пропускаем
-                # Это защита от того, чтобы бот не закрывал по 50% каждые 2 секунды
-                already_partial = (
-                    last_h and last_h.action == 'PARTIAL_CLOSE' and 
-                    (time.time() - last_h.ts.timestamp()) < 5
-                )
-                
-                # Если цена достигла цели и это не флаг "already_partial"
-                if change_pct >= exit_pct and not already_partial:
+                # Если достигли профита
+                if change_pct >= exit_pct:
                     close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
                     closed_qty = t.total_qty * (close_pct / 100.0)
+                    
+                    # Защита от закрытия микро-сумм
+                    if closed_qty * price < 1.0: 
+                        closed_qty = t.total_qty # Закрываем всё, если остаток слишком мал
                     
                     if t.side == 'LONG':
                         closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
                     else:
                         closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
                     
-                    # Вычитаем комиссию за выход
                     closed_position_size = closed_qty * price
                     close_commission = closed_position_size * (fee_pct / 100.0)
                     closed_pnl -= close_commission
                     
                     t.total_qty -= closed_qty
                     t.total_margin -= (closed_qty * t.avg_entry_price / t.leverage)
-                    
-                    # Накапливаем PnL
                     t.pnl = (t.pnl or 0) + closed_pnl
                     
-                    if t.total_qty < 0.001 or close_pct >= 100:
+                    if t.total_qty <= 0.001 or close_pct >= 100:
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
+                        t.total_qty = 0.0
+                        t.total_margin = 0.0
                         action = 'FULL_CLOSE'
                         log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
                     else:
@@ -367,8 +358,8 @@ class TradingBot:
                         margin=t.total_margin, pnl=closed_pnl, notes=f'close {close_pct}% (change {change_pct:.2f}%, fee {close_commission:.4f})'
                     )
                     session.add(history)
-                    await session.commit() # Коммитим закрытие сразу
+                    await session.commit() 
             
-            await session.commit() # Финальный коммит
+            await session.commit()
 
 trading_bot = None
