@@ -16,7 +16,6 @@ log = logging.getLogger(__name__)
 REST_BASE = 'https://api.bybit.com'
 WS_URL = 'wss://stream.bybit.com/v5/public/linear'
 
-# API-ключи (берутся из Render Environment)
 API_KEY = os.getenv('BYBIT_API_KEY', '')
 API_SECRET = os.getenv('BYBIT_API_SECRET', '')
 
@@ -29,12 +28,10 @@ async def _read_json(resp):
 
 
 def _sign_request(params: dict) -> dict:
-    """Добавляет заголовки с подписью для авторизации на Bybit."""
     if not API_KEY or not API_SECRET:
         return {}
     timestamp = str(int(time.time() * 1000))
     param_str = urlencode(params)
-    # Для GET-запросов подпись формируется из timestamp + API_KEY + RECV_WINDOW + queryString
     payload = timestamp + API_KEY + '5000' + param_str
     signature = hmac.new(
         API_SECRET.encode('utf-8'),
@@ -126,17 +123,22 @@ class BybitREST:
         log.info('risk-limit pages=%d, unique symbols=%d', pages, len(best))
         return best
 
-    async def get_kline_1h(self, symbol, limit=200):
+    async def get_kline(self, symbol, interval='60', limit=2):
+        """Универсальный метод для получения свечей (любой интервал)."""
         params = {
             'category': 'linear',
             'symbol': symbol,
-            'interval': '60',
-            'limit': str(min(limit, 1000)),
+            'interval': interval,
+            'limit': str(limit),
         }
         data = await self._get('/v5/market/kline', params)
         lst = data.get('result', {}).get('list', [])
-        lst.reverse()
+        lst.reverse() # Bybit отдает от новых к старым, переворачиваем
         return lst
+
+    async def get_kline_1h(self, symbol, limit=200):
+        """Оставлен для совместимости (используется в статистике)."""
+        return await self.get_kline(symbol, interval='60', limit=limit)
 
     async def get_tickers(self):
         params = {'category': 'linear'}

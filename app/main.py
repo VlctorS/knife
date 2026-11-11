@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 from .config import settings
 from .monitor import monitor
@@ -83,7 +83,7 @@ async def api_alerts(limit: int = 100):
                 'ref_price': a.ref_price,
                 'ma': a.ma,
                 'change_pct': a.change_pct,
-                'timeframe': a.timeframe,
+                'timeframe': getattr(a, 'timeframe', ''),
             }
             for a in list(state.alerts)[:limit]
         ]
@@ -246,6 +246,18 @@ async def api_post_settings(request: Request):
         await session.commit()
     asyncio.create_task(monitor._refresh_symbols())
     return {"ok": True}
+
+@app.post("/api/clear_data")
+async def api_clear_data():
+    """Очищает базу сделок и сигналов."""
+    async with SessionLocal() as session:
+        await session.execute(delete(Trade))
+        await session.execute(delete(TradeHistory))
+        await session.commit()
+    
+    state.alerts.clear()
+    
+    return {"ok": True, "message": "Data cleared"}
 
 @app.get("/favicon.ico")
 async def favicon():

@@ -2,7 +2,7 @@ import asyncio
 import datetime
 import logging
 import time
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -22,6 +22,8 @@ def _get_upsert(model, values, pk_col):
 class TradingBot:
     def __init__(self, rest):
         self.rest = rest
+        self._last_scan_ts = 0
+        self._seen_candles = set()
 
     async def run_history_scan(self):
         log.info('Starting history scan for %d symbols...', len(state.symbols))
@@ -65,50 +67,69 @@ class TradingBot:
         log.info('History scan complete. Symbols in DB: %d', ok)
 
     async def check_for_entries(self):
+        # Сканируем свечи раз в 60 секунд
+        now = time.time()
+        if now - self._last_scan_ts < 60:
+            return
+        self._last_scan_ts = now
+
         async with SessionLocal() as session:
+            # Получаем открытые сделки, чтобы не дублировать
             result = await session.execute(select(Trade).where(Trade.status == 'OPEN'))
             open_syms = {t.symbol for t in result.scalars().all()}
 
-            for sym, st in state.symbols.items():
-                if sym in open_syms: continue
-                
-                cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == sym))
-                cfg = cfg_res.scalars().first()
-                stat = await session.get(SymbolStat, sym)
-                
-                price, ma = st.last_price, st.ma
-                if ma is None or price <= 0: continue
-                
-                dist = (price - ma) / ma * 100
-                
-                # ЛОГИКА ВХОДА
-                if cfg and cfg.entry_pct > 0:
-                    threshold = cfg.entry_pct
-                elif cfg and cfg.min_entry_pct > 0:
-                    threshold = cfg.min_entry_pct
-                else:
-                    threshold = max(settings.threshold * 100, 5.0)
+            symbols_to_check = [s for s in state.symbols.keys() if s not in open_syms]
+            if not symbols_to_check:
+                return
 
-                if dist <= -threshold:
-                    state.add_alert(Alert(
-                        ts=time.time(), symbol=sym, kind='DUMP', 
-                        price_now=price, ref_price=ma, ma=ma, 
-                        change_pct=dist, timeframe='MA'
-                    ))
-                    await self._open_trade(session, sym, 'LONG', price, st.max_leverage, cfg)
-                elif dist >= threshold:
-                    state.add_alert(Alert(
-                        ts=time.time(), symbol=sym, kind='PUMP', 
-                        price_now=price, ref_price=ma, ma=ma, 
-                        change_pct=dist, timeframe='MA'
-                    ))
-                    await self._open_trade(session, sym, 'SHORT', price, st.max_leverage, cfg)
+            intervals = ['1', '5', '15'] # 1m, 5m, 15m
+            
+            for sym in symbols_to_check:
+                try:
+                    for tf in intervals:
+                        kl = await self.rest.get_kline(sym, interval=tf, limit=2)
+                        if len(kl) < 2: continue
+                        
+                        # Берем последнюю закрытую свечу
+                        last_candle = kl[-1] 
+                        open_price = float(last_candle[1])
+                        close_price = float(last_candle[4])
+                        
+                        if open_price <= 0: continue
+                        change_pct = (close_price - open_price) / open_price * 100
+                        
+                        # Проверяем порог
+                        if abs(change_pct) >= settings.threshold * 100:
+                            candle_id = f"{sym}_{tf}_{last_candle[0]}"
+                            if candle_id in self._seen_candles:
+                                continue
+                            self._seen_candles.add(candle_id)
+                            
+                            kind = 'PUMP' if change_pct > 0 else 'DUMP'
+                            side = 'SHORT' if change_pct > 0 else 'LONG'
+                                
+                            state.add_alert(Alert(
+                                ts=time.time(), symbol=sym, kind=kind,
+                                price_now=close_price, ref_price=open_price, ma=0.0,
+                                change_pct=change_pct, timeframe=tf + 'm'
+                            ))
+                            
+                            cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == sym))
+                            cfg = cfg_res.scalars().first()
+                            
+                            await self._open_trade(session, sym, side, close_price, state.symbols[sym].max_leverage, cfg)
+                            
+                            log.info(f'SIGNAL {kind} {sym} ({tf}m) {change_pct:.2f}% -> OPEN {side}')
+                            
+                except Exception as e:
+                    log.warning(f'Check entries failed for {sym}: {e}')
             await session.commit()
 
     async def _open_trade(self, session, sym, side, price, max_lev, cfg):
-        margin = cfg.margin_entry if (cfg and cfg.margin_entry > 0) else 1.0
-        
-        if margin <= 0:
+        margin = 1.0
+        if cfg and cfg.margin_entry > 0:
+            margin = cfg.margin_entry
+        else:
             gs = await session.get(Settings, 1)
             margin = gs.margin_entry if gs else 1.0
                 
@@ -132,6 +153,7 @@ class TradingBot:
         log.info('OPEN %s %s @ %.6f (size: %.2f USDT, lev: %.0fx)', side, sym, price, position_size, max_lev)
 
     async def update_open_trades(self):
+        # ... (логика сетки и PnL без изменений)
         async with SessionLocal() as session:
             result = await session.execute(select(Trade).where(Trade.status == 'OPEN'))
             for t in result.scalars().all():

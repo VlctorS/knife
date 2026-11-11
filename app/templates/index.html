@@ -82,7 +82,10 @@ button:hover { background:#1d4ed8; }
       <p class="muted">Маржа на УСРЕДНЕНИЕ (USDT):</p>
       <div class="form-row"><input type="number" id="margin-grid" step="0.1"></div>
       
-      <div style="margin-top:24px"><button onclick="saveSettings()">Сохранить</button></div>
+      <div style="margin-top:24px">
+        <button onclick="saveSettings()">Сохранить</button>
+        <button onclick="clearData()" style="background:#ef4444; margin-left:8px;">Очистить базу</button>
+      </div>
     </div>
   </div></div>
 </main>
@@ -244,6 +247,13 @@ async function saveSettings() {
   });
   alert('Настройки сохранены. Список монет обновляется...');
   setTimeout(() => { loadStatus(); loadStats(); }, 2000);
+}
+
+async function clearData() {
+  if (!confirm('Вы уверены? Все сделки и сигналы будут удалены.')) return;
+  await fetch('/api/clear_data', { method: 'POST' });
+  alert('База очищена');
+  location.reload();
 }
 
 async function openConfig(symbol) {
