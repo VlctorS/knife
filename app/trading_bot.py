@@ -240,7 +240,7 @@ class TradingBot:
         session.add(history)
         log.info('OPEN %s %s @ %.6f (size: %.2f USDT, margin: %.2f, lev: %.0fx)', side, sym, price, pos_size, margin, max_lev)
 
-    async def update_open_trades(self):
+        async def update_open_trades(self):
         async with SessionLocal() as session:
             gs = await session.get(Settings, 1)
             if not gs:
@@ -296,13 +296,9 @@ class TradingBot:
                         )
                         session.add(history)
                         log.info('GRID ADD %s %s @ %.6f (step %d, fee %.4f)', t.side, t.symbol, price, t.grid_step, add_commission)
-                        
-                        # ВАЖНО: НЕ делаем здесь commit, чтобы не сбить расчет ниже.
-                        # Или делаем, но тогда нужно обновить t после коммита.
-                        # Лучше закоммитить в конце, либо пересчитать avg_entry_price в памяти.
-                        await session.commit() # Оставляем, но теперь мы гарантируем, что проверка на закрытие будет отдельной
+                        await session.commit() # Коммитим усреднение сразу
 
-                # --- 2. РАСЧЕТ PnL (с учетом комиссии) ---
+                # --- 2. РАСЧЕТ PnL ---
                 if t.side == 'LONG':
                     change_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
@@ -313,7 +309,7 @@ class TradingBot:
                 
                 t.pnl = (t.total_margin * (change_pct / 100.0) * t.leverage) - total_commission
                 
-                # --- 3. ЛОГИКА ВЫХОДА (ТЕПЕРЬ С ФЛАГОМ) ---
+                # --- 3. ЛОГИКА ВЫХОДА (ИСПРАВЛЕННАЯ) ---
                 exit_pct = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 15.0))
                 
                 if t.total_qty < 0.001:
@@ -322,17 +318,17 @@ class TradingBot:
                     await session.commit()
                     continue
                 
-                # Проверяем историю только для того, чтобы не спамить закрытиями каждые 2 секунды
+                # Проверяем историю, чтобы не спамить закрытиями, но ставим задержку 5 секунд (а не 5 минут)
                 last_history = await session.execute(
                     select(TradeHistory).where(TradeHistory.trade_id == t.id).order_by(TradeHistory.ts.desc()).limit(1)
                 )
                 last_h = last_history.scalars().first()
                 
-                # Если последнее действие было PARTIAL_CLOSE и прошло меньше 10 секунд — пропускаем
-                # (увеличил с 5 минут до 10 секунд, чтобы не блокировать закрытие, если цена реально держится)
+                # Если последнее действие было PARTIAL_CLOSE и прошло меньше 5 секунд — пропускаем
+                # Это защита от того, чтобы бот не закрывал по 50% каждые 2 секунды
                 already_partial = (
                     last_h and last_h.action == 'PARTIAL_CLOSE' and 
-                    (time.time() - last_h.ts.timestamp()) < 10 
+                    (time.time() - last_h.ts.timestamp()) < 5
                 )
                 
                 # Если цена достигла цели и это не флаг "already_partial"
@@ -371,10 +367,8 @@ class TradingBot:
                         margin=t.total_margin, pnl=closed_pnl, notes=f'close {close_pct}% (change {change_pct:.2f}%, fee {close_commission:.4f})'
                     )
                     session.add(history)
-                    await session.commit() # Коммитим сразу, чтобы состояние сохранилось
+                    await session.commit() # Коммитим закрытие сразу
             
-            await session.commit() # Финальный коммит для оставшихся обновлений
-
-
+            await session.commit() # Финальный коммит
 
 trading_bot = None
