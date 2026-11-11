@@ -336,27 +336,30 @@ class TradingBot:
                     closed_qty = t.total_qty * (close_pct / 100.0)
                     
                     if t.side == 'LONG':
-                        gross_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
+                        closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
                     else:
-                        gross_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
+                        closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
                     
-                    # Комиссия за выход (на закрытую часть)
+                    # Вычитаем комиссию за выход
                     closed_position_size = closed_qty * price
                     close_commission = closed_position_size * (fee_pct / 100.0)
-                    closed_pnl = gross_pnl - close_commission
+                    closed_pnl -= close_commission
                     
                     t.total_qty -= closed_qty
                     t.total_margin -= (closed_qty * t.avg_entry_price / t.leverage)
+                    
+                    # Накопленный PnL
+                    t.pnl = (t.pnl or 0) + closed_pnl
                     
                     if t.total_qty < 0.001 or close_pct >= 100:
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
                         action = 'FULL_CLOSE'
-                        log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT (fee %.4f)', t.side, t.symbol, price, closed_pnl, close_commission)
+                        log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
                     else:
                         t.grid_step = 0
                         action = 'PARTIAL_CLOSE'
-                        log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT (fee %.4f)', t.side, t.symbol, price, close_pct, closed_pnl, close_commission)
+                        log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT, grid reset', t.side, t.symbol, price, close_pct, closed_pnl)
                     
                     history = TradeHistory(
                         trade_id=t.id, action=action, price=price, qty=closed_qty,

@@ -248,16 +248,20 @@ async def api_close_trade(request: Request):
         if price <= 0:
             return {'ok': False, 'error': 'No price'}
         
+        # Закрываем всю оставшуюся позицию
         closed_qty = t.total_qty
         if t.side == 'LONG':
             closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
         else:
             closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
         
+        # Обновляем сделку
         t.status = 'CLOSED'
         t.closed_at = datetime.datetime.utcnow()
         t.current_price = price
-        t.pnl = closed_pnl
+        t.pnl = closed_pnl          # <-- СОХРАНЯЕМ PnL в базе
+        t.total_qty = 0.0           # <-- Обнуляем остаток
+        t.total_margin = 0.0        # <-- Обнуляем маржу
         
         history = TradeHistory(
             trade_id=t.id, action='MANUAL_CLOSE', price=price, qty=closed_qty,
