@@ -430,10 +430,12 @@ async function openConfig(symbol) {
   document.getElementById('modal-title').textContent = 'Настройки ' + symbol;
   document.getElementById('cfg-symbol').value = symbol;
   
+  // Просто ставим значения из базы. Если там 0, значит 0.
+  // В placeholder пишем подсказку "Глобальное: X"
   const setField = (id, value, globalValue) => {
     const el = document.getElementById(id);
-    if (value > 0) { el.value = value; el.placeholder = ''; }
-    else { el.value = ''; el.placeholder = globalValue != null ? String(globalValue) : ''; }
+    el.value = value;
+    el.placeholder = `Глобальное: ${globalValue}`;
   };
   
   setField('cfg-entry_pct', cfg.entry_pct, globalData.entry_pct);
@@ -445,8 +447,8 @@ async function openConfig(symbol) {
   
   const setPosField = (id, value, globalValue) => {
     const el = document.getElementById(id);
-    if (value > 0) { el.value = Math.max(6, value); el.placeholder = ''; }
-    else { el.value = ''; el.placeholder = String(Math.max(6, globalValue || 6)); }
+    el.value = value;
+    el.placeholder = `Глобальное: ${globalValue} (мин. 6)`;
   };
   
   setPosField('cfg-position_size_entry', cfg.position_size_entry, globalData.position_size_entry);
