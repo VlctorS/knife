@@ -1,13 +1,14 @@
 import asyncio
 import datetime
 import logging
+import time
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .bybit import BybitREST
 from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, engine
-from .state import state
+from .state import state, Alert
 
 log = logging.getLogger(__name__)
 
@@ -94,14 +95,27 @@ class TradingBot:
                     threshold = stat.entry_long_pct
 
                 if dist <= -threshold:
+                    # СОЗДАЕМ СИГНАЛ DUMP
+                    state.add_alert(Alert(
+                        ts=time.time(), symbol=sym, kind='DUMP',
+                        price_now=price, ref_price=ma, ma=ma,
+                        change_pct=dist
+                    ))
                     await self._open_trade(session, sym, 'LONG', price, st.max_leverage, cfg)
+                    
                 elif dist >= threshold:
+                    # СОЗДАЕМ СИГНАЛ PUMP
+                    state.add_alert(Alert(
+                        ts=time.time(), symbol=sym, kind='PUMP',
+                        price_now=price, ref_price=ma, ma=ma,
+                        change_pct=dist
+                    ))
                     await self._open_trade(session, sym, 'SHORT', price, st.max_leverage, cfg)
             await session.commit()
 
     async def _open_trade(self, session, sym, side, price, max_lev, cfg):
         margin = cfg.max_margin if cfg else 1.0
-        position_size = margin * max_lev  # Размер позиции в USDT
+        position_size = margin * max_lev
         qty = position_size / price
 
         trade = Trade(
@@ -145,16 +159,15 @@ class TradingBot:
                         log.info('GRID ADD %s %s @ %.6f (step %d, dist %.2f%%)', t.side, t.symbol, price, t.grid_step, step_pct)
                         await session.commit()
 
-                # Расчет PnL (виртуальный, обновляется каждые 2 секунды)
+                # PnL
                 if t.side == 'LONG':
                     pnl_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
                     pnl_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
 
-                # Сохраняем PnL в базу
                 t.pnl = t.total_margin * (pnl_pct / 100.0) * t.leverage
                 
-                # Проверка выхода (тейк-профит)
+                # Выход
                 exit_pct = cfg.initial_exit_pct if cfg else 15.0
                 if pnl_pct >= exit_pct:
                     close_pct = cfg.exit_contract_pct if cfg else 50.0
