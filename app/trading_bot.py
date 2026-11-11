@@ -247,11 +247,14 @@ class TradingBot:
             gs = await session.get(Settings, 1)
             if not gs:
                 gs = Settings(id=1)
+                session.add(gs)
+                await session.commit()
             
             result = await session.execute(select(Trade).where(Trade.status == 'OPEN'))
             for t in result.scalars().all():
                 st = state.symbols.get(t.symbol)
-                if not st or st.last_price <= 0 or st.ma is None: continue
+                if not st or st.last_price <= 0 or st.ma is None: 
+                    continue
                 
                 price = st.last_price
                 ma = st.ma
@@ -262,16 +265,8 @@ class TradingBot:
                 
                 # --- УСРЕДНЕНИЕ (только если цена ниже MA для LONG / выше MA для SHORT) ---
                 if t.grid_step < t.max_steps:
-                    if cfg and cfg.grid_step_pct > 0:
-                        start_pct = cfg.grid_step_pct
-                    else:
-                        start_pct = gs.grid_step_pct if gs else 5.0
-                    
-                    if cfg and cfg.grid_step_multiplier > 0:
-                        mult = cfg.grid_step_multiplier
-                    else:
-                        mult = gs.grid_step_multiplier if gs else 2.5
-                    
+                    start_pct = (cfg.grid_step_pct if cfg and cfg.grid_step_pct > 0 else (gs.grid_step_pct if gs else 5.0))
+                    mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs else 2.5))
                     step_pct = start_pct * (mult ** t.grid_step)
                     
                     can_grid = False
@@ -281,11 +276,7 @@ class TradingBot:
                         can_grid = True
                     
                     if can_grid:
-                        if cfg and cfg.position_size_grid > 0:
-                            add_pos_size = cfg.position_size_grid
-                        else:
-                            add_pos_size = gs.position_size_grid if gs else MIN_POS_SIZE
-                        
+                        add_pos_size = (cfg.position_size_grid if cfg and cfg.position_size_grid > 0 else (gs.position_size_grid if gs else MIN_POS_SIZE))
                         add_pos_size = max(MIN_POS_SIZE, add_pos_size)
                         
                         add_margin = add_pos_size / t.leverage
@@ -305,25 +296,24 @@ class TradingBot:
                         log.info('GRID ADD %s %s @ %.6f (step %d)', t.side, t.symbol, price, t.grid_step)
                         await session.commit()
 
-                # PnL
+                # --- РАСЧЕТ PnL И ИЗМЕНЕНИЯ ЦЕНЫ ---
                 if t.side == 'LONG':
-                    pnl_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
+                    change_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
-                    pnl_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
-                t.pnl = t.total_margin * (pnl_pct / 100.0) * t.leverage
+                    change_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
                 
-                # Выход
-                if cfg and cfg.initial_exit_pct > 0:
-                    exit_pct = cfg.initial_exit_pct
-                else:
-                    exit_pct = gs.initial_exit_pct if gs else 15.0
-                    
-                if pnl_pct >= exit_pct:
-                    if cfg and cfg.exit_contract_pct > 0:
-                        close_pct = cfg.exit_contract_pct
-                    else:
-                        close_pct = gs.exit_contract_pct if gs else 50.0
-                        
+                # Виртуальный PnL в USDT
+                t.pnl = t.total_margin * (change_pct / 100.0) * t.leverage
+                
+                # --- 3. ВЫХОД (по изменению ЦЕНЫ, а не по PnL) ---
+                # Берем настройки: индивидуальные -> глобальные -> дефолт
+                exit_pct = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 15.0))
+                
+                # ДИАГНОСТИЧЕСКИЙ ЛОГ
+                log.info(f'CHECK {t.symbol}: change_pct={change_pct:.2f}%, exit_pct={exit_pct}% (cfg={cfg.initial_exit_pct if cfg else None}, gs={gs.initial_exit_pct if gs else None})')
+                
+                if change_pct >= exit_pct:
+                    close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
                     closed_qty = t.total_qty * (close_pct / 100.0)
                     
                     if t.side == 'LONG':
@@ -337,16 +327,15 @@ class TradingBot:
                         action = 'FULL_CLOSE'
                         log.info('CLOSE FULL %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
                     else:
-                        # СБРОС СЕТКИ при частичном выходе
                         t.total_qty -= closed_qty
                         t.total_margin -= (closed_qty * t.avg_entry_price / t.leverage)
-                        t.grid_step = 0  # <-- СБРОС СЕТКИ
+                        t.grid_step = 0  # Сброс сетки
                         action = 'PARTIAL_CLOSE'
                         log.info('CLOSE PARTIAL %s %s @ %.6f (%.0f%%) PnL: %.2f USDT, grid reset', t.side, t.symbol, price, close_pct, closed_pnl)
                     
                     history = TradeHistory(
                         trade_id=t.id, action=action, price=price, qty=closed_qty,
-                        margin=t.total_margin, pnl=closed_pnl, notes=f'close {close_pct}%'
+                        margin=t.total_margin, pnl=closed_pnl, notes=f'close {close_pct}% (change {change_pct:.2f}%)'
                     )
                     session.add(history)
             await session.commit()
