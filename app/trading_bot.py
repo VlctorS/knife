@@ -33,6 +33,15 @@ def _calc_avg_volume(candles, lookback=20):
     return sum(vols) / len(vols) if vols else 0.0
 
 
+def _pick(cfg_val, global_val, fallback):
+    """Приоритет настройки: конфиг символа -> общие настройки -> дефолт."""
+    if cfg_val and cfg_val > 0:
+        return cfg_val
+    if global_val and global_val > 0:
+        return global_val
+    return fallback
+
+
 class TradingBot:
     def __init__(self, rest):
         self.rest = rest
@@ -259,10 +268,10 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
                 
-                # --- 1. ЛОГИКА УСРЕДНЕНИЯ ---
+                # --- 1. ЛОГИКА УСРЕДНЕНИЯ (своя прогрессия: grid_step_pct * grid_step_multiplier^n) ---
                 if t.grid_step < t.max_steps:
-                    start_pct = (cfg.grid_step_pct if cfg and cfg.grid_step_pct > 0 else (gs.grid_step_pct if gs else 5.0))
-                    mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs else 2.5))
+                    start_pct = _pick(cfg.grid_step_pct if cfg else 0, gs.grid_step_pct if gs else 0, 5.0)
+                    mult = _pick(cfg.grid_step_multiplier if cfg else 0, gs.grid_step_multiplier if gs else 0, 2.5)
                     step_pct = start_pct * (mult ** t.grid_step)
                     
                     can_grid = False
@@ -272,7 +281,7 @@ class TradingBot:
                         can_grid = True
                     
                     if can_grid:
-                        add_pos_size = (cfg.position_size_grid if cfg and cfg.position_size_grid > 0 else (gs.position_size_grid if gs else MIN_POS_SIZE))
+                        add_pos_size = _pick(cfg.position_size_grid if cfg else 0, gs.position_size_grid if gs else 0, MIN_POS_SIZE)
                         add_pos_size = max(MIN_POS_SIZE, add_pos_size)
                         
                         add_margin = add_pos_size / t.leverage
@@ -285,28 +294,31 @@ class TradingBot:
                         t.avg_entry_price = (t.avg_entry_price * old_qty + price * add_qty) / t.total_qty
                         
                         add_commission = add_pos_size * (fee_pct / 100.0)
+                        t.entry_fee += add_commission
                         
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
-                            margin=add_margin, pnl=-add_commission, notes=f'BUY {add_qty:.2f} (step {t.grid_step}, left: {t.total_qty:.2f})'
+                            margin=add_margin, pnl=-add_commission, notes=f'BUY {add_qty:.2f} (step {t.grid_step}, left: {t.total_qty:.2f}, fee {add_commission:.4f})'
                         )
                         session.add(history)
                         await session.commit() 
 
-                # --- 2. РАСЧЕТ PnL ---
+                # --- 2. РАСЧЕТ PnL: нереализованный = чистая цена минус комиссии обеих сторон ---
                 if t.side == 'LONG':
                     change_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
                     change_pct = (t.avg_entry_price - price) / t.avg_entry_price * 100
+
+                gross = t.total_qty * (price - t.avg_entry_price) if t.side == 'LONG' \
+                    else t.total_qty * (t.avg_entry_price - price)
+                # Комиссия входа уже уплачена (entry_fee), на выход — по текущей цене
+                open_exit_fee = t.total_qty * price * (fee_pct / 100.0)
+                t.pnl = t.realized_pnl + gross - t.entry_fee - open_exit_fee
                 
-                position_size = t.total_margin * t.leverage
-                total_commission = position_size * (fee_pct / 100.0) * 2
-                t.pnl = (t.total_margin * (change_pct / 100.0) * t.leverage) - total_commission
-                
-                # --- 3. СТУПЕНЧАТЫЙ ВЫХОД ---
-                start_exit = (cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 15.0))
-                exit_mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs and gs.grid_step_multiplier > 0 else 2.5))
-                close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
+                # --- 3. СТУПЕНЧАТЫЙ ВЫХОД (своя прогрессия: initial_exit_pct * exit_step_multiplier^n) ---
+                start_exit = _pick(cfg.initial_exit_pct if cfg else 0, gs.initial_exit_pct if gs else 0, 15.0)
+                exit_mult = _pick(cfg.exit_step_multiplier if cfg else 0, gs.exit_step_multiplier if gs else 0, 1.6)
+                close_pct = _pick(cfg.exit_contract_pct if cfg else 0, gs.exit_contract_pct if gs else 0, 50.0)
                 
                 current_exit_step = t.exit_step if t.exit_step is not None else 0
                 target_exit_pct = start_exit * (exit_mult ** current_exit_step)

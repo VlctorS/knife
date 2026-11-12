@@ -32,14 +32,18 @@ class Settings(Base):
     min_leverage: Mapped[float] = mapped_column(Float, default=10.0)
     
     entry_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    # --- Усреднение (сетка): шаг и его рост по экспоненте ---
     grid_step_pct: Mapped[float] = mapped_column(Float, default=5.0)
     grid_step_multiplier: Mapped[float] = mapped_column(Float, default=2.5)
     max_steps: Mapped[int] = mapped_column(Integer, default=10)
-    initial_exit_pct: Mapped[float] = mapped_column(Float, default=15.0)
-    exit_contract_pct: Mapped[float] = mapped_column(Float, default=50.0)
     position_size_entry: Mapped[float] = mapped_column(Float, default=6.0)
     position_size_grid: Mapped[float] = mapped_column(Float, default=6.0)
-    fee_pct: Mapped[float] = mapped_column(Float, default=0.055)  # <-- Комиссия в %
+    # --- Выход: своя прогрессия, независимая от сетки ---
+    initial_exit_pct: Mapped[float] = mapped_column(Float, default=15.0)
+    exit_step_multiplier: Mapped[float] = mapped_column(Float, default=1.6)
+    exit_contract_pct: Mapped[float] = mapped_column(Float, default=50.0)
+    min_confidence: Mapped[float] = mapped_column(Float, default=0.4)
+    fee_pct: Mapped[float] = mapped_column(Float, default=0.055)  # taker, % на каждую сторону
 
 class SymbolStat(Base):
     __tablename__ = 'symbol_stats'
@@ -59,10 +63,12 @@ class SymbolConfig(Base):
     grid_step_pct: Mapped[float] = mapped_column(Float, default=0.0)
     grid_step_multiplier: Mapped[float] = mapped_column(Float, default=0.0)
     max_steps: Mapped[int] = mapped_column(Integer, default=0)
-    initial_exit_pct: Mapped[float] = mapped_column(Float, default=0.0)
-    exit_contract_pct: Mapped[float] = mapped_column(Float, default=0.0)
     position_size_entry: Mapped[float] = mapped_column(Float, default=0.0)
     position_size_grid: Mapped[float] = mapped_column(Float, default=0.0)
+    initial_exit_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    exit_step_multiplier: Mapped[float] = mapped_column(Float, default=0.0)
+    exit_contract_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    min_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
 
 class Trade(Base):
@@ -77,6 +83,11 @@ class Trade(Base):
     initial_margin: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String, default='OPEN')
     pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    # Реализованный PnL закрытых частей (уже за вычетом комиссий входа и выхода)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    # Сумма уплаченных комиссий: вход+усреднения и выходы считаются раздельно
+    entry_fee: Mapped[float] = mapped_column(Float, default=0.0)
+    exit_fee: Mapped[float] = mapped_column(Float, default=0.0)
     current_price: Mapped[float] = mapped_column(Float, default=0.0)
     grid_step: Mapped[int] = mapped_column(Integer, default=0)
     exit_step: Mapped[int] = mapped_column(Integer, default=0)  # <--- ДОБАВИТЬ ЭТО
@@ -102,3 +113,28 @@ async def init_db():
     os.makedirs('data', exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_migrate_add_columns)
+
+
+def _migrate_add_columns(conn):
+    """create_all не трогает существующие таблицы — добавляем недостающие колонки."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(conn)
+    # (таблица, колонка, DDL-тип) — новые поля, разделённые выходы/усреднения
+    additions = [
+        ('settings', 'exit_step_multiplier', 'FLOAT DEFAULT 1.6'),
+        ('settings', 'min_confidence', 'FLOAT DEFAULT 0.4'),
+        ('symbol_configs', 'exit_step_multiplier', 'FLOAT DEFAULT 0'),
+        ('symbol_configs', 'min_confidence', 'FLOAT DEFAULT 0'),
+        ('trades', 'entry_fee', 'FLOAT DEFAULT 0'),
+        ('trades', 'exit_fee', 'FLOAT DEFAULT 0'),
+        ('trades', 'realized_pnl', 'FLOAT DEFAULT 0'),
+    ]
+    for table, column, ddl in additions:
+        if table not in insp.get_table_names():
+            continue
+        existing = {c['name'] for c in insp.get_columns(table)}
+        if column in existing:
+            continue
+        conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}'))
