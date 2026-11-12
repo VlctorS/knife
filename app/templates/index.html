@@ -354,7 +354,6 @@ document.querySelectorAll('.sub-tab').forEach(t => t.addEventListener('click', (
   document.querySelectorAll('.sub-tab-content').forEach(c => c.classList.toggle('active', c.id === 'subtab-' + t.dataset.subtab));
 }));
 
-// Переключение вкладок симуляции
 document.querySelectorAll('.sub-tab[data-simtab]').forEach(t => t.addEventListener('click', () => {
   document.querySelectorAll('.sub-tab[data-simtab]').forEach(x => x.classList.toggle('active', x.dataset.simtab === t.dataset.simtab));
   document.querySelectorAll('#sim-modal .sub-tab-content').forEach(c => c.classList.toggle('active', c.id === 'simtab-' + t.dataset.simtab));
@@ -883,13 +882,19 @@ async function saveConfig() {
   }
 }
 
-// Функция для расчета симуляции
+// ИСПРАВЛЕННАЯ ФУНКЦИЯ СИМУЛЯЦИИ
 async function openSimulation() {
   const symbol = document.getElementById('cfg-symbol').value;
-  const entryPrice = parseFloat(prompt("Введите текущую цену входа (Entry Price):", "1.0"));
-  if (!entryPrice || entryPrice <= 0) return;
   
-  // Собираем данные из модального окна (если 0 - берем глобальные)
+  // Запрашиваем реальные данные сделки из базы
+  const tradeRes = await fetch('/api/trade_by_symbol?symbol=' + symbol);
+  const tradeData = await tradeRes.json();
+  
+  if (!tradeData.ok) {
+      alert('Не удалось найти открытую сделку по ' + symbol + '. Убедитесь, что сделка открыта.');
+      return;
+  }
+
   const globalData = await (await fetch('/api/settings')).json();
   
   const getVal = (id, fallback) => {
@@ -898,7 +903,7 @@ async function openSimulation() {
   };
   
   const payload = {
-    entry_price: entryPrice,
+    entry_price: tradeData.entry_price, // Берем реальную цену входа
     entry_size: getVal('cfg-position_size_entry', globalData.position_size_entry) || 6,
     grid_step_pct: getVal('cfg-grid_step_pct', globalData.grid_step_pct) || 5,
     grid_step_mult: getVal('cfg-grid_step_multiplier', globalData.grid_step_multiplier) || 2.5,
@@ -908,11 +913,11 @@ async function openSimulation() {
     exit_step_mult: getVal('cfg-exit_step_multiplier', globalData.exit_step_multiplier) || 1.6,
     exit_contract_pct: getVal('cfg-exit_contract_pct', globalData.exit_contract_pct) || 30,
     fee_pct: globalData.fee_pct || 0.055,
-    leverage: 10, // Условно
-    side: 'LONG' // Условно
+    leverage: tradeData.leverage || 10,
+    side: tradeData.side // Берем реальное направление (LONG/SHORT)
   };
 
-  document.getElementById('sim-title').textContent = `Симуляция для ${symbol} (Вход: ${entryPrice})`;
+  document.getElementById('sim-title').textContent = `Симуляция для ${symbol} (${tradeData.side}, Вход: ${tradeData.entry_price})`;
   document.getElementById('sim-profit-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
   document.getElementById('sim-loss-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
   document.getElementById('sim-modal').classList.add('active');
