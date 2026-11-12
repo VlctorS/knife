@@ -342,26 +342,30 @@ class TradingBot:
                 target_exit_pct = start_exit * (exit_mult ** current_exit_step)
                 
                 if change_pct >= target_exit_pct:
-                    closed_qty = t.total_qty * (close_pct / 100.0)
-                    
                     # Если остаток слишком мал (меньше 1 USDT), закрываем всё
-                    if closed_qty * price < 1.0 or (t.total_qty - closed_qty) < 0.001:
+                    if t.total_qty * (close_pct / 100.0) * price < 1.0 or t.total_qty * (1 - close_pct / 100.0) < 0.001:
                         closed_qty = t.total_qty
+                        closed_frac = 1.0
                         action = 'FULL_CLOSE'
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
                     else:
+                        closed_qty = t.total_qty * (close_pct / 100.0)
+                        closed_frac = close_pct / 100.0
                         action = 'PARTIAL_CLOSE'
                         t.exit_step = current_exit_step + 1
 
                     # Доля комиссии входа, приходящаяся на закрываемую часть
-                    closed_frac = closed_qty / t.total_qty if t.total_qty > 0 else 1.0
                     entry_fee_part = t.entry_fee * closed_frac
 
+                    # Старая средняя ОБЯЗАТЕЛЬНО фиксируется до переприсваиваний:
+                    # PnL закрытой части считается именно от неё.
+                    old_avg = t.avg_entry_price
+
                     if t.side == 'LONG':
-                        closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
+                        closed_pnl = (closed_qty * price) - (closed_qty * old_avg)
                     else:
-                        closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
+                        closed_pnl = (closed_qty * old_avg) - (closed_qty * price)
 
                     close_commission = (closed_qty * price) * (fee_pct / 100.0)
                     t.exit_fee += close_commission
@@ -369,22 +373,12 @@ class TradingBot:
                     closed_pnl -= close_commission + entry_fee_part
                     t.realized_pnl += closed_pnl
 
-                    old_avg = t.avg_entry_price
                     t.entry_fee -= entry_fee_part
-
                     t.total_qty -= closed_qty
                     t.total_margin -= (closed_qty * old_avg / t.leverage)
 
-                    # Остаток позиции: пересчитываем плавающий PnL от realized
-                    if t.total_qty > 0.0001:
-                        open_gross = t.total_qty * (price - t.avg_entry_price) if t.side == 'LONG' \
-                            else t.total_qty * (t.avg_entry_price - price)
-                        open_exit_fee = t.total_qty * price * (fee_pct / 100.0)
-                        t.pnl = t.realized_pnl + open_gross - t.entry_fee - open_exit_fee
-                    else:
-                        t.pnl = t.realized_pnl
-
-                    # Фиксируем новую среднюю цену при частичном закрытии
+                    # Фиксируем новую среднюю при частичном закрытии: остаток
+                    # позиции считаем открытым по цене закрытия части.
                     if action == 'PARTIAL_CLOSE':
                         t.avg_entry_price = price
 
@@ -394,6 +388,16 @@ class TradingBot:
                         t.total_qty = 0.0
                         t.total_margin = 0.0
                         t.entry_fee = 0.0
+
+                    # Плавающий PnL = реализованное + gross остатка от НОВОЙ средней
+                    # минус неучтённые комиссии (остаток входа и ожидаемая комиссия выхода).
+                    if t.total_qty > 0.0001:
+                        open_gross = t.total_qty * (price - t.avg_entry_price) if t.side == 'LONG' \
+                            else t.total_qty * (t.avg_entry_price - price)
+                        open_exit_fee = t.total_qty * price * (fee_pct / 100.0)
+                        t.pnl = t.realized_pnl + open_gross - t.entry_fee - open_exit_fee
+                    else:
+                        t.pnl = t.realized_pnl
 
                     history = TradeHistory(
                         trade_id=t.id, action=action, price=price, qty=closed_qty,
