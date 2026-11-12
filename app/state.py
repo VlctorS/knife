@@ -42,6 +42,7 @@ class Alert:
     ma: Optional[float]
     change_pct: float  # (price_now / ref_price - 1) * 100
     timeframe: str = ""
+    reason: str = ""   
 
 
 class AppState:

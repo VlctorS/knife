@@ -39,6 +39,12 @@ button:hover { background:#1d4ed8; }
 .sub-tab.active { color:#e6e6e6; border-bottom-color:#2563eb; font-weight:600; }
 .sub-tab-content { display:none; padding:16px; }
 .sub-tab-content.active { display:block; }
+
+/* Стиль для колонки с причинами */
+.reason-cell { white-space: normal !important; max-width: 400px; font-size: 12px; line-height: 1.4; }
+.reason-success { color: #22c55e; }
+.reason-skip { color: #8a93a6; }
+.reason-radar { color: #f59e0b; }
 </style></head>
 <body>
 <header>
@@ -65,8 +71,8 @@ button:hover { background:#1d4ed8; }
   </div>
   
   <div id="tab-alerts" class="tab-content active"><div class="panel"><h2>Сигналы пампов/дампов</h2>
-    <table><thead><tr><th>Время (МСК)</th><th>Символ</th><th>Тип</th><th>ТФ</th><th>Изм</th><th>Цена</th></tr></thead>
-    <tbody id="alerts"><tr><td colspan="6" class="empty">Нет сигналов</td></tr></tbody></table></div></div>
+    <table><thead><tr><th>Время (МСК)</th><th>Символ</th><th>Тип</th><th>ТФ</th><th>Изм</th><th>Цена</th><th>Причина / Статус</th></tr></thead>
+    <tbody id="alerts"><tr><td colspan="7" class="empty">Нет сигналов</td></tr></tbody></table></div></div>
     
   <div id="tab-stats" class="tab-content"><div class="panel"><h2>Монеты</h2>
     <table><thead><tr><th>Символ</th><th>Ср. прострел</th><th>Макс</th><th>Авто-вход</th><th>Плечо</th><th>Действие</th></tr></thead>
@@ -231,10 +237,33 @@ async function loadStatus() {
 async function loadAlerts() {
   const d = await (await fetch('/api/alerts?limit=100')).json();
   const tb = document.getElementById('alerts');
-  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Нет сигналов</td></tr>'; return; }
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">Нет сигналов</td></tr>'; return; }
+  
   tb.innerHTML = d.items.map(a => {
     const timeStr = new Date(a.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
-    return '<tr><td class="muted">'+timeStr+'</td><td>'+a.symbol+'</td><td class="'+(a.kind==='PUMP'?'pump':'dump')+'">'+a.kind+'</td><td>'+(a.timeframe||'')+'</td><td>'+a.change_pct.toFixed(2)+'%</td><td>'+fmtNum(a.price_now)+'</td></tr>';
+    
+    // Определяем причину и стиль
+    let reasonText = a.reason || '';
+    let reasonClass = 'reason-skip';
+    
+    if (a.timeframe.includes('5m')) {
+        reasonText = 'Резкий скачок (радар монитора). Бот ждет закрытия 4ч/1д свечи.';
+        reasonClass = 'reason-radar';
+    } else if (reasonText.includes('Успешный вход')) {
+        reasonClass = 'reason-success';
+    } else if (!reasonText) {
+        reasonText = 'Ожидание данных';
+    }
+
+    return `<tr>
+      <td class="muted">${timeStr}</td>
+      <td>${a.symbol}</td>
+      <td class="${a.kind==='PUMP'?'pump':'dump'}">${a.kind}</td>
+      <td>${a.timeframe || ''}</td>
+      <td>${a.change_pct.toFixed(2)}%</td>
+      <td>${fmtNum(a.price_now)}</td>
+      <td class="reason-cell ${reasonClass}">${reasonText}</td>
+    </tr>`;
   }).join('');
 }
 

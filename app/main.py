@@ -85,6 +85,7 @@ async def api_alerts(limit: int = 100):
                 'ma': a.ma,
                 'change_pct': a.change_pct,
                 'timeframe': getattr(a, 'timeframe', ''),
+                'reason': getattr(a, 'reason', ''), # <--- ДОБАВИТЬ ВОТ ЭТУ СТРОКУ
             }
             for a in list(state.alerts)[:limit]
         ]

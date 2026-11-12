@@ -187,16 +187,37 @@ class TradingBot:
 
                         ev = classify_event(knife_tf, anchor_tf, current_price, ma_knife, ma_anchor)
                         min_conf = _pick(cfg.min_confidence if cfg else 0, gs.min_confidence if gs else 0, 0.4)
+                        tf_label = {'60': '1h', '240': '4h', 'D': '1d'}.get(tf, tf)
+                        
+                        # Вспомогательная функция для определения направления для алерта
+                        side_guess = 'LONG' if (ev.get('direction') == 'long' or 'down' in ev.get('reason', '')) else 'SHORT'
+                        kind_guess = 'DUMP' if side_guess == 'LONG' else 'PUMP'
 
                         if not ev['is_spike']:
-                            # Разделили всплеск с трендом: это продолжение — не входим,
-                            # но помечаем свечу, чтобы не пережевывать её каждый тик.
+                            # Разделили всплеск с трендом: это продолжение — не входим
                             log.debug('SKIP %s %s: %s', sym, tf, ev['reason'])
                             self._seen_candles.add(candle_id)
+                            
+                            # Добавляем алерт с причиной отказа
+                            state.add_alert(Alert(
+                                ts=time.time(), symbol=sym, kind=kind_guess,
+                                price_now=current_price, ref_price=open_price, ma=st.ma,
+                                change_pct=change_pct, timeframe=f'{tf_label} SKIP',
+                                reason=ev['reason']
+                            ))
                             continue
+                            
                         if ev['confidence'] < min_conf:
                             log.debug('SKIP %s %s: confidence %.2f < %.2f (%s)', sym, tf, ev['confidence'], min_conf, ev['reason'])
                             self._seen_candles.add(candle_id)
+                            
+                            # Добавляем алерт с причиной отказа по уверенности
+                            state.add_alert(Alert(
+                                ts=time.time(), symbol=sym, kind=kind_guess,
+                                price_now=current_price, ref_price=open_price, ma=st.ma,
+                                change_pct=change_pct, timeframe=f'{tf_label} SKIP',
+                                reason=f'low confidence {ev["confidence"]:.2f} < {min_conf:.2f} ({ev["reason"]})'
+                            ))
                             continue
 
                         side = 'LONG' if ev['direction'] == 'long' else 'SHORT'
@@ -204,12 +225,12 @@ class TradingBot:
 
                         # Экстремум ножа должен быть пройден ценой (не падающий нож) —
                         # класс уже это проверил; дополнительно требуем возврата за MA ножа? Нет: MA-фильтр ниже.
-                        tf_label = {'60': '1h', '240': '4h', 'D': '1d'}.get(tf, tf)
-
+                        
                         state.add_alert(Alert(
                             ts=time.time(), symbol=sym, kind=kind,
                             price_now=current_price, ref_price=open_price, ma=st.ma,
-                            change_pct=change_pct, timeframe=f'{tf_label} knife conf={ev["confidence"]:.2f}'
+                            change_pct=change_pct, timeframe=f'{tf_label} knife conf={ev["confidence"]:.2f}',
+                            reason='Успешный вход (открытие сделки)'
                         ))
 
                         await self._open_trade(session, sym, side, current_price, st.max_leverage, cfg, gs, change_pct, fee_pct=gs.fee_pct if gs and gs.fee_pct > 0 else 0.055)
