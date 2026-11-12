@@ -54,7 +54,7 @@ button:hover { background:#1d4ed8; }
   border-radius: 8px; 
   padding: 16px; 
   margin-top: 16px; 
-  max-width: 600px; /* Немного шире для текста */
+  max-width: 600px;
   font-family: monospace; 
   font-size: 13px; 
 }
@@ -378,6 +378,17 @@ async function loadAlerts() {
         reasonClass = 'reason-success';
     } else if (!reasonText) {
         reasonText = 'Ожидание данных';
+    } else {
+        // Переводим технические термины на русский
+        reasonText = reasonText
+            .replace(/not a rejection candle/g, 'Не нож (нет длинной тени)')
+            .replace(/body=/g, 'Тело: ')
+            .replace(/lo=/g, 'Нижняя тень: ')
+            .replace(/hi=/g, 'Верхняя тень: ')
+            .replace(/, /g, ', ')
+            .replace(/trend continuation:/g, 'Продолжение тренда на старшем ТФ. Сила:')
+            .replace(/price still at knife low \(falling knife\)/g, 'Цена все еще на минимуме ножа (падающий нож)')
+            .replace(/price still at knife high \(rising blow-off\)/g, 'Цена все еще на максимуме ножа (летящий нож)');
     }
 
     return `<tr>

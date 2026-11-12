@@ -198,12 +198,25 @@ class TradingBot:
                             log.debug('SKIP %s %s: %s', sym, tf, ev['reason'])
                             self._seen_candles.add(candle_id)
                             
+                            # Переводим причину на русский язык
+                            reason_ru = ev['reason']
+                            if 'not a rejection candle' in reason_ru:
+                                reason_ru = reason_ru.replace('not a rejection candle', 'Не нож (нет длинной тени)')
+                            elif 'trend continuation' in reason_ru:
+                                reason_ru = reason_ru.replace('trend continuation:', 'Продолжение тренда на старшем ТФ. Сила:')
+                            elif 'price still at knife low' in reason_ru:
+                                reason_ru = 'Цена все еще на минимуме ножа (падающий нож)'
+                            elif 'price still at knife high' in reason_ru:
+                                reason_ru = 'Цена все еще на максимуме ножа (летящий нож)'
+                            elif 'unknown rejection direction' in reason_ru:
+                                reason_ru = 'Неизвестное направление ножа'
+
                             # Добавляем алерт с причиной отказа
                             state.add_alert(Alert(
                                 ts=time.time(), symbol=sym, kind=kind_guess,
                                 price_now=current_price, ref_price=open_price, ma=st.ma,
                                 change_pct=change_pct, timeframe=f'{tf_label} SKIP',
-                                reason=ev['reason']
+                                reason=reason_ru
                             ))
                             continue
                             
@@ -216,7 +229,7 @@ class TradingBot:
                                 ts=time.time(), symbol=sym, kind=kind_guess,
                                 price_now=current_price, ref_price=open_price, ma=st.ma,
                                 change_pct=change_pct, timeframe=f'{tf_label} SKIP',
-                                reason=f'low confidence {ev["confidence"]:.2f} < {min_conf:.2f} ({ev["reason"]})'
+                                reason=f'Низкая уверенность ({ev["confidence"]:.2f} < {min_conf:.2f}). {ev["reason"]}'
                             ))
                             continue
 
@@ -319,7 +332,7 @@ class TradingBot:
                     if can_grid:
                         add_pos_size = _pick(cfg.position_size_grid if cfg else 0, gs.position_size_grid if gs else 0, MIN_POS_SIZE)
                         
-                        # НОВОЕ: Применяем множитель размера для усреднений
+                        # Применяем множитель размера для усреднений
                         size_mult = _pick(cfg.grid_size_multiplier if cfg else 0, gs.grid_size_multiplier if gs else 0, 1.0)
                         if size_mult > 1.0:
                             add_pos_size = add_pos_size * (size_mult ** t.grid_step)
