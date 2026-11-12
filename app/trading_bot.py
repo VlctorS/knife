@@ -128,7 +128,6 @@ class TradingBot:
                     if not st or st.ma is None or st.last_price <= 0:
                         continue
                     
-                    # Логика порога
                     if cfg and cfg.entry_pct > 0:
                         threshold = cfg.entry_pct
                     elif gs.entry_pct > 0:
@@ -142,12 +141,9 @@ class TradingBot:
                         if len(kl) < VOLUME_LOOKBACK + 2:
                             continue
                         
-                        # ВАЖНО: Берем последнюю ЗАКРЫТУЮ свечу. 
-                        # Так как get_kline переворачивает список, то последняя свеча (текущая незакрытая) находится в конце (kl[-1]).
-                        # Предпоследняя (закрытая) - это kl[-2].
                         last_closed = kl[-2]
                         open_price = float(last_closed[1])
-                        close_price_candle = float(last_closed[4]) # Цена закрытия свечи (для расчета сигнала)
+                        close_price_candle = float(last_closed[4])
                         high_price = float(last_closed[2])
                         low_price = float(last_closed[3])
                         volume = float(last_closed[5])
@@ -159,7 +155,6 @@ class TradingBot:
                         if avg_vol <= 0 or volume < avg_vol:
                             continue
                         
-                        # Считаем процент изменения по СВЕЧЕ (для сигнала)
                         change_pct = (close_price_candle - open_price) / open_price * 100
                         
                         if abs(change_pct) >= threshold:
@@ -171,7 +166,6 @@ class TradingBot:
                             kind = 'PUMP' if change_pct > 0 else 'DUMP'
                             side = 'SHORT' if change_pct > 0 else 'LONG'
                             
-                            # Проверка: используем ТЕКУЩУЮ цену из WebSocket, а не из свечи
                             current_price = st.last_price
                             spike_center = (high_price + low_price) / 2
                             
@@ -180,7 +174,7 @@ class TradingBot:
                                     continue
                                 if current_price < spike_center:
                                     continue
-                            else:  # SHORT
+                            else:
                                 if st.ma is None or current_price <= st.ma:
                                     continue
                                 if current_price > spike_center:
@@ -194,10 +188,9 @@ class TradingBot:
                                 change_pct=change_pct, timeframe=tf_label
                             ))
                             
-                            # ОТКРЫВАЕМ СДЕЛКУ ПО РЕАЛЬНОЙ ТЕКУЩЕЙ ЦЕНЕ
                             await self._open_trade(session, sym, side, current_price, st.max_leverage, cfg, gs, change_pct)
                             
-                            log.info(f'SIGNAL {kind} {sym} ({tf_label}) {change_pct:.2f}% (vol {volume:.0f} > avg {avg_vol:.0f}) -> OPEN {side} at {current_price}')
+                            log.info(f'SIGNAL {kind} {sym} ({tf_label}) {change_pct:.2f}% -> OPEN {side} at {current_price}')
                             
                             open_syms.add(sym)
                             break
@@ -213,7 +206,6 @@ class TradingBot:
             pos_size = gs.position_size_entry if gs else MIN_POS_SIZE
         
         pos_size = max(MIN_POS_SIZE, pos_size)
-                
         margin = pos_size / max_lev
         qty = pos_size / price
 
@@ -231,7 +223,7 @@ class TradingBot:
         session.add(trade)
         await session.flush()
         
-        notes = f'{side} open (size: {pos_size:.2f} USDT)'
+        notes = f'{side} OPEN (size: {pos_size:.2f} USDT)'
         if change_pct is not None:
             notes += f', change: {change_pct:.2f}%'
             
@@ -240,7 +232,7 @@ class TradingBot:
             margin=margin, pnl=0.0, notes=notes
         )
         session.add(history)
-        log.info('OPEN %s %s @ %.6f (size: %.2f USDT, margin: %.2f, lev: %.0fx)', side, sym, price, pos_size, margin, max_lev)
+        log.info('OPEN %s %s @ %.6f (size: %.2f USDT, qty: %.2f, lev: %.0fx)', side, sym, price, pos_size, qty, max_lev)
 
     async def update_open_trades(self):
         async with SessionLocal() as session:
@@ -296,7 +288,7 @@ class TradingBot:
                         
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
-                            margin=add_margin, pnl=-add_commission, notes=f'step {t.grid_step} (size: {add_pos_size:.2f} USDT)'
+                            margin=add_margin, pnl=-add_commission, notes=f'BUY {add_qty:.2f} (step {t.grid_step}, left: {t.total_qty:.2f})'
                         )
                         session.add(history)
                         await session.commit() 
@@ -316,13 +308,13 @@ class TradingBot:
                 exit_mult = (cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs and gs.grid_step_multiplier > 0 else 2.5))
                 close_pct = (cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0))
                 
-                # Если exit_step None (для старых сделок), считаем его 0
                 current_exit_step = t.exit_step if t.exit_step is not None else 0
                 target_exit_pct = start_exit * (exit_mult ** current_exit_step)
                 
                 if change_pct >= target_exit_pct:
                     closed_qty = t.total_qty * (close_pct / 100.0)
                     
+                    # Если остаток слишком мал (меньше 1 USDT), закрываем всё
                     if closed_qty * price < 1.0 or (t.total_qty - closed_qty) < 0.001:
                         closed_qty = t.total_qty
                         action = 'FULL_CLOSE'
@@ -340,9 +332,16 @@ class TradingBot:
                     close_commission = (closed_qty * price) * (fee_pct / 100.0)
                     closed_pnl -= close_commission
                     
+                    old_avg = t.avg_entry_price
+                    old_total_qty = t.total_qty
+                    
                     t.total_qty -= closed_qty
-                    t.total_margin -= (closed_qty * t.avg_entry_price / t.leverage)
+                    t.total_margin -= (closed_qty * old_avg / t.leverage)
                     t.pnl = (t.pnl or 0) + closed_pnl
+                    
+                    # Фиксируем новую среднюю цену при частичном закрытии
+                    if action == 'PARTIAL_CLOSE':
+                        t.avg_entry_price = price
                     
                     if t.status == 'CLOSED' or t.total_qty <= 0.0001:
                         t.status = 'CLOSED'
@@ -353,7 +352,7 @@ class TradingBot:
                     history = TradeHistory(
                         trade_id=t.id, action=action, price=price, qty=closed_qty,
                         margin=t.total_margin, pnl=closed_pnl, 
-                        notes=f'close {close_pct}% (target {target_exit_pct:.1f}%, actual {change_pct:.2f}%, fee {close_commission:.4f})'
+                        notes=f'SELL {close_pct}% (qty: {closed_qty:.2f}, left: {t.total_qty:.2f}, target {target_exit_pct:.1f}%, actual {change_pct:.2f}%, fee {close_commission:.4f})'
                     )
                     session.add(history)
                     await session.commit()
