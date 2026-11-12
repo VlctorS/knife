@@ -128,7 +128,44 @@ async def api_stats(limit: int = 50):
             
         return {'items': items}
 
+# ИСПРАВЛЕНО: Восстановлен декоратор @app.get('/api/trades')
 @app.get('/api/trades')
+async def api_trades(limit: int = 100):
+    async with SessionLocal() as session:
+        r = await session.execute(
+            select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL'])).order_by(Trade.opened_at.desc()).limit(limit)
+        )
+        items = []
+        for t in r.scalars().all():
+            # Явно приводим все числовые поля к float, чтобы FastAPI не падал на Decimal
+            avg_price = float(t.avg_entry_price) if t.avg_entry_price else 0.0
+            curr_price = float(t.current_price) if t.current_price else 0.0
+            
+            if avg_price > 0:
+                if t.side == 'LONG':
+                    change_pct = (curr_price - avg_price) / avg_price * 100
+                else:
+                    change_pct = (avg_price - curr_price) / avg_price * 100
+            else:
+                change_pct = 0.0
+            
+            items.append({
+                'id': t.id, 'symbol': t.symbol, 'side': t.side,
+                'entry_price': float(t.entry_price) if t.entry_price else 0.0, 
+                'avg_entry_price': avg_price,
+                'current_price': curr_price, 
+                'grid_step': t.grid_step,
+                'total_qty': float(t.total_qty) if t.total_qty else 0.0, 
+                'total_margin': float(t.total_margin) if t.total_margin else 0.0,
+                'status': t.status, 
+                'pnl': float(t.pnl) if t.pnl else 0.0, 
+                'leverage': float(t.leverage) if t.leverage else 10.0,
+                'change_pct': round(change_pct, 2),
+                'exit_step': t.exit_step,
+                'opened_at': t.opened_at.isoformat() if t.opened_at else None,
+                'closed_at': t.closed_at.isoformat() if t.closed_at else None,
+            })
+        return {'items': items}
 
 @app.get('/api/open_pnl')
 async def api_open_pnl():
@@ -141,36 +178,8 @@ async def api_open_pnl():
         total_open_pnl = r.scalar() or 0.0
         
         return {
-            'total_pnl': round(total_open_pnl, 4)
+            'total_pnl': round(float(total_open_pnl), 4)
         }
-
-async def api_trades(limit: int = 100):
-    async with SessionLocal() as session:
-        r = await session.execute(
-            select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL'])).order_by(Trade.opened_at.desc()).limit(limit)
-        )
-        items = []
-        for t in r.scalars().all():
-            if t.avg_entry_price and t.current_price and t.avg_entry_price > 0:
-                if t.side == 'LONG':
-                    change_pct = (t.current_price - t.avg_entry_price) / t.avg_entry_price * 100
-                else:
-                    change_pct = (t.avg_entry_price - t.current_price) / t.avg_entry_price * 100
-            else:
-                change_pct = 0
-            
-            items.append({
-                'id': t.id, 'symbol': t.symbol, 'side': t.side,
-                'entry_price': t.entry_price, 'avg_entry_price': t.avg_entry_price,
-                'current_price': t.current_price, 'grid_step': t.grid_step,
-                'total_qty': t.total_qty, 'total_margin': t.total_margin,
-                'status': t.status, 'pnl': t.pnl, 'leverage': t.leverage,
-                'change_pct': round(change_pct, 2),
-                'exit_step': t.exit_step,
-                'opened_at': t.opened_at.isoformat() if t.opened_at else None,
-                'closed_at': t.closed_at.isoformat() if t.closed_at else None,
-            })
-        return {'items': items}
 
 @app.get('/api/closed_trades')
 async def api_closed_trades(limit: int = 100):
@@ -182,9 +191,12 @@ async def api_closed_trades(limit: int = 100):
         for t in r.scalars().all():
             items.append({
                 'id': t.id, 'symbol': t.symbol, 'side': t.side,
-                'entry_price': t.entry_price, 'avg_entry_price': t.avg_entry_price,
-                'total_qty': t.total_qty, 'total_margin': t.total_margin,
-                'pnl': t.pnl, 'leverage': t.leverage,
+                'entry_price': float(t.entry_price) if t.entry_price else 0.0, 
+                'avg_entry_price': float(t.avg_entry_price) if t.avg_entry_price else 0.0,
+                'total_qty': float(t.total_qty) if t.total_qty else 0.0, 
+                'total_margin': float(t.total_margin) if t.total_margin else 0.0,
+                'pnl': float(t.pnl) if t.pnl else 0.0, 
+                'leverage': float(t.leverage) if t.leverage else 10.0,
                 'opened_at': t.opened_at.isoformat() if t.opened_at else None,
                 'closed_at': t.closed_at.isoformat() if t.closed_at else None,
             })
@@ -210,9 +222,9 @@ async def api_all_exits(limit: int = 100):
                 'side': t.side,
                 'action': h.action,
                 'ts': h.ts.isoformat(),
-                'price': h.price,
-                'qty': h.qty,
-                'pnl': h.pnl,
+                'price': float(h.price) if h.price else 0.0,
+                'qty': float(h.qty) if h.qty else 0.0,
+                'pnl': float(h.pnl) if h.pnl else 0.0,
                 'notes': h.notes
             })
         return {'items': items}
@@ -258,13 +270,13 @@ async def api_closed_stats():
         today_count = today_count_res.scalar() or 0
         
         return {
-            'total_pnl': round(total_realized, 4),
+            'total_pnl': round(float(total_realized), 4),
             'total_count': total_count,
             'win_count': win_count,
             'loss_count': loss_count,
             'win_rate': round(win_rate, 1),
-            'profit_factor': round(profit_factor, 2),
-            'today_pnl': round(today_pnl, 4),
+            'profit_factor': round(float(profit_factor), 2),
+            'today_pnl': round(float(today_pnl), 4),
             'today_count': today_count,
         }
 
@@ -397,26 +409,27 @@ async def api_trade_history(trade_id: int):
         for h in r.scalars().all():
             # ВАЖНО: Для закрытых частей (PARTIAL_CLOSE, FULL_CLOSE, MANUAL_CLOSE) 
             # показываем РЕАЛИЗОВАННЫЙ PnL из базы.
-            # Для OPEN и GRID_ADD показываем 0 (или можно текущий плавающий, но лучше 0, чтобы не путать)
-            pnl_to_show = h.pnl if h.action in ('PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE') else 0.0
+            # Для OPEN и GRID_ADD показываем 0
+            pnl_to_show = float(h.pnl) if h.action in ('PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE') and h.pnl else 0.0
             
             items.append({
-                'ts': h.ts.isoformat(), 'action': h.action, 'price': h.price,
-                'qty': h.qty, 'margin': h.margin, 'pnl': pnl_to_show, 'notes': h.notes,
+                'ts': h.ts.isoformat(), 'action': h.action, 'price': float(h.price) if h.price else 0.0,
+                'qty': float(h.qty) if h.qty else 0.0, 'margin': float(h.margin) if h.margin else 0.0, 
+                'pnl': pnl_to_show, 'notes': h.notes,
             })
             
         return {
             'items': items,
             'next_grid_pct': round(next_step_pct, 2),
-            'next_grid_price': round(next_grid_price, 6),
-            'next_grid_size': round(next_grid_size, 2),
+            'next_grid_price': round(float(next_grid_price), 6),
+            'next_grid_size': round(float(next_grid_size), 2),
             'current_grid_step': current_grid_step,
             'max_steps': trade.max_steps,
             'next_exit_pct': round(next_exit_pct, 2),
-            'next_exit_price': round(next_exit_price, 6),
+            'next_exit_price': round(float(next_exit_price), 6),
             'exit_close_pct': close_pct,
-            'exit_qty': round(exit_qty, 2),
-            'est_profit': round(est_profit, 2)
+            'exit_qty': round(float(exit_qty), 2),
+            'est_profit': round(float(est_profit), 2)
         }
 
 @app.get("/api/configs")
@@ -426,13 +439,16 @@ async def api_get_configs():
         return {
             'items': [
                 {
-                    'symbol': c.symbol, 'entry_pct': c.entry_pct,
-                    'grid_step_pct': c.grid_step_pct, 'grid_step_multiplier': c.grid_step_multiplier,
-                    'grid_size_multiplier': c.grid_size_multiplier,
-                    'max_steps': c.max_steps, 'initial_exit_pct': c.initial_exit_pct,
-                    'exit_step_multiplier': c.exit_step_multiplier,
-                    'exit_contract_pct': c.exit_contract_pct,
-                    'position_size_entry': c.position_size_entry, 'position_size_grid': c.position_size_grid,
+                    'symbol': c.symbol, 'entry_pct': float(c.entry_pct) if c.entry_pct else 0.0,
+                    'grid_step_pct': float(c.grid_step_pct) if c.grid_step_pct else 0.0, 
+                    'grid_step_multiplier': float(c.grid_step_multiplier) if c.grid_step_multiplier else 0.0,
+                    'grid_size_multiplier': float(c.grid_size_multiplier) if c.grid_size_multiplier else 0.0,
+                    'max_steps': c.max_steps, 
+                    'initial_exit_pct': float(c.initial_exit_pct) if c.initial_exit_pct else 0.0,
+                    'exit_step_multiplier': float(c.exit_step_multiplier) if c.exit_step_multiplier else 0.0,
+                    'exit_contract_pct': float(c.exit_contract_pct) if c.exit_contract_pct else 0.0,
+                    'position_size_entry': float(c.position_size_entry) if c.position_size_entry else 0.0, 
+                    'position_size_grid': float(c.position_size_grid) if c.position_size_grid else 0.0,
                 }
                 for c in r.scalars().all()
             ]
@@ -461,15 +477,20 @@ async def api_get_settings():
             session.add(s)
             await session.commit()
         return {
-            "min_turnover": s.min_turnover, "min_leverage": s.min_leverage,
-            "entry_pct": s.entry_pct, "grid_step_pct": s.grid_step_pct,
-            "grid_step_multiplier": s.grid_step_multiplier, 
-            "grid_size_multiplier": s.grid_size_multiplier,
+            "min_turnover": float(s.min_turnover) if s.min_turnover else 0.0, 
+            "min_leverage": float(s.min_leverage) if s.min_leverage else 0.0,
+            "entry_pct": float(s.entry_pct) if s.entry_pct else 0.0, 
+            "grid_step_pct": float(s.grid_step_pct) if s.grid_step_pct else 0.0,
+            "grid_step_multiplier": float(s.grid_step_multiplier) if s.grid_step_multiplier else 0.0, 
+            "grid_size_multiplier": float(s.grid_size_multiplier) if s.grid_size_multiplier else 0.0,
             "max_steps": s.max_steps,
-            "initial_exit_pct": s.initial_exit_pct, "exit_step_multiplier": s.exit_step_multiplier,
-            "exit_contract_pct": s.exit_contract_pct,
-            "position_size_entry": s.position_size_entry, "position_size_grid": s.position_size_grid,
-            "fee_pct": s.fee_pct, "min_confidence": s.min_confidence,
+            "initial_exit_pct": float(s.initial_exit_pct) if s.initial_exit_pct else 0.0, 
+            "exit_step_multiplier": float(s.exit_step_multiplier) if s.exit_step_multiplier else 0.0,
+            "exit_contract_pct": float(s.exit_contract_pct) if s.exit_contract_pct else 0.0,
+            "position_size_entry": float(s.position_size_entry) if s.position_size_entry else 0.0, 
+            "position_size_grid": float(s.position_size_grid) if s.position_size_grid else 0.0,
+            "fee_pct": float(s.fee_pct) if s.fee_pct else 0.055, 
+            "min_confidence": float(s.min_confidence) if s.min_confidence else 0.4,
         }
 
 @app.post("/api/settings")
