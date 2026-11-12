@@ -843,6 +843,9 @@ async function openConfig(symbol) {
   setPosField('cfg-position_size_entry', cfg.position_size_entry, globalData.position_size_entry);
   setPosField('cfg-position_size_grid', cfg.position_size_grid, globalData.position_size_grid);
   
+  // Принудительно активируем первую вкладку "Вход и усреднения"
+  document.querySelector('.sub-tab[data-subtab="main"]').click();
+  
   document.getElementById('config-modal').classList.add('active');
 }
 
