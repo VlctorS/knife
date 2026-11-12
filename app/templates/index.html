@@ -32,6 +32,13 @@ button:hover { background:#1d4ed8; }
 .stats-row { display:flex; gap:24px; align-items:center; padding:12px 16px; border-bottom:1px solid #252b36; font-size:13px; flex-wrap:wrap; }
 .stats-row .stat-item { color:#e6e6e6; }
 .stats-row .stat-item .lbl { color:#8a93a6; margin-right:4px; }
+
+/* Стили для подвкладок настроек */
+.sub-tabs { display:flex; gap:8px; border-bottom:1px solid #252b36; padding: 0 16px; background: #141820; }
+.sub-tab { padding:12px 16px; cursor:pointer; color:#8a93a6; font-size:13px; border-bottom:2px solid transparent; }
+.sub-tab.active { color:#e6e6e6; border-bottom-color:#2563eb; font-weight:600; }
+.sub-tab-content { display:none; padding:16px; }
+.sub-tab-content.active { display:block; }
 </style></head>
 <body>
 <header>
@@ -90,34 +97,63 @@ button:hover { background:#1d4ed8; }
     </tr></thead>
     <tbody id="closed"><tr><td colspan="9" class="empty">Нет закрытых сделок</td></tr></tbody></table></div></div>
     
-  <div id="tab-settings" class="tab-content"><div class="panel"><h2>Глобальные настройки</h2>
-    <div style="padding:16px">
+  <!-- ОБНОВЛЕННАЯ ВКЛАДКА НАСТРОЕК -->
+  <div id="tab-settings" class="tab-content"><div class="panel">
+    <h2>Глобальные настройки</h2>
+    
+    <div class="sub-tabs">
+      <div class="sub-tab active" data-subtab="main">Основные настройки</div>
+      <div class="sub-tab" data-subtab="grid">Усреднения (Сетка)</div>
+      <div class="sub-tab" data-subtab="exit">Выходы</div>
+    </div>
+
+    <!-- Подвкладка: Основные -->
+    <div id="subtab-main" class="sub-tab-content active">
       <p class="muted">Мин. оборот за 24ч (млн USDT):</p>
       <div class="form-row"><input type="number" id="min-turnover" step="0.1"></div>
       <p class="muted">Мин. макс. плечо:</p>
       <div class="form-row"><input type="number" id="min-lev" step="1"></div>
-      <hr style="border-color:#252b36;">
+      <hr style="border-color:#252b36; margin: 20px 0;">
       <p class="muted">Жесткий % входа (0 = авто):</p>
       <div class="form-row"><input type="number" id="s-entry_pct" step="0.1"></div>
-      <p class="muted">Шаг сетки %:</p>
-      <div class="form-row"><input type="number" id="s-grid_step_pct" step="0.1"></div>
-      <p class="muted">Множитель:</p>
-      <div class="form-row"><input type="number" id="s-grid_step_multiplier" step="0.1"></div>
-      <p class="muted">Макс. шагов:</p>
-      <div class="form-row"><input type="number" id="s-max_steps" step="1"></div>
-      <p class="muted">Выход %:</p>
-      <div class="form-row"><input type="number" id="s-initial_exit_pct" step="0.1"></div>
-      <p class="muted">% контрактов на выход:</p>
-      <div class="form-row"><input type="number" id="s-exit_contract_pct" step="1"></div>
-      <p class="muted">Размер позиции на ВХОД (USDT, мин. 6):</p>
-      <div class="form-row"><input type="number" id="s-pos-size-entry" step="1" min="6"></div>
-      <p class="muted">Размер позиции на УСРЕДНЕНИЕ (USDT, мин. 6):</p>
-      <div class="form-row"><input type="number" id="s-pos-size-grid" step="1" min="6"></div>
       <div style="margin-top:24px">
         <button onclick="saveSettings()">Сохранить</button>
         <button onclick="clearData()" style="background:#ef4444; margin-left:8px;">Очистить базу</button>
       </div>
     </div>
+
+    <!-- Подвкладка: Усреднения -->
+    <div id="subtab-grid" class="sub-tab-content">
+      <p class="muted">Шаг сетки %:</p>
+      <div class="form-row"><input type="number" id="s-grid_step_pct" step="0.1"></div>
+      <p class="muted">Множитель шага сетки:</p>
+      <div class="form-row"><input type="number" id="s-grid_step_multiplier" step="0.1"></div>
+      <p class="muted">Макс. шагов:</p>
+      <div class="form-row"><input type="number" id="s-max_steps" step="1"></div>
+      <hr style="border-color:#252b36; margin: 20px 0;">
+      <p class="muted">Размер позиции на УСРЕДНЕНИЕ (USDT, мин. 6):</p>
+      <div class="form-row"><input type="number" id="s-pos-size-grid" step="1" min="6"></div>
+      <div style="margin-top:24px">
+        <button onclick="saveSettings()">Сохранить</button>
+      </div>
+    </div>
+
+    <!-- Подвкладка: Выходы -->
+    <div id="subtab-exit" class="sub-tab-content">
+      <p class="muted">Выход % (начальный):</p>
+      <div class="form-row"><input type="number" id="s-initial_exit_pct" step="0.1"></div>
+      <p class="muted">Множитель выхода (шаг прогрессии):</p>
+      <div class="form-row"><input type="number" id="s-exit_step_multiplier" step="0.1"></div>
+      <p class="muted">% контрактов на выход:</p>
+      <div class="form-row"><input type="number" id="s-exit_contract_pct" step="1"></div>
+      <hr style="border-color:#252b36; margin: 20px 0;">
+      <p class="muted">Размер позиции на ВХОД (USDT, мин. 6):</p>
+      <div class="form-row"><input type="number" id="s-pos-size-entry" step="1" min="6"></div>
+      <div style="margin-top:24px">
+        <button onclick="saveSettings()">Сохранить</button>
+      </div>
+    </div>
+
   </div></div>
 </main>
 
@@ -128,11 +164,13 @@ button:hover { background:#1d4ed8; }
     <p class="muted">Жесткий % входа (0 = авто): <input type="number" id="cfg-entry_pct" step="0.1" style="width:80px;"></p>
     <hr style="border-color:#252b36;">
     <p class="muted">Шаг сетки %: <input type="number" id="cfg-grid_step_pct" step="0.1" style="width:80px;"></p>
-    <p class="muted">Множитель: <input type="number" id="cfg-grid_step_multiplier" step="0.1" style="width:80px;"></p>
+    <p class="muted">Множитель сетки: <input type="number" id="cfg-grid_step_multiplier" step="0.1" style="width:80px;"></p>
     <p class="muted">Макс. шагов: <input type="number" id="cfg-max_steps" step="1" style="width:80px;"></p>
     <hr style="border-color:#252b36;">
     <p class="muted">Выход %: <input type="number" id="cfg-initial_exit_pct" step="0.1" style="width:80px;"></p>
+    <p class="muted">Множитель выхода: <input type="number" id="cfg-exit_step_multiplier" step="0.1" style="width:80px;"></p>
     <p class="muted">% контрактов на выход: <input type="number" id="cfg-exit_contract_pct" step="1" style="width:80px;"></p>
+    <hr style="border-color:#252b36;">
     <p class="muted">Размер позиции ВХОД (USDT): <input type="number" id="cfg-position_size_entry" step="1" style="width:80px;"></p>
     <p class="muted">Размер позиции УСРЕДНЕНИЕ (USDT): <input type="number" id="cfg-position_size_grid" step="1" style="width:80px;"></p>
     <div style="margin-top:24px; display:flex; gap:12px;">
@@ -164,6 +202,11 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   if (t.dataset.tab === 'trades') loadTrades();
   if (t.dataset.tab === 'closed') loadClosedTrades();
   if (t.dataset.tab === 'settings') loadSettings();
+}));
+
+document.querySelectorAll('.sub-tab').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.sub-tab').forEach(x => x.classList.toggle('active', x.dataset.subtab === t.dataset.subtab));
+  document.querySelectorAll('.sub-tab-content').forEach(c => c.classList.toggle('active', c.id === 'subtab-' + t.dataset.subtab));
 }));
 
 document.addEventListener('keydown', (e) => {
@@ -236,7 +279,6 @@ async function loadTrades() {
 }
 
 async function loadClosedTrades() {
-  // Загружаем статистику
   const stats = await (await fetch('/api/closed_stats')).json();
   const statsDiv = document.getElementById('closed-stats');
   
@@ -253,7 +295,6 @@ async function loadClosedTrades() {
     <span class="stat-item"><span class="lbl">Profit Factor:</span><span class="${pfClass}">${stats.profit_factor}</span></span>
   `;
   
-  // Загружаем сделки
   const d = await (await fetch('/api/closed_trades?limit=100')).json();
   const tb = document.getElementById('closed');
   if (!d.items.length) { tb.innerHTML = '<tr><td colspan="9" class="empty">Нет закрытых сделок</td></tr>'; return; }
@@ -375,16 +416,23 @@ function closeModal() {
 
 async function loadSettings() {
   const d = await (await fetch('/api/settings')).json();
+  
+  // Основные
   document.getElementById('min-turnover').value = d.min_turnover;
   document.getElementById('min-lev').value = d.min_leverage;
   document.getElementById('s-entry_pct').value = d.entry_pct;
+  
+  // Сетка
   document.getElementById('s-grid_step_pct').value = d.grid_step_pct;
   document.getElementById('s-grid_step_multiplier').value = d.grid_step_multiplier;
   document.getElementById('s-max_steps').value = d.max_steps;
+  document.getElementById('s-pos-size-grid').value = Math.max(6, d.position_size_grid || 6);
+  
+  // Выходы
   document.getElementById('s-initial_exit_pct').value = d.initial_exit_pct;
+  document.getElementById('s-exit_step_multiplier').value = d.exit_step_multiplier;
   document.getElementById('s-exit_contract_pct').value = d.exit_contract_pct;
   document.getElementById('s-pos-size-entry').value = Math.max(6, d.position_size_entry || 6);
-  document.getElementById('s-pos-size-grid').value = Math.max(6, d.position_size_grid || 6);
 }
 
 async function saveSettings() {
@@ -392,14 +440,18 @@ async function saveSettings() {
     min_turnover: parseFloat(document.getElementById('min-turnover').value),
     min_leverage: parseFloat(document.getElementById('min-lev').value),
     entry_pct: parseFloat(document.getElementById('s-entry_pct').value),
+    
     grid_step_pct: parseFloat(document.getElementById('s-grid_step_pct').value),
     grid_step_multiplier: parseFloat(document.getElementById('s-grid_step_multiplier').value),
     max_steps: parseInt(document.getElementById('s-max_steps').value),
+    position_size_grid: parseFloat(document.getElementById('s-pos-size-grid').value),
+    
     initial_exit_pct: parseFloat(document.getElementById('s-initial_exit_pct').value),
+    exit_step_multiplier: parseFloat(document.getElementById('s-exit_step_multiplier').value),
     exit_contract_pct: parseFloat(document.getElementById('s-exit_contract_pct').value),
-    position_size_entry: parseFloat(document.getElementById('s-pos-size-entry').value),
-    position_size_grid: parseFloat(document.getElementById('s-pos-size-grid').value)
+    position_size_entry: parseFloat(document.getElementById('s-pos-size-entry').value)
   };
+  
   await fetch('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -424,14 +476,12 @@ async function openConfig(symbol) {
   
   let cfg = cfgData.items.find(i => i.symbol === symbol);
   if (!cfg) {
-    cfg = { symbol: symbol, entry_pct: 0, grid_step_pct: 0, grid_step_multiplier: 0, max_steps: 0, initial_exit_pct: 0, exit_contract_pct: 0, position_size_entry: 0, position_size_grid: 0 };
+    cfg = { symbol: symbol, entry_pct: 0, grid_step_pct: 0, grid_step_multiplier: 0, max_steps: 0, initial_exit_pct: 0, exit_step_multiplier: 0, exit_contract_pct: 0, position_size_entry: 0, position_size_grid: 0 };
   }
   
   document.getElementById('modal-title').textContent = 'Настройки ' + symbol;
   document.getElementById('cfg-symbol').value = symbol;
   
-  // Просто ставим значения из базы. Если там 0, значит 0.
-  // В placeholder пишем подсказку "Глобальное: X"
   const setField = (id, value, globalValue) => {
     const el = document.getElementById(id);
     el.value = value;
@@ -443,6 +493,7 @@ async function openConfig(symbol) {
   setField('cfg-grid_step_multiplier', cfg.grid_step_multiplier, globalData.grid_step_multiplier);
   setField('cfg-max_steps', cfg.max_steps, globalData.max_steps);
   setField('cfg-initial_exit_pct', cfg.initial_exit_pct, globalData.initial_exit_pct);
+  setField('cfg-exit_step_multiplier', cfg.exit_step_multiplier, globalData.exit_step_multiplier);
   setField('cfg-exit_contract_pct', cfg.exit_contract_pct, globalData.exit_contract_pct);
   
   const setPosField = (id, value, globalValue) => {
@@ -473,6 +524,7 @@ async function saveConfig() {
     grid_step_multiplier: parseFloat(document.getElementById('cfg-grid_step_multiplier').value) || 0,
     max_steps: parseInt(document.getElementById('cfg-max_steps').value) || 0,
     initial_exit_pct: parseFloat(document.getElementById('cfg-initial_exit_pct').value) || 0,
+    exit_step_multiplier: parseFloat(document.getElementById('cfg-exit_step_multiplier').value) || 0,
     exit_contract_pct: parseFloat(document.getElementById('cfg-exit_contract_pct').value) || 0,
     position_size_entry: posEntry,
     position_size_grid: posGrid
