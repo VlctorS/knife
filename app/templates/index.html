@@ -47,12 +47,39 @@ button:hover { background:#1d4ed8; }
 .reason-skip { color: #8a93a6; }
 .reason-radar { color: #f59e0b; }
 
-/* Стили для калькулятора сетки (два столбца) */
-.grid-preview { background: #0e1117; border: 1px solid #252b36; border-radius: 8px; padding: 12px; margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 24px; font-family: monospace; font-size: 12px; }
-.grid-preview .item { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #1f242d; }
-.grid-preview .step { color: #8a93a6; }
-.grid-preview .val { color: #e6e6e6; font-weight: 600; }
-.grid-preview .total { grid-column: span 2; border-top: 1px solid #252b36; padding-top: 8px; margin-top: 4px; font-weight: bold; color: #2563eb; text-align: center; }
+/* Стили для калькулятора сетки (два столбца, сверху-вниз) */
+.grid-preview { 
+  background: #0e1117; 
+  border: 1px solid #252b36; 
+  border-radius: 8px; 
+  padding: 16px; 
+  margin-top: 16px; 
+  max-width: 500px; /* Ограничиваем ширину */
+  font-family: monospace; 
+  font-size: 14px; /* Чуть крупнее */
+}
+.grid-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 32px;
+}
+.grid-item { 
+  display: flex; 
+  justify-content: space-between; 
+  padding: 4px 0; 
+  border-bottom: 1px solid #1f242d; 
+}
+.grid-item .step { color: #8a93a6; }
+.grid-item .val { color: #e6e6e6; font-weight: 600; }
+.grid-total { 
+  border-top: 1px solid #252b36; 
+  padding-top: 12px; 
+  margin-top: 8px; 
+  font-weight: bold; 
+  color: #2563eb; 
+  text-align: center; 
+  font-size: 14px;
+}
 </style></head>
 <body>
 <header>
@@ -271,12 +298,15 @@ function updateGridPreview() {
   const maxSteps = parseInt(document.getElementById('s-max_steps').value) || 10;
   
   const previewDiv = document.getElementById('grid-preview');
-  let html = '';
+  
   let totalSum = 0;
+  let col1Html = '';
+  let col2Html = '';
   
   const stepsToShow = Math.min(maxSteps, 10);
-  for (let i = 0; i < stepsToShow; i++) {
-    const stepPct = startPct * (stepMult ** i);
+  
+  // Рассчитываем общую сумму, даже если шагов больше 10
+  for (let i = 0; i < maxSteps; i++) {
     let size = startSize;
     if (useSizeMult) {
       size = startSize * (sizeMult ** i);
@@ -284,24 +314,25 @@ function updateGridPreview() {
     size = Math.max(6, size);
     totalSum += size;
     
-    // Формат: 1 | 6
-    html += `<div class="item"><span class="step">${i+1}</span> <span class="val">${size.toFixed(1)}</span></div>`;
-  }
-  
-  // Досчитываем остаток, если шагов больше 10
-  if (maxSteps > stepsToShow) {
-    for (let i = stepsToShow; i < maxSteps; i++) {
-      const stepPct = startPct * (stepMult ** i);
-      let size = startSize;
-      if (useSizeMult) {
-        size = startSize * (sizeMult ** i);
+    // Строим HTML только для первых 10 шагов
+    if (i < stepsToShow) {
+      const itemHtml = `<div class="grid-item"><span class="step">${i+1} уср.</span> <span class="val">${size.toFixed(1)}</span></div>`;
+      if (i < 5) {
+        col1Html += itemHtml;
+      } else {
+        col2Html += itemHtml;
       }
-      size = Math.max(6, size);
-      totalSum += size;
     }
   }
 
-  html += `<div class="total">Всего усреднений: ${maxSteps} на сумму: ${totalSum.toFixed(2)} USDT</div>`;
+  const html = `
+    <div class="grid-columns">
+      <div>${col1Html}</div>
+      <div>${col2Html}</div>
+    </div>
+    <div class="grid-total">Всего усреднений: ${maxSteps} на сумму: ${totalSum.toFixed(2)} USDT</div>
+  `;
+  
   previewDiv.innerHTML = html;
 }
 
