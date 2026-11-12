@@ -88,6 +88,11 @@ button:hover { background:#1d4ed8; }
 .pnl-card { background: linear-gradient(135deg, #1e293b, #0f172a); border: 1px solid #22c55e; }
 .pnl-card .k { color: #86efac; }
 .pnl-card .v { color: #dcfce7; }
+
+/* Стили для симуляции */
+.sim-modal-content { width: 800px; max-width: 95vw; }
+.sim-table th, .sim-table td { padding: 8px 12px; font-size: 12px; }
+.sim-table .step-col { width: 50px; text-align: center; }
 </style></head>
 <body>
 <header>
@@ -228,32 +233,100 @@ button:hover { background:#1d4ed8; }
   </div></div>
 </main>
 
+<!-- МОДАЛЬНОЕ ОКНО ИНДИВИДУАЛЬНЫХ НАСТРОЕК -->
 <div class="modal" id="config-modal">
-  <div class="modal-content">
+  <div class="modal-content" style="width: 900px; max-width: 95vw;">
     <h2 id="modal-title">Настройки</h2>
     <input type="hidden" id="cfg-symbol">
-    <p class="muted">Жесткий % входа (0 = авто): <input type="number" id="cfg-entry_pct" step="0.1" style="width:80px;"></p>
-    <hr style="border-color:#252b36;">
-    <p class="muted">Шаг сетки %: <input type="number" id="cfg-grid_step_pct" step="0.1" style="width:80px;"></p>
-    <p class="muted">Множитель сетки: <input type="number" id="cfg-grid_step_multiplier" step="0.1" style="width:80px;"></p>
-    <p class="muted">Множитель ставки: <input type="number" id="cfg-grid_size_multiplier" step="0.1" style="width:80px;"></p>
-    <p class="muted">Макс. шагов: <input type="number" id="cfg-max_steps" step="1" style="width:80px;"></p>
-    <hr style="border-color:#252b36;">
-    <p class="muted">Выход %: <input type="number" id="cfg-initial_exit_pct" step="0.1" style="width:80px;"></p>
-    <p class="muted">Множитель выхода: <input type="number" id="cfg-exit_step_multiplier" step="0.1" style="width:80px;"></p>
-    <p class="muted">% контрактов на выход: <input type="number" id="cfg-exit_contract_pct" step="1" style="width:80px;"></p>
-    <hr style="border-color:#252b36;">
-    <p class="muted">Размер позиции ВХОД (USDT): <input type="number" id="cfg-position_size_entry" step="1" style="width:80px;"></p>
-    <p class="muted">Размер позиции УСРЕДНЕНИЕ (USDT): <input type="number" id="cfg-position_size_grid" step="1" style="width:80px;"></p>
-    <div style="margin-top:24px; display:flex; gap:12px;">
-      <button onclick="saveConfig()">Сохранить</button>
-      <button onclick="closeModal()" style="background:#4b5563;">Отмена</button>
+    
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+      <!-- Левая колонка: Сетка -->
+      <div>
+        <h3 style="color:#8a93a6; font-size:14px; margin-top:0;">Вход и усреднения</h3>
+        <p class="muted">Жесткий % входа (0 = авто):</p>
+        <div class="form-row"><input type="number" id="cfg-entry_pct" step="0.1" style="width:100%;"></div>
+        
+        <p class="muted">Шаг сетки % (0 = глобальное):</p>
+        <div class="form-row"><input type="number" id="cfg-grid_step_pct" step="0.1" style="width:100%;"></div>
+        
+        <p class="muted">Множитель шага сетки:</p>
+        <div class="form-row"><input type="number" id="cfg-grid_step_multiplier" step="0.1" style="width:100%;"></div>
+        
+        <p class="muted">Множитель ставки усреднения:</p>
+        <div class="form-row"><input type="number" id="cfg-grid_size_multiplier" step="0.1" style="width:100%;"></div>
+
+        <p class="muted">Макс. шагов сетки:</p>
+        <div class="form-row"><input type="number" id="cfg-max_steps" step="1" style="width:100%;"></div>
+        
+        <p class="muted">Размер позиции ВХОД (USDT):</p>
+        <div class="form-row"><input type="number" id="cfg-position_size_entry" step="1" style="width:100%;"></div>
+        
+        <p class="muted">Размер позиции УСРЕДНЕНИЕ (USDT):</p>
+        <div class="form-row"><input type="number" id="cfg-position_size_grid" step="1" style="width:100%;"></div>
+      </div>
+
+      <!-- Правая колонка: Выходы -->
+      <div>
+        <h3 style="color:#8a93a6; font-size:14px; margin-top:0;">Выходы</h3>
+        <p class="muted">Выход % (0 = глобальное):</p>
+        <div class="form-row"><input type="number" id="cfg-initial_exit_pct" step="0.1" style="width:100%;"></div>
+        
+        <p class="muted">Множитель выхода:</p>
+        <div class="form-row"><input type="number" id="cfg-exit_step_multiplier" step="0.1" style="width:100%;"></div>
+        
+        <p class="muted">% контрактов на выход:</p>
+        <div class="form-row"><input type="number" id="cfg-exit_contract_pct" step="1" style="width:100%;"></div>
+      </div>
+    </div>
+
+    <hr style="border-color:#252b36; margin: 20px 0;">
+    
+    <div style="display: flex; gap: 12px; justify-content: space-between;">
+      <div>
+        <button onclick="saveConfig()">Сохранить</button>
+        <button onclick="closeModal()" style="background:#4b5563;">Отмена</button>
+      </div>
+      <button onclick="openSimulation()" style="background:#8b5cf6;">Расчет профита и убытков</button>
+    </div>
+  </div>
+</div>
+
+<!-- МОДАЛЬНОЕ ОКНО СИМУЛЯЦИИ -->
+<div class="modal" id="sim-modal">
+  <div class="modal-content sim-modal-content">
+    <h2 id="sim-title">Моделирование</h2>
+    
+    <div class="sub-tabs">
+      <div class="sub-tab active" data-simtab="profit">Профит (движение в нашу сторону)</div>
+      <div class="sub-tab" data-simtab="loss">Убыток (движение против нас)</div>
+    </div>
+    
+    <div id="simtab-profit" class="sub-tab-content active">
+      <table class="sim-table" style="width:100%">
+        <thead><tr>
+          <th>Шаг</th><th>Цена</th><th>Действие</th><th>Контрактов</th><th>$ эквивалент</th><th>Итоговый PnL</th>
+        </tr></thead>
+        <tbody id="sim-profit-body"></tbody>
+      </table>
+    </div>
+    
+    <div id="simtab-loss" class="sub-tab-content">
+      <table class="sim-table" style="width:100%">
+        <thead><tr>
+          <th>Шаг</th><th>Цена</th><th>Действие</th><th>Контрактов</th><th>$ эквивалент</th><th>Итоговый PnL</th>
+        </tr></thead>
+        <tbody id="sim-loss-body"></tbody>
+      </table>
+    </div>
+
+    <div style="margin-top:24px;">
+      <button onclick="closeSimModal()" style="background:#4b5563;">Закрыть</button>
     </div>
   </div>
 </div>
 
 <div class="modal" id="history-modal">
-  <div class="modal-content" style="width: 1200px; max-width: 95vw;">
+  <div class="modal-content" style="width: 900px; max-width: 95vw;">
     <h2 id="history-title">История сделки</h2>
     <div id="history-content" style="overflow-x: auto;"></div>
     <div style="margin-top:24px;">
@@ -281,10 +354,17 @@ document.querySelectorAll('.sub-tab').forEach(t => t.addEventListener('click', (
   document.querySelectorAll('.sub-tab-content').forEach(c => c.classList.toggle('active', c.id === 'subtab-' + t.dataset.subtab));
 }));
 
+// Переключение вкладок симуляции
+document.querySelectorAll('.sub-tab[data-simtab]').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.sub-tab[data-simtab]').forEach(x => x.classList.toggle('active', x.dataset.simtab === t.dataset.simtab));
+  document.querySelectorAll('#sim-modal .sub-tab-content').forEach(c => c.classList.toggle('active', c.id === 'simtab-' + t.dataset.simtab));
+}));
+
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     document.getElementById('config-modal').classList.remove('active');
     document.getElementById('history-modal').classList.remove('active');
+    document.getElementById('sim-modal').classList.remove('active');
   }
 });
 
@@ -373,7 +453,6 @@ async function loadStatus() {
 
 async function updateBalanceAndPnl() {
   try {
-    // 1. Бумажный баланс (реализованный PnL + 100)
     const statsRes = await fetch('/api/closed_stats');
     const stats = await statsRes.json();
     const totalRealizedPnl = stats.total_pnl || 0;
@@ -383,7 +462,6 @@ async function updateBalanceAndPnl() {
     balEl.textContent = currentBalance.toFixed(2) + ' USDT';
     balEl.className = currentBalance >= 100 ? 'v pump' : 'v dump';
     
-    // 2. Живой PnL (только сумма по открытым сделкам из таблицы)
     const openStatsRes = await fetch('/api/open_pnl');
     const openStats = await openStatsRes.json();
     const livePnl = openStats.total_pnl || 0;
@@ -393,17 +471,12 @@ async function updateBalanceAndPnl() {
     pnlEl.className = 'v ' + (livePnl >= 0 ? 'pump' : 'dump');
     
     const pnlCard = document.getElementById('pnl-card');
-    if (livePnl >= 0) {
-      pnlCard.style.borderColor = '#22c55e';
-    } else {
-      pnlCard.style.borderColor = '#ef4444';
-    }
+    pnlCard.style.borderColor = livePnl >= 0 ? '#22c55e' : '#ef4444';
     
   } catch(e) {
     console.error('Failed to update balance:', e);
   }
 }
-
 
 async function loadAlerts() {
   const d = await (await fetch('/api/alerts?limit=100')).json();
@@ -621,14 +694,12 @@ async function openHistory(tradeId, symbol) {
         ${d.items.map(h => {
           const timeStr = new Date(h.ts + 'Z').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
           
-          // Считаем итог только по закрытиям
           if (h.action.includes('CLOSE')) {
               totalRealizedPnl += (h.pnl || 0);
           }
 
           const pnlClass = h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : 'muted');
           
-          // Красиво называем действия
           let actionName = h.action;
           if (h.action === 'OPEN') actionName = 'Открытие';
           if (h.action === 'GRID_ADD') actionName = 'Усреднение';
@@ -665,6 +736,10 @@ function closeHistory() {
 
 function closeModal() {
   document.getElementById('config-modal').classList.remove('active');
+}
+
+function closeSimModal() {
+  document.getElementById('sim-modal').classList.remove('active');
 }
 
 async function loadSettings() {
@@ -806,6 +881,77 @@ async function saveConfig() {
   if (document.getElementById('tab-stats').classList.contains('active')) {
     loadStats();
   }
+}
+
+// Функция для расчета симуляции
+async function openSimulation() {
+  const symbol = document.getElementById('cfg-symbol').value;
+  const entryPrice = parseFloat(prompt("Введите текущую цену входа (Entry Price):", "1.0"));
+  if (!entryPrice || entryPrice <= 0) return;
+  
+  // Собираем данные из модального окна (если 0 - берем глобальные)
+  const globalData = await (await fetch('/api/settings')).json();
+  
+  const getVal = (id, fallback) => {
+    const v = parseFloat(document.getElementById(id).value);
+    return v > 0 ? v : fallback;
+  };
+  
+  const payload = {
+    entry_price: entryPrice,
+    entry_size: getVal('cfg-position_size_entry', globalData.position_size_entry) || 6,
+    grid_step_pct: getVal('cfg-grid_step_pct', globalData.grid_step_pct) || 5,
+    grid_step_mult: getVal('cfg-grid_step_multiplier', globalData.grid_step_multiplier) || 2.5,
+    grid_size_mult: getVal('cfg-grid_size_multiplier', globalData.grid_size_multiplier) || 1.0,
+    max_steps: getVal('cfg-max_steps', globalData.max_steps) || 10,
+    exit_pct: getVal('cfg-initial_exit_pct', globalData.initial_exit_pct) || 15,
+    exit_step_mult: getVal('cfg-exit_step_multiplier', globalData.exit_step_multiplier) || 1.6,
+    exit_contract_pct: getVal('cfg-exit_contract_pct', globalData.exit_contract_pct) || 30,
+    fee_pct: globalData.fee_pct || 0.055,
+    leverage: 10, // Условно
+    side: 'LONG' // Условно
+  };
+
+  document.getElementById('sim-title').textContent = `Симуляция для ${symbol} (Вход: ${entryPrice})`;
+  document.getElementById('sim-profit-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
+  document.getElementById('sim-loss-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
+  document.getElementById('sim-modal').classList.add('active');
+
+  const res = await fetch('/api/simulate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  });
+  
+  const data = await res.json();
+  if (!data.ok) {
+      alert('Ошибка симуляции: ' + (data.error || 'unknown'));
+      return;
+  }
+
+  // Рендер профита
+  document.getElementById('sim-profit-body').innerHTML = data.profit_steps.map(s => `
+    <tr>
+      <td class="step-col">${s.step}</td>
+      <td>${fmtNum(s.price)}</td>
+      <td>${s.action}</td>
+      <td>${fmtNum(s.qty, 2)}</td>
+      <td>${fmtNum(s.position_usdt, 2)}</td>
+      <td class="${s.pnl >= 0 ? 'pump' : 'dump'}">${s.pnl > 0 ? '+' : ''}${fmtNum(s.pnl, 4)}</td>
+    </tr>
+  `).join('');
+
+  // Рендер убытка
+  document.getElementById('sim-loss-body').innerHTML = data.loss_steps.map(s => `
+    <tr>
+      <td class="step-col">${s.step}</td>
+      <td>${fmtNum(s.price)}</td>
+      <td>${s.action}</td>
+      <td>${fmtNum(s.qty, 2)}</td>
+      <td>${fmtNum(s.position_usdt, 2)}</td>
+      <td class="${s.pnl >= 0 ? 'pump' : 'dump'}">${s.pnl > 0 ? '+' : ''}${fmtNum(s.pnl, 4)}</td>
+    </tr>
+  `).join('');
 }
 
 async function tick() { 

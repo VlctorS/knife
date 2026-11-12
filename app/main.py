@@ -128,7 +128,6 @@ async def api_stats(limit: int = 50):
             
         return {'items': items}
 
-# ИСПРАВЛЕНО: Восстановлен декоратор @app.get('/api/trades')
 @app.get('/api/trades')
 async def api_trades(limit: int = 100):
     async with SessionLocal() as session:
@@ -137,7 +136,6 @@ async def api_trades(limit: int = 100):
         )
         items = []
         for t in r.scalars().all():
-            # Явно приводим все числовые поля к float, чтобы FastAPI не падал на Decimal
             avg_price = float(t.avg_entry_price) if t.avg_entry_price else 0.0
             curr_price = float(t.current_price) if t.current_price else 0.0
             
@@ -170,16 +168,12 @@ async def api_trades(limit: int = 100):
 @app.get('/api/open_pnl')
 async def api_open_pnl():
     async with SessionLocal() as session:
-        # Суммируем PnL только по открытым и частично закрытым сделкам
         r = await session.execute(
             select(func.sum(Trade.pnl))
             .where(Trade.status.in_(['OPEN', 'PARTIAL']))
         )
         total_open_pnl = r.scalar() or 0.0
-        
-        return {
-            'total_pnl': round(float(total_open_pnl), 4)
-        }
+        return {'total_pnl': round(float(total_open_pnl), 4)}
 
 @app.get('/api/closed_trades')
 async def api_closed_trades(limit: int = 100):
@@ -368,7 +362,6 @@ async def api_trade_history(trade_id: int):
         cfg = cfg_res.scalars().first()
         gs = await session.get(Settings, 1)
         
-        # --- Параметры сетки ---
         start_pct = cfg.grid_step_pct if cfg and cfg.grid_step_pct > 0 else (gs.grid_step_pct if gs else 5.0)
         mult = cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs else 2.5)
         size_mult = cfg.grid_size_multiplier if cfg and cfg.grid_size_multiplier > 0 else (gs.grid_size_multiplier if gs else 1.0)
@@ -385,7 +378,6 @@ async def api_trade_history(trade_id: int):
         else:
             next_grid_price = trade.avg_entry_price * (1 + next_step_pct / 100)
 
-        # --- Параметры выходов ---
         start_exit = cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs else 15.0)
         exit_mult = cfg.exit_step_multiplier if cfg and cfg.exit_step_multiplier > 0 else (gs.exit_step_multiplier if gs else 1.6)
         close_pct = cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs else 50.0)
@@ -407,9 +399,6 @@ async def api_trade_history(trade_id: int):
         
         items = []
         for h in r.scalars().all():
-            # ВАЖНО: Для закрытых частей (PARTIAL_CLOSE, FULL_CLOSE, MANUAL_CLOSE) 
-            # показываем РЕАЛИЗОВАННЫЙ PnL из базы.
-            # Для OPEN и GRID_ADD показываем 0
             pnl_to_show = float(h.pnl) if h.action in ('PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE') and h.pnl else 0.0
             
             items.append({
@@ -431,6 +420,161 @@ async def api_trade_history(trade_id: int):
             'exit_qty': round(float(exit_qty), 2),
             'est_profit': round(float(est_profit), 2)
         }
+
+# НОВЫЙ ЭНДПОИНТ ДЛЯ СИМУЛЯЦИИ
+@app.post('/api/simulate')
+async def api_simulate(request: Request):
+    data = await request.json()
+    
+    entry_price = float(data.get('entry_price', 0))
+    entry_size = float(data.get('entry_size', 6))
+    grid_step_pct = float(data.get('grid_step_pct', 5))
+    grid_step_mult = float(data.get('grid_step_mult', 2.5))
+    grid_size_mult = float(data.get('grid_size_mult', 1.0))
+    max_steps = int(data.get('max_steps', 10))
+    exit_pct = float(data.get('exit_pct', 15))
+    exit_step_mult = float(data.get('exit_step_mult', 1.6))
+    exit_contract_pct = float(data.get('exit_contract_pct', 30))
+    fee_pct = float(data.get('fee_pct', 0.055))
+    leverage = float(data.get('leverage', 10))
+    side = data.get('side', 'LONG')
+
+    if entry_price <= 0:
+        return {'ok': False, 'error': 'Invalid entry price'}
+
+    # --- Сценарий УБЫТКА (движение против нас) ---
+    loss_steps = []
+    total_qty = entry_size / entry_price
+    avg_price = entry_price
+    total_entry_fee = entry_size * (fee_pct / 100)
+    
+    # Добавляем начальный вход как 0-й шаг
+    loss_steps.append({
+        'step': 0,
+        'price': entry_price,
+        'qty': total_qty,
+        'total_qty': total_qty,
+        'avg_price': avg_price,
+        'position_usdt': total_qty * entry_price,
+        'pnl': -total_entry_fee,
+        'action': 'Вход'
+    })
+
+    current_price = entry_price
+    for i in range(1, max_steps + 1):
+        # Шаг сетки для этого усреднения
+        step_pct = grid_step_pct * (grid_step_mult ** (i - 1))
+        
+        # Движение против нас
+        if side == 'LONG':
+            current_price = current_price * (1 - step_pct / 100)
+        else:
+            current_price = current_price * (1 + step_pct / 100)
+            
+        # Размер усреднения
+        add_size = entry_size * (grid_size_mult ** (i - 1))
+        add_size = max(6.0, add_size)
+        add_qty = add_size / current_price
+        
+        # Новая средняя
+        old_total_qty = total_qty
+        total_qty += add_qty
+        avg_price = (avg_price * old_total_qty + current_price * add_qty) / total_qty
+        
+        add_fee = add_size * (fee_pct / 100)
+        total_entry_fee += add_fee
+        
+        # Текущий плавающий PnL (без учета комиссии выхода)
+        if side == 'LONG':
+            floating_pnl = total_qty * (current_price - avg_price)
+        else:
+            floating_pnl = total_qty * (avg_price - current_price)
+            
+        # Вычитаем уже уплаченные комиссии на вход
+        net_pnl = floating_pnl - total_entry_fee
+        
+        loss_steps.append({
+            'step': i,
+            'price': current_price,
+            'qty': add_qty,
+            'total_qty': total_qty,
+            'avg_price': avg_price,
+            'position_usdt': total_qty * current_price,
+            'pnl': net_pnl,
+            'action': f'Уср. {i}'
+        })
+
+    # --- Сценарий ПРОФИТА (движение в нашу сторону) ---
+    profit_steps = []
+    current_price = entry_price
+    total_qty = entry_size / entry_price
+    avg_price = entry_price
+    total_entry_fee = entry_size * (fee_pct / 100)
+    realized_pnl = 0.0
+    exit_step = 0
+    remaining_qty = total_qty
+    
+    profit_steps.append({
+        'step': 0,
+        'price': entry_price,
+        'qty': total_qty,
+        'total_qty': total_qty,
+        'avg_price': avg_price,
+        'position_usdt': total_qty * entry_price,
+        'pnl': 0.0,
+        'action': 'Вход'
+    })
+
+    while remaining_qty > 0.0001 and exit_step < 10:
+        exit_step += 1
+        target_exit_pct = exit_pct * (exit_step_mult ** (exit_step - 1))
+        
+        # Движение в нашу сторону
+        if side == 'LONG':
+            current_price = current_price * (1 + target_exit_pct / 100)
+        else:
+            current_price = current_price * (1 - target_exit_pct / 100)
+            
+        # Сколько закрываем
+        close_qty = remaining_qty * (exit_contract_pct / 100)
+        close_qty = min(close_qty, remaining_qty) # не больше остатка
+        
+        # PnL от этой части (с учетом средней цены)
+        if side == 'LONG':
+            part_pnl = close_qty * (current_price - avg_price)
+        else:
+            part_pnl = close_qty * (avg_price - current_price)
+            
+        # Комиссия выхода
+        exit_fee = (close_qty * current_price) * (fee_pct / 100)
+        
+        # Чистый PnL от этой части (вычитаем только долю комиссии входа, пропорциональную закрытой части)
+        entry_fee_part = total_entry_fee * (close_qty / total_qty) if total_qty > 0 else 0
+        net_part_pnl = part_pnl - exit_fee - entry_fee_part
+        
+        realized_pnl += net_part_pnl
+        remaining_qty -= close_qty
+        
+        profit_steps.append({
+            'step': exit_step,
+            'price': current_price,
+            'qty': close_qty,
+            'total_qty': remaining_qty,
+            'avg_price': avg_price,
+            'position_usdt': remaining_qty * current_price,
+            'pnl': realized_pnl,
+            'action': f'Выход {exit_step} ({exit_contract_pct}%)'
+        })
+        
+        # Если остаток слишком мал, выходим из цикла
+        if remaining_qty < 0.0001:
+            break
+
+    return {
+        'ok': True,
+        'loss_steps': loss_steps,
+        'profit_steps': profit_steps
+    }
 
 @app.get("/api/configs")
 async def api_get_configs():
