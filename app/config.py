@@ -33,5 +33,31 @@ class Settings:
     symbols_refresh_sec: int = _i('SYMBOLS_REFRESH_SEC', 3600)
     log_level: str = os.getenv('LOG_LEVEL', 'INFO')
 
+    # --- Детекция «ножа» (rejection candle) ---
+    # Минимальный размер движения свечи (high-low)/open, в %, чтобы вообще
+    # считать её кандидатом на нож. Мелкие свечи не рассматриваем.
+    min_knife_move_pct: float = _f('MIN_KNIFE_MOVE_PCT', 2.0)
+    # Тень (верхняя или нижняя) в % от диапазона свечи, при которой свеча
+    # считается отвергнутой (rejection).
+    rejection_shadow_pct: float = _f('REJECTION_SHADOW_PCT', 55.0)
+    # Тело свечи не должно превышать эту долю диапазона, иначе это импульс,
+    # а не отбой.
+    max_body_frac: float = _f('MAX_BODY_FRAC', 0.35)
+    # Суммарные тени в %, начиная с которых свеча «с тенью».
+    min_shadow_pct: float = _f('MIN_SHADOW_PCT', 60.0)
+
+    # --- Разделение всплеска и продолжения тренда ---
+    # Минимальное суммарное движение окна старшего ТФ в %, чтобы назвать его трендом.
+    trend_min_move_pct: float = _f('TREND_MIN_MOVE_PCT', 1.5)
+    # Если сила тренда на старшем ТФ >= этого значения и направлена вдоль ножа —
+    # считаем это продолжением тренда и входить нельзя.
+    max_anchor_trend: float = _f('MAX_ANCHOR_TREND', 0.5)
+    # Минимальная уверенность сигнала (0..1) для открытия сделки.
+    min_confidence: float = _f('MIN_CONFIDENCE', 0.35)
+
+    # --- Комиссии Bybit (USDT perpetual, taker) ---
+    # Bybit берёт комиссию с НОМИНАЛА позиции и отдельно на вход и на выход.
+    taker_fee_pct: float = _f('TAKER_FEE_PCT', 0.055)
+
 
 settings = Settings()
