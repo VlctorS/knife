@@ -139,6 +139,7 @@ async def api_trades(limit: int = 100):
             avg_price = float(t.avg_entry_price) if t.avg_entry_price else 0.0
             curr_price = float(t.current_price) if t.current_price else 0.0
             
+            # 1. Считаем изменение цены (в %)
             if avg_price > 0:
                 if t.side == 'LONG':
                     change_pct = (curr_price - avg_price) / avg_price * 100
@@ -147,16 +148,33 @@ async def api_trades(limit: int = 100):
             else:
                 change_pct = 0.0
             
+            # 2. Считаем ЧИСТЫЙ PnL (как будто мы закрываем прямо сейчас)
+            total_qty = float(t.total_qty) if t.total_qty else 0.0
+            
+            # Валовая прибыль по текущей цене
+            if t.side == 'LONG':
+                gross = total_qty * (curr_price - avg_price)
+            else:
+                gross = total_qty * (avg_price - curr_price)
+            
+            # Комиссия за выход по текущей цене
+            gs = await session.get(Settings, 1)
+            fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
+            exit_fee = (total_qty * curr_price) * (fee_pct / 100.0)
+            
+            # Итоговый чистый PnL = Реализовано + Валовая - Комиссия входа - Комиссия выхода
+            net_pnl = float(t.realized_pnl) + gross - float(t.entry_fee) - exit_fee
+            
             items.append({
                 'id': t.id, 'symbol': t.symbol, 'side': t.side,
                 'entry_price': float(t.entry_price) if t.entry_price else 0.0, 
                 'avg_entry_price': avg_price,
                 'current_price': curr_price, 
                 'grid_step': t.grid_step,
-                'total_qty': float(t.total_qty) if t.total_qty else 0.0, 
+                'total_qty': total_qty, 
                 'total_margin': float(t.total_margin) if t.total_margin else 0.0,
                 'status': t.status, 
-                'pnl': float(t.pnl) if t.pnl else 0.0, 
+                'pnl': round(net_pnl, 4), # <-- ВОТ ТУТ ТЕПЕРЬ ЧИСТЫЙ PNL
                 'leverage': float(t.leverage) if t.leverage else 10.0,
                 'change_pct': round(change_pct, 2),
                 'exit_step': t.exit_step,
