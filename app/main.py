@@ -365,11 +365,9 @@ async def api_trade_history(trade_id: int):
         current_grid_step = trade.grid_step
         next_step_pct = start_pct * (mult ** current_grid_step)
         
-        # Размер следующего усреднения с учетом множителя
         next_grid_size = base_size * (size_mult ** current_grid_step)
         next_grid_size = max(6.0, next_grid_size)
         
-        # Цена следующего усреднения (для LONG идем вниз, для SHORT вверх)
         if trade.side == 'LONG':
             next_grid_price = trade.avg_entry_price * (1 - next_step_pct / 100)
         else:
@@ -383,13 +381,11 @@ async def api_trade_history(trade_id: int):
         current_exit_step = trade.exit_step if trade.exit_step is not None else 0
         next_exit_pct = start_exit * (exit_mult ** current_exit_step)
         
-        # Цена ближайшего выхода
         if trade.side == 'LONG':
             next_exit_price = trade.avg_entry_price * (1 + next_exit_pct / 100)
         else:
             next_exit_price = trade.avg_entry_price * (1 - next_exit_pct / 100)
             
-        # Объем для выхода (в контрактах) и примерный профит в USDT
         exit_qty = trade.total_qty * (close_pct / 100.0)
         est_profit = exit_qty * abs(next_exit_price - trade.avg_entry_price)
         
@@ -399,16 +395,14 @@ async def api_trade_history(trade_id: int):
         
         items = []
         for h in r.scalars().all():
-            current_pnl = h.pnl
-            if trade.status in ('OPEN', 'PARTIAL') and trade.current_price > 0:
-                if trade.side == 'LONG':
-                    current_pnl = h.qty * (trade.current_price - h.price)
-                else:
-                    current_pnl = h.qty * (h.price - trade.current_price)
+            # ВАЖНО: Для закрытых частей (PARTIAL_CLOSE, FULL_CLOSE, MANUAL_CLOSE) 
+            # показываем РЕАЛИЗОВАННЫЙ PnL из базы.
+            # Для OPEN и GRID_ADD показываем 0 (или можно текущий плавающий, но лучше 0, чтобы не путать)
+            pnl_to_show = h.pnl if h.action in ('PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE') else 0.0
             
             items.append({
                 'ts': h.ts.isoformat(), 'action': h.action, 'price': h.price,
-                'qty': h.qty, 'margin': h.margin, 'pnl': current_pnl, 'notes': h.notes,
+                'qty': h.qty, 'margin': h.margin, 'pnl': pnl_to_show, 'notes': h.notes,
             })
             
         return {

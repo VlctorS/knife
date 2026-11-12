@@ -597,7 +597,6 @@ async function openHistory(tradeId, symbol) {
   let title = `История: ${symbol}`;
   if (openChange !== null) title += ` (вход при ${openChange.toFixed(2)}%)`;
   
-  // Формируем красивые строки с планами
   const gridLine = `Следующее уср. (${d.next_grid_pct}%) по цене ${d.next_grid_price} на ${d.next_grid_size} USDT (шаг ${d.current_grid_step} из ${d.max_steps})`;
   const exitLine = `Ближайший выход (${d.next_exit_pct}%) по цене ${d.next_exit_price} ${d.exit_close_pct}% контрактов [${d.exit_qty} ${symbol}] = ${d.est_profit} USDT`;
 
@@ -611,30 +610,47 @@ async function openHistory(tradeId, symbol) {
   
   document.getElementById('history-content').innerHTML = `
     <table style="width:100%">
-      <thead><tr><th>Время (МСК)</th><th>Действие</th><th>Цена</th><th>Кол-во</th><th>PnL</th></tr></thead>
+      <thead><tr>
+        <th>Время (МСК)</th>
+        <th>Действие</th>
+        <th>Цена</th>
+        <th>Кол-во</th>
+        <th>Профит (USDT)</th>
+      </tr></thead>
       <tbody>
         ${d.items.map(h => {
           const timeStr = new Date(h.ts + 'Z').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
           
+          // Считаем итог только по закрытиям
           if (h.action.includes('CLOSE')) {
               totalRealizedPnl += (h.pnl || 0);
           }
 
-          const pnlClass = h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : '');
+          const pnlClass = h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : 'muted');
           
+          // Красиво называем действия
+          let actionName = h.action;
+          if (h.action === 'OPEN') actionName = 'Открытие';
+          if (h.action === 'GRID_ADD') actionName = 'Усреднение';
+          if (h.action === 'PARTIAL_CLOSE') actionName = '<span class="pump">Частичный вывод</span>';
+          if (h.action === 'FULL_CLOSE') actionName = '<span class="pump">Полное закрытие</span>';
+          if (h.action === 'MANUAL_CLOSE') actionName = '<span class="pump">Ручное закрытие</span>';
+
           return `
             <tr>
               <td class="muted">${timeStr}</td>
-              <td>${h.action} (${h.notes})</td>
+              <td>${actionName}</td>
               <td>${fmtNum(h.price)}</td>
               <td>${fmtNum(h.qty, 2)}</td>
-              <td class="${pnlClass}">${fmtNum(h.pnl, 4)}</td>
+              <td class="${pnlClass}" style="font-weight:600;">
+                ${h.pnl !== 0 ? (h.pnl > 0 ? '+' : '') + fmtNum(h.pnl, 4) : '<span class="muted">—</span>'}
+              </td>
             </tr>
           `;
         }).join('')}
         ${d.items.some(h => h.action.includes('CLOSE')) ? `
           <tr style="font-weight:bold; border-top: 2px solid #252b36;">
-            <td colspan="4" style="text-align:right;">Итого реализовано по сделке:</td>
+            <td colspan="4" style="text-align:right;">Итого выведено по сделке:</td>
             <td class="${totalRealizedPnl > 0 ? 'pump' : (totalRealizedPnl < 0 ? 'dump' : '')}">${fmtNum(totalRealizedPnl, 4)}</td>
           </tr>
         ` : ''}
