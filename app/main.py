@@ -129,6 +129,21 @@ async def api_stats(limit: int = 50):
         return {'items': items}
 
 @app.get('/api/trades')
+
+@app.get('/api/open_pnl')
+async def api_open_pnl():
+    async with SessionLocal() as session:
+        # Суммируем PnL только по открытым и частично закрытым сделкам
+        r = await session.execute(
+            select(func.sum(Trade.pnl))
+            .where(Trade.status.in_(['OPEN', 'PARTIAL']))
+        )
+        total_open_pnl = r.scalar() or 0.0
+        
+        return {
+            'total_pnl': round(total_open_pnl, 4)
+        }
+
 async def api_trades(limit: int = 100):
     async with SessionLocal() as session:
         r = await session.execute(

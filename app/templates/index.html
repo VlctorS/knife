@@ -373,10 +373,9 @@ async function loadStatus() {
 
 async function updateBalanceAndPnl() {
   try {
-    const res = await fetch('/api/closed_stats');
-    const stats = await res.json();
-    
-    // 1. Бумажный баланс = 100 + (сумма ВСЕХ реализованных выходов)
+    // 1. Бумажный баланс (реализованный PnL + 100)
+    const statsRes = await fetch('/api/closed_stats');
+    const stats = await statsRes.json();
     const totalRealizedPnl = stats.total_pnl || 0;
     const currentBalance = 100.00 + totalRealizedPnl;
     
@@ -384,16 +383,10 @@ async function updateBalanceAndPnl() {
     balEl.textContent = currentBalance.toFixed(2) + ' USDT';
     balEl.className = currentBalance >= 100 ? 'v pump' : 'v dump';
     
-    // 2. Живой PnL = Реализованный + Плавающий (по открытым сделкам)
-    let openPnl = 0;
-    const tradesRes = await fetch('/api/trades?limit=100');
-    const tradesData = await tradesRes.json();
-    
-    for (const t of tradesData.items) {
-      openPnl += (t.pnl || 0);
-    }
-    
-    const livePnl = totalRealizedPnl + openPnl;
+    // 2. Живой PnL (только сумма по открытым сделкам из таблицы)
+    const openStatsRes = await fetch('/api/open_pnl');
+    const openStats = await openStatsRes.json();
+    const livePnl = openStats.total_pnl || 0;
     
     const pnlEl = document.getElementById('s-live-pnl');
     pnlEl.textContent = (livePnl >= 0 ? '+' : '') + livePnl.toFixed(2) + ' USDT';
