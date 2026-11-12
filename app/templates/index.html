@@ -45,6 +45,12 @@ button:hover { background:#1d4ed8; }
 .reason-success { color: #22c55e; }
 .reason-skip { color: #8a93a6; }
 .reason-radar { color: #f59e0b; }
+
+/* Стили для калькулятора сетки */
+.grid-preview { background: #0e1117; border: 1px solid #252b36; border-radius: 8px; padding: 12px; margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; font-family: monospace; font-size: 12px; }
+.grid-preview .step { color: #8a93a6; }
+.grid-preview .val { color: #e6e6e6; }
+.grid-preview .total { grid-column: span 2; border-top: 1px solid #252b36; padding-top: 8px; margin-top: 4px; font-weight: bold; color: #2563eb; }
 </style></head>
 <body>
 <header>
@@ -109,7 +115,7 @@ button:hover { background:#1d4ed8; }
     
     <div class="sub-tabs">
       <div class="sub-tab active" data-subtab="main">Основные настройки</div>
-      <div class="sub-tab" data-subtab="grid">Усреднения (Сетка)</div>
+      <div class="sub-tab" data-subtab="grid">Вход и усреднения</div>
       <div class="sub-tab" data-subtab="exit">Выходы</div>
     </div>
 
@@ -119,26 +125,47 @@ button:hover { background:#1d4ed8; }
       <div class="form-row"><input type="number" id="min-turnover" step="0.1"></div>
       <p class="muted">Мин. макс. плечо:</p>
       <div class="form-row"><input type="number" id="min-lev" step="1"></div>
-      <hr style="border-color:#252b36; margin: 20px 0;">
-      <p class="muted">Жесткий % входа (0 = авто):</p>
-      <div class="form-row"><input type="number" id="s-entry_pct" step="0.1"></div>
       <div style="margin-top:24px">
         <button onclick="saveSettings()">Сохранить</button>
         <button onclick="clearData()" style="background:#ef4444; margin-left:8px;">Очистить базу</button>
       </div>
     </div>
 
-    <!-- Подвкладка: Усреднения -->
+    <!-- Подвкладка: Вход и усреднения -->
     <div id="subtab-grid" class="sub-tab-content">
-      <p class="muted">Шаг сетки %:</p>
+      <p class="muted">Первый вход по % изм. цены (0 = авто):</p>
+      <div class="form-row"><input type="number" id="s-entry_pct" step="0.1"></div>
+      
+      <p class="muted">Первое усреднение через %:</p>
       <div class="form-row"><input type="number" id="s-grid_step_pct" step="0.1"></div>
+      
       <p class="muted">Множитель шага сетки:</p>
       <div class="form-row"><input type="number" id="s-grid_step_multiplier" step="0.1"></div>
-      <p class="muted">Макс. шагов:</p>
-      <div class="form-row"><input type="number" id="s-max_steps" step="1"></div>
-      <hr style="border-color:#252b36; margin: 20px 0;">
-      <p class="muted">Размер позиции на УСРЕДНЕНИЕ (USDT, мин. 6):</p>
+      
+      <p class="muted">Размер позиции первого входа (USDT, мин. 6):</p>
+      <div class="form-row"><input type="number" id="s-pos-size-entry" step="1" min="6"></div>
+      
+      <p class="muted">Размер позиции для усреднения (USDT, мин. 6):</p>
       <div class="form-row"><input type="number" id="s-pos-size-grid" step="1" min="6"></div>
+      
+      <p class="muted">Множитель ставки усреднения:</p>
+      <div class="form-row"><input type="number" id="s-grid_size_multiplier" step="0.1"></div>
+      
+      <p class="muted">Всего усреднений не более, чем:</p>
+      <div class="form-row"><input type="number" id="s-max_steps" step="1"></div>
+
+      <div style="margin-top:24px; margin-bottom: 16px;">
+        <label style="cursor:pointer; display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="s-use_size_mult" onchange="toggleSizeMult()" style="width:auto; cursor:pointer;">
+          <span class="muted">Использовать множитель размера позиций для усреднений</span>
+        </label>
+      </div>
+
+      <!-- Калькулятор сетки -->
+      <div class="grid-preview" id="grid-preview">
+        <!-- Заполняется через JS -->
+      </div>
+
       <div style="margin-top:24px">
         <button onclick="saveSettings()">Сохранить</button>
       </div>
@@ -152,9 +179,6 @@ button:hover { background:#1d4ed8; }
       <div class="form-row"><input type="number" id="s-exit_step_multiplier" step="0.1"></div>
       <p class="muted">% контрактов на выход:</p>
       <div class="form-row"><input type="number" id="s-exit_contract_pct" step="1"></div>
-      <hr style="border-color:#252b36; margin: 20px 0;">
-      <p class="muted">Размер позиции на ВХОД (USDT, мин. 6):</p>
-      <div class="form-row"><input type="number" id="s-pos-size-entry" step="1" min="6"></div>
       <div style="margin-top:24px">
         <button onclick="saveSettings()">Сохранить</button>
       </div>
@@ -171,6 +195,7 @@ button:hover { background:#1d4ed8; }
     <hr style="border-color:#252b36;">
     <p class="muted">Шаг сетки %: <input type="number" id="cfg-grid_step_pct" step="0.1" style="width:80px;"></p>
     <p class="muted">Множитель сетки: <input type="number" id="cfg-grid_step_multiplier" step="0.1" style="width:80px;"></p>
+    <p class="muted">Множитель ставки: <input type="number" id="cfg-grid_size_multiplier" step="0.1" style="width:80px;"></p>
     <p class="muted">Макс. шагов: <input type="number" id="cfg-max_steps" step="1" style="width:80px;"></p>
     <hr style="border-color:#252b36;">
     <p class="muted">Выход %: <input type="number" id="cfg-initial_exit_pct" step="0.1" style="width:80px;"></p>
@@ -220,6 +245,67 @@ document.addEventListener('keydown', (e) => {
     document.getElementById('config-modal').classList.remove('active');
     document.getElementById('history-modal').classList.remove('active');
   }
+});
+
+// Живой калькулятор сетки
+function toggleSizeMult() {
+  const use = document.getElementById('s-use_size_mult').checked;
+  const multInput = document.getElementById('s-grid_size_multiplier');
+  if (!use) {
+    multInput.value = 1;
+    multInput.disabled = true;
+  } else {
+    multInput.disabled = false;
+    if (parseFloat(multInput.value) === 1) multInput.value = 1.2;
+  }
+  updateGridPreview();
+}
+
+function updateGridPreview() {
+  const startPct = parseFloat(document.getElementById('s-grid_step_pct').value) || 5;
+  const stepMult = parseFloat(document.getElementById('s-grid_step_multiplier').value) || 2.5;
+  const startSize = parseFloat(document.getElementById('s-pos-size-grid').value) || 6;
+  const sizeMult = parseFloat(document.getElementById('s-grid_size_multiplier').value) || 1;
+  const useSizeMult = document.getElementById('s-use_size_mult').checked;
+  const maxSteps = parseInt(document.getElementById('s-max_steps').value) || 10;
+  
+  const previewDiv = document.getElementById('grid-preview');
+  let html = '';
+  let totalSum = 0;
+  
+  const stepsToShow = Math.min(maxSteps, 10);
+  for (let i = 0; i < stepsToShow; i++) {
+    const stepPct = startPct * (stepMult ** i);
+    let size = startSize;
+    if (useSizeMult) {
+      size = startSize * (sizeMult ** i);
+    }
+    size = Math.max(6, size);
+    totalSum += size;
+    
+    html += `<div><span class="step">${i+1} уср.</span> <span class="val">${stepPct.toFixed(1)}% = ${size.toFixed(1)} usdt</span></div>`;
+  }
+  
+  // Досчитываем остаток, если шагов больше 10
+  if (maxSteps > stepsToShow) {
+    for (let i = stepsToShow; i < maxSteps; i++) {
+      const stepPct = startPct * (stepMult ** i);
+      let size = startSize;
+      if (useSizeMult) {
+        size = startSize * (sizeMult ** i);
+      }
+      size = Math.max(6, size);
+      totalSum += size;
+    }
+  }
+
+  html += `<div class="total">Всего усреднений: ${maxSteps} на сумму: ${totalSum.toFixed(2)} USDT</div>`;
+  previewDiv.innerHTML = html;
+}
+
+// Навешиваем слушатели на поля для калькулятора
+['s-grid_step_pct', 's-grid_step_multiplier', 's-pos-size-grid', 's-grid_size_multiplier', 's-max_steps'].forEach(id => {
+  document.getElementById(id).addEventListener('input', updateGridPreview);
 });
 
 async function loadStatus() {
@@ -449,36 +535,49 @@ async function loadSettings() {
   // Основные
   document.getElementById('min-turnover').value = d.min_turnover;
   document.getElementById('min-lev').value = d.min_leverage;
-  document.getElementById('s-entry_pct').value = d.entry_pct;
   
-  // Сетка
+  // Вход и усреднения
+  document.getElementById('s-entry_pct').value = d.entry_pct;
   document.getElementById('s-grid_step_pct').value = d.grid_step_pct;
   document.getElementById('s-grid_step_multiplier').value = d.grid_step_multiplier;
-  document.getElementById('s-max_steps').value = d.max_steps;
+  document.getElementById('s-pos-size-entry').value = Math.max(6, d.position_size_entry || 6);
   document.getElementById('s-pos-size-grid').value = Math.max(6, d.position_size_grid || 6);
+  document.getElementById('s-max_steps').value = d.max_steps;
   
+  const sizeMult = d.grid_size_multiplier || 1;
+  document.getElementById('s-grid_size_multiplier').value = sizeMult;
+  const useMult = sizeMult > 1.0;
+  document.getElementById('s-use_size_mult').checked = useMult;
+  document.getElementById('s-grid_size_multiplier').disabled = !useMult;
+
   // Выходы
   document.getElementById('s-initial_exit_pct').value = d.initial_exit_pct;
   document.getElementById('s-exit_step_multiplier').value = d.exit_step_multiplier;
   document.getElementById('s-exit_contract_pct').value = d.exit_contract_pct;
-  document.getElementById('s-pos-size-entry').value = Math.max(6, d.position_size_entry || 6);
+  
+  // Обновляем превью сетки
+  updateGridPreview();
 }
 
 async function saveSettings() {
+  const useSizeMult = document.getElementById('s-use_size_mult').checked;
+  const sizeMult = useSizeMult ? parseFloat(document.getElementById('s-grid_size_multiplier').value) : 1.0;
+  
   const data = {
     min_turnover: parseFloat(document.getElementById('min-turnover').value),
     min_leverage: parseFloat(document.getElementById('min-lev').value),
-    entry_pct: parseFloat(document.getElementById('s-entry_pct').value),
     
+    entry_pct: parseFloat(document.getElementById('s-entry_pct').value),
     grid_step_pct: parseFloat(document.getElementById('s-grid_step_pct').value),
     grid_step_multiplier: parseFloat(document.getElementById('s-grid_step_multiplier').value),
-    max_steps: parseInt(document.getElementById('s-max_steps').value),
+    position_size_entry: parseFloat(document.getElementById('s-pos-size-entry').value),
     position_size_grid: parseFloat(document.getElementById('s-pos-size-grid').value),
+    max_steps: parseInt(document.getElementById('s-max_steps').value),
+    grid_size_multiplier: sizeMult,
     
     initial_exit_pct: parseFloat(document.getElementById('s-initial_exit_pct').value),
     exit_step_multiplier: parseFloat(document.getElementById('s-exit_step_multiplier').value),
-    exit_contract_pct: parseFloat(document.getElementById('s-exit_contract_pct').value),
-    position_size_entry: parseFloat(document.getElementById('s-pos-size-entry').value)
+    exit_contract_pct: parseFloat(document.getElementById('s-exit_contract_pct').value)
   };
   
   await fetch('/api/settings', {
@@ -505,7 +604,7 @@ async function openConfig(symbol) {
   
   let cfg = cfgData.items.find(i => i.symbol === symbol);
   if (!cfg) {
-    cfg = { symbol: symbol, entry_pct: 0, grid_step_pct: 0, grid_step_multiplier: 0, max_steps: 0, initial_exit_pct: 0, exit_step_multiplier: 0, exit_contract_pct: 0, position_size_entry: 0, position_size_grid: 0 };
+    cfg = { symbol: symbol, entry_pct: 0, grid_step_pct: 0, grid_step_multiplier: 0, grid_size_multiplier: 0, max_steps: 0, initial_exit_pct: 0, exit_step_multiplier: 0, exit_contract_pct: 0, position_size_entry: 0, position_size_grid: 0 };
   }
   
   document.getElementById('modal-title').textContent = 'Настройки ' + symbol;
@@ -520,6 +619,7 @@ async function openConfig(symbol) {
   setField('cfg-entry_pct', cfg.entry_pct, globalData.entry_pct);
   setField('cfg-grid_step_pct', cfg.grid_step_pct, globalData.grid_step_pct);
   setField('cfg-grid_step_multiplier', cfg.grid_step_multiplier, globalData.grid_step_multiplier);
+  setField('cfg-grid_size_multiplier', cfg.grid_size_multiplier, globalData.grid_size_multiplier);
   setField('cfg-max_steps', cfg.max_steps, globalData.max_steps);
   setField('cfg-initial_exit_pct', cfg.initial_exit_pct, globalData.initial_exit_pct);
   setField('cfg-exit_step_multiplier', cfg.exit_step_multiplier, globalData.exit_step_multiplier);
@@ -551,6 +651,7 @@ async function saveConfig() {
     entry_pct: parseFloat(document.getElementById('cfg-entry_pct').value) || 0,
     grid_step_pct: parseFloat(document.getElementById('cfg-grid_step_pct').value) || 0,
     grid_step_multiplier: parseFloat(document.getElementById('cfg-grid_step_multiplier').value) || 0,
+    grid_size_multiplier: parseFloat(document.getElementById('cfg-grid_size_multiplier').value) || 0,
     max_steps: parseInt(document.getElementById('cfg-max_steps').value) || 0,
     initial_exit_pct: parseFloat(document.getElementById('cfg-initial_exit_pct').value) || 0,
     exit_step_multiplier: parseFloat(document.getElementById('cfg-exit_step_multiplier').value) || 0,

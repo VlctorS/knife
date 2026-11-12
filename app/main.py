@@ -85,7 +85,7 @@ async def api_alerts(limit: int = 100):
                 'ma': a.ma,
                 'change_pct': a.change_pct,
                 'timeframe': getattr(a, 'timeframe', ''),
-                'reason': getattr(a, 'reason', ''), # <--- ДОБАВИТЬ ВОТ ЭТУ СТРОКУ
+                'reason': getattr(a, 'reason', ''),
             }
             for a in list(state.alerts)[:limit]
         ]
@@ -203,8 +203,7 @@ async def api_closed_stats():
         
         profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (999.99 if gross_profit > 0 else 0)
         
-        # Сегодня (с 00:00 по UTC, но можно и по МСК)
-        # Проще: с 00:00 текущего дня (UTC)
+        # Сегодня (с 00:00 по UTC)
         today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         
         today_trades = [t for t in all_trades if t.closed_at and t.closed_at >= today_start]
@@ -358,6 +357,7 @@ async def api_get_configs():
                 {
                     'symbol': c.symbol, 'entry_pct': c.entry_pct,
                     'grid_step_pct': c.grid_step_pct, 'grid_step_multiplier': c.grid_step_multiplier,
+                    'grid_size_multiplier': c.grid_size_multiplier,
                     'max_steps': c.max_steps, 'initial_exit_pct': c.initial_exit_pct,
                     'exit_step_multiplier': c.exit_step_multiplier,
                     'exit_contract_pct': c.exit_contract_pct,
@@ -375,7 +375,7 @@ async def api_post_configs(request: Request):
         if not cfg:
             cfg = SymbolConfig(symbol=data["symbol"])
             session.add(cfg)
-        for k in ["entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_step_multiplier", "exit_contract_pct", "position_size_entry", "position_size_grid", "min_confidence"]:
+        for k in ["entry_pct", "grid_step_pct", "grid_step_multiplier", "grid_size_multiplier", "max_steps", "initial_exit_pct", "exit_step_multiplier", "exit_contract_pct", "position_size_entry", "position_size_grid", "min_confidence"]:
             if k in data:
                 setattr(cfg, k, float(data[k]) if k != "max_steps" else int(data[k]))
         await session.commit()
@@ -392,7 +392,9 @@ async def api_get_settings():
         return {
             "min_turnover": s.min_turnover, "min_leverage": s.min_leverage,
             "entry_pct": s.entry_pct, "grid_step_pct": s.grid_step_pct,
-            "grid_step_multiplier": s.grid_step_multiplier, "max_steps": s.max_steps,
+            "grid_step_multiplier": s.grid_step_multiplier, 
+            "grid_size_multiplier": s.grid_size_multiplier,
+            "max_steps": s.max_steps,
             "initial_exit_pct": s.initial_exit_pct, "exit_step_multiplier": s.exit_step_multiplier,
             "exit_contract_pct": s.exit_contract_pct,
             "position_size_entry": s.position_size_entry, "position_size_grid": s.position_size_grid,
@@ -407,7 +409,7 @@ async def api_post_settings(request: Request):
         if not s:
             s = Settings(id=1)
             session.add(s)
-        for k in ["min_turnover", "min_leverage", "entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_step_multiplier", "exit_contract_pct", "position_size_entry", "position_size_grid", "fee_pct", "min_confidence"]:
+        for k in ["min_turnover", "min_leverage", "entry_pct", "grid_step_pct", "grid_step_multiplier", "grid_size_multiplier", "max_steps", "initial_exit_pct", "exit_step_multiplier", "exit_contract_pct", "position_size_entry", "position_size_grid", "fee_pct", "min_confidence"]:
             if k in data:
                 setattr(s, k, float(data[k]) if k != "max_steps" else int(data[k]))
         await session.commit()

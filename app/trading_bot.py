@@ -223,9 +223,6 @@ class TradingBot:
                         side = 'LONG' if ev['direction'] == 'long' else 'SHORT'
                         kind = 'DUMP' if side == 'LONG' else 'PUMP'
 
-                        # Экстремум ножа должен быть пройден ценой (не падающий нож) —
-                        # класс уже это проверил; дополнительно требуем возврата за MA ножа? Нет: MA-фильтр ниже.
-                        
                         state.add_alert(Alert(
                             ts=time.time(), symbol=sym, kind=kind,
                             price_now=current_price, ref_price=open_price, ma=st.ma,
@@ -321,6 +318,12 @@ class TradingBot:
                     
                     if can_grid:
                         add_pos_size = _pick(cfg.position_size_grid if cfg else 0, gs.position_size_grid if gs else 0, MIN_POS_SIZE)
+                        
+                        # НОВОЕ: Применяем множитель размера для усреднений
+                        size_mult = _pick(cfg.grid_size_multiplier if cfg else 0, gs.grid_size_multiplier if gs else 0, 1.0)
+                        if size_mult > 1.0:
+                            add_pos_size = add_pos_size * (size_mult ** t.grid_step)
+                            
                         add_pos_size = max(MIN_POS_SIZE, add_pos_size)
                         
                         add_margin = add_pos_size / t.leverage

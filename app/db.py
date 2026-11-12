@@ -35,6 +35,7 @@ class Settings(Base):
     # --- Усреднение (сетка): шаг и его рост по экспоненте ---
     grid_step_pct: Mapped[float] = mapped_column(Float, default=5.0)
     grid_step_multiplier: Mapped[float] = mapped_column(Float, default=2.5)
+    grid_size_multiplier: Mapped[float] = mapped_column(Float, default=1.0) # <--- НОВОЕ
     max_steps: Mapped[int] = mapped_column(Integer, default=10)
     position_size_entry: Mapped[float] = mapped_column(Float, default=6.0)
     position_size_grid: Mapped[float] = mapped_column(Float, default=6.0)
@@ -62,6 +63,7 @@ class SymbolConfig(Base):
     entry_pct: Mapped[float] = mapped_column(Float, default=0.0) 
     grid_step_pct: Mapped[float] = mapped_column(Float, default=0.0)
     grid_step_multiplier: Mapped[float] = mapped_column(Float, default=0.0)
+    grid_size_multiplier: Mapped[float] = mapped_column(Float, default=0.0) # <--- НОВОЕ
     max_steps: Mapped[int] = mapped_column(Integer, default=0)
     position_size_entry: Mapped[float] = mapped_column(Float, default=0.0)
     position_size_grid: Mapped[float] = mapped_column(Float, default=0.0)
@@ -121,12 +123,14 @@ def _migrate_add_columns(conn):
     from sqlalchemy import inspect, text
 
     insp = inspect(conn)
-    # (таблица, колонка, DDL-тип) — новые поля, разделённые выходы/усреднения
+    # (таблица, колонка, DDL-тип) — новые поля
     additions = [
         ('settings', 'exit_step_multiplier', 'FLOAT DEFAULT 1.6'),
         ('settings', 'min_confidence', 'FLOAT DEFAULT 0.4'),
+        ('settings', 'grid_size_multiplier', 'FLOAT DEFAULT 1.0'), # <--- НОВОЕ
         ('symbol_configs', 'exit_step_multiplier', 'FLOAT DEFAULT 0'),
         ('symbol_configs', 'min_confidence', 'FLOAT DEFAULT 0'),
+        ('symbol_configs', 'grid_size_multiplier', 'FLOAT DEFAULT 0'), # <--- НОВОЕ
         ('trades', 'entry_fee', 'FLOAT DEFAULT 0'),
         ('trades', 'exit_fee', 'FLOAT DEFAULT 0'),
         ('trades', 'realized_pnl', 'FLOAT DEFAULT 0'),
