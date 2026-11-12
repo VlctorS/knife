@@ -886,15 +886,16 @@ async function saveConfig() {
 }
 
 // ИСПРАВЛЕННАЯ ФУНКЦИЯ СИМУЛЯЦИИ
+let lastSimPayload = null;
+
 async function openSimulation() {
   const symbol = document.getElementById('cfg-symbol').value;
   
-  // Запрашиваем реальные данные сделки из базы
   const tradeRes = await fetch('/api/trade_by_symbol?symbol=' + symbol);
   const tradeData = await tradeRes.json();
   
   if (!tradeData.ok) {
-      alert('Не удалось найти открытую сделку по ' + symbol + '. Убедитесь, что сделка открыта.');
+      alert('Не удалось найти открытую сделку по ' + symbol);
       return;
   }
 
@@ -905,8 +906,8 @@ async function openSimulation() {
     return v > 0 ? v : fallback;
   };
   
-  const payload = {
-    entry_price: tradeData.entry_price, // Берем реальную цену входа
+  lastSimPayload = {
+    entry_price: tradeData.entry_price,
     entry_size: getVal('cfg-position_size_entry', globalData.position_size_entry) || 6,
     grid_step_pct: getVal('cfg-grid_step_pct', globalData.grid_step_pct) || 5,
     grid_step_mult: getVal('cfg-grid_step_multiplier', globalData.grid_step_multiplier) || 2.5,
@@ -917,49 +918,18 @@ async function openSimulation() {
     exit_contract_pct: getVal('cfg-exit_contract_pct', globalData.exit_contract_pct) || 30,
     fee_pct: globalData.fee_pct || 0.055,
     leverage: tradeData.leverage || 10,
-    side: tradeData.side // Берем реальное направление (LONG/SHORT)
+    side: tradeData.side,
+    balance: parseFloat(document.getElementById('sim-balance').value) || 100
   };
 
   document.getElementById('sim-title').textContent = `Симуляция для ${symbol} (${tradeData.side}, Вход: ${tradeData.entry_price})`;
-  document.getElementById('sim-profit-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
-  document.getElementById('sim-loss-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
-  document.getElementById('sim-modal').classList.add('active');
-
-  const res = await fetch('/api/simulate', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(payload)
-  });
   
-  const data = await res.json();
-  if (!data.ok) {
-      alert('Ошибка симуляции: ' + (data.error || 'unknown'));
-      return;
-  }
-
-  // Рендер профита
-  document.getElementById('sim-profit-body').innerHTML = data.profit_steps.map(s => `
-    <tr>
-      <td class="step-col">${s.step}</td>
-      <td>${fmtNum(s.price)}</td>
-      <td>${s.action}</td>
-      <td>${fmtNum(s.qty, 2)}</td>
-      <td>${fmtNum(s.position_usdt, 2)}</td>
-      <td class="${s.pnl >= 0 ? 'pump' : 'dump'}">${s.pnl > 0 ? '+' : ''}${fmtNum(s.pnl, 4)}</td>
-    </tr>
-  `).join('');
-
-  // Рендер убытка
-  document.getElementById('sim-loss-body').innerHTML = data.loss_steps.map(s => `
-    <tr>
-      <td class="step-col">${s.step}</td>
-      <td>${fmtNum(s.price)}</td>
-      <td>${s.action}</td>
-      <td>${fmtNum(s.qty, 2)}</td>
-      <td>${fmtNum(s.position_usdt, 2)}</td>
-      <td class="${s.pnl >= 0 ? 'pump' : 'dump'}">${s.pnl > 0 ? '+' : ''}${fmtNum(s.pnl, 4)}</td>
-    </tr>
-  `).join('');
+  // Принудительно активируем первую вкладку "Профит"
+  document.querySelector('.sub-tab[data-simtab="profit"]').click();
+  
+  document.getElementById('sim-modal').classList.add('active');
+  
+  await runSimulation();
 }
 
 async function tick() { 
