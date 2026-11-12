@@ -376,7 +376,7 @@ async function updateBalanceAndPnl() {
     const res = await fetch('/api/closed_stats');
     const stats = await res.json();
     
-    // Бумажный баланс = 100 + (общий реализованный PnL)
+    // 1. Бумажный баланс = 100 + (сумма ВСЕХ реализованных выходов)
     const totalRealizedPnl = stats.total_pnl || 0;
     const currentBalance = 100.00 + totalRealizedPnl;
     
@@ -384,14 +384,16 @@ async function updateBalanceAndPnl() {
     balEl.textContent = currentBalance.toFixed(2) + ' USDT';
     balEl.className = currentBalance >= 100 ? 'v pump' : 'v dump';
     
-    // Живой PnL (реализованный + нереализованный открытых)
-    let livePnl = totalRealizedPnl;
-    
+    // 2. Живой PnL = Реализованный + Плавающий (по открытым сделкам)
+    let openPnl = 0;
     const tradesRes = await fetch('/api/trades?limit=100');
     const tradesData = await tradesRes.json();
+    
     for (const t of tradesData.items) {
-      livePnl += (t.pnl || 0);
+      openPnl += (t.pnl || 0);
     }
+    
+    const livePnl = totalRealizedPnl + openPnl;
     
     const pnlEl = document.getElementById('s-live-pnl');
     pnlEl.textContent = (livePnl >= 0 ? '+' : '') + livePnl.toFixed(2) + ' USDT';
@@ -408,6 +410,7 @@ async function updateBalanceAndPnl() {
     console.error('Failed to update balance:', e);
   }
 }
+
 
 async function loadAlerts() {
   const d = await (await fetch('/api/alerts?limit=100')).json();
@@ -601,8 +604,15 @@ async function openHistory(tradeId, symbol) {
   let title = `История: ${symbol}`;
   if (openChange !== null) title += ` (вход при ${openChange.toFixed(2)}%)`;
   
+  // Формируем красивые строки с планами
+  const gridLine = `Следующее уср. (${d.next_grid_pct}%) по цене ${d.next_grid_price} на ${d.next_grid_size} USDT (шаг ${d.current_grid_step} из ${d.max_steps})`;
+  const exitLine = `Ближайший выход (${d.next_exit_pct}%) по цене ${d.next_exit_price} ${d.exit_close_pct}% контрактов [${d.exit_qty} ${symbol}] = ${d.est_profit} USDT`;
+
   document.getElementById('history-title').innerHTML = title +
-    `<div style="font-size:12px; color:#8a93a6; font-weight:400; margin-top:6px;">Следующее уср. при изм. цены = ${d.next_step_pct}% (шаг ${d.current_grid_step} из ${d.max_steps})</div>`;
+    `<div style="font-size:13px; color:#8a93a6; font-weight:400; margin-top:8px; line-height:1.6;">
+       <div>${gridLine}</div>
+       <div>${exitLine}</div>
+     </div>`;
   
   let totalRealizedPnl = 0;
   

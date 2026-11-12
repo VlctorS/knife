@@ -175,7 +175,6 @@ async def api_closed_trades(limit: int = 100):
             })
         return {'items': items}
 
-# НОВЫЙ ЭНДПОИНТ: История всех выходов (частичных и полных)
 @app.get('/api/all_exits')
 async def api_all_exits(limit: int = 100):
     async with SessionLocal() as session:
@@ -206,20 +205,16 @@ async def api_all_exits(limit: int = 100):
 @app.get('/api/closed_stats')
 async def api_closed_stats():
     async with SessionLocal() as session:
-        # Статистика по всем сделкам, включая закрытые частично
         r = await session.execute(select(Trade))
         all_trades = r.scalars().all()
         
-        total_pnl = sum(t.pnl or 0 for t in all_trades)
         total_count = len([t for t in all_trades if t.status == 'CLOSED'])
         
-        # Считаем профит от всех закрытий
         hist_res = await session.execute(
             select(func.sum(TradeHistory.pnl)).where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
         )
         total_realized = hist_res.scalar() or 0.0
         
-        # Сделки с положительным итоговым PnL (полностью закрытые)
         wins = [t for t in all_trades if t.status == 'CLOSED' and (t.pnl or 0) > 0]
         losses = [t for t in all_trades if t.status == 'CLOSED' and (t.pnl or 0) < 0]
         
@@ -346,17 +341,42 @@ async def api_trade_history(trade_id: int):
         cfg = cfg_res.scalars().first()
         gs = await session.get(Settings, 1)
         
-        if cfg and cfg.grid_step_pct > 0:
-            start_pct = cfg.grid_step_pct
-        else:
-            start_pct = gs.grid_step_pct if gs else 5.0
+        # --- Параметры сетки ---
+        start_pct = cfg.grid_step_pct if cfg and cfg.grid_step_pct > 0 else (gs.grid_step_pct if gs else 5.0)
+        mult = cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs else 2.5)
+        size_mult = cfg.grid_size_multiplier if cfg and cfg.grid_size_multiplier > 0 else (gs.grid_size_multiplier if gs else 1.0)
+        base_size = cfg.position_size_grid if cfg and cfg.position_size_grid > 0 else (gs.position_size_grid if gs else 6.0)
         
-        if cfg and cfg.grid_step_multiplier > 0:
-            mult = cfg.grid_step_multiplier
-        else:
-            mult = gs.grid_step_multiplier if gs else 2.5
+        current_grid_step = trade.grid_step
+        next_step_pct = start_pct * (mult ** current_grid_step)
         
-        next_step_pct = start_pct * (mult ** trade.grid_step)
+        # Размер следующего усреднения с учетом множителя
+        next_grid_size = base_size * (size_mult ** current_grid_step)
+        next_grid_size = max(6.0, next_grid_size)
+        
+        # Цена следующего усреднения (для LONG идем вниз, для SHORT вверх)
+        if trade.side == 'LONG':
+            next_grid_price = trade.avg_entry_price * (1 - next_step_pct / 100)
+        else:
+            next_grid_price = trade.avg_entry_price * (1 + next_step_pct / 100)
+
+        # --- Параметры выходов ---
+        start_exit = cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs else 15.0)
+        exit_mult = cfg.exit_step_multiplier if cfg and cfg.exit_step_multiplier > 0 else (gs.exit_step_multiplier if gs else 1.6)
+        close_pct = cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs else 50.0)
+        
+        current_exit_step = trade.exit_step if trade.exit_step is not None else 0
+        next_exit_pct = start_exit * (exit_mult ** current_exit_step)
+        
+        # Цена ближайшего выхода
+        if trade.side == 'LONG':
+            next_exit_price = trade.avg_entry_price * (1 + next_exit_pct / 100)
+        else:
+            next_exit_price = trade.avg_entry_price * (1 - next_exit_pct / 100)
+            
+        # Объем для выхода (в контрактах) и примерный профит в USDT
+        exit_qty = trade.total_qty * (close_pct / 100.0)
+        est_profit = exit_qty * abs(next_exit_price - trade.avg_entry_price)
         
         r = await session.execute(
             select(TradeHistory).where(TradeHistory.trade_id == trade_id).order_by(TradeHistory.ts)
@@ -378,9 +398,16 @@ async def api_trade_history(trade_id: int):
             
         return {
             'items': items,
-            'next_step_pct': round(next_step_pct, 2),
-            'current_grid_step': trade.grid_step,
+            'next_grid_pct': round(next_step_pct, 2),
+            'next_grid_price': round(next_grid_price, 6),
+            'next_grid_size': round(next_grid_size, 2),
+            'current_grid_step': current_grid_step,
             'max_steps': trade.max_steps,
+            'next_exit_pct': round(next_exit_pct, 2),
+            'next_exit_price': round(next_exit_price, 6),
+            'exit_close_pct': close_pct,
+            'exit_qty': round(exit_qty, 2),
+            'est_profit': round(est_profit, 2)
         }
 
 @app.get("/api/configs")
