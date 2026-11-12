@@ -253,24 +253,36 @@ async def api_close_trade(request: Request):
         if price <= 0:
             return {'ok': False, 'error': 'No price'}
         
+        gs = await session.get(Settings, 1)
+        fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
+
         # Закрываем всю оставшуюся позицию
         closed_qty = t.total_qty
         if t.side == 'LONG':
             closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
         else:
             closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
-        
+
+        exit_commission = closed_qty * price * (fee_pct / 100.0)
+        t.exit_fee += exit_commission
+        # Реализованный PnL = gross за вычетом обеих комиссий Bybit (вход и выход)
+        realized_part = closed_pnl - exit_commission - t.entry_fee
+        t.realized_pnl += realized_part
+        total_pnl = t.realized_pnl
+        closed_entry_fee = t.entry_fee
+
         # Обновляем сделку
         t.status = 'CLOSED'
         t.closed_at = datetime.datetime.utcnow()
         t.current_price = price
-        t.pnl = closed_pnl          # <-- СОХРАНЯЕМ PnL в базе
+        t.pnl = total_pnl           # <-- СОХРАНЯЕМ PnL в базе
         t.total_qty = 0.0           # <-- Обнуляем остаток
         t.total_margin = 0.0        # <-- Обнуляем маржу
+        t.entry_fee = 0.0
         
         history = TradeHistory(
             trade_id=t.id, action='MANUAL_CLOSE', price=price, qty=closed_qty,
-            margin=t.total_margin, pnl=closed_pnl, notes='manual close'
+            margin=t.total_margin, pnl=realized_part, notes=f'manual close, out fee {exit_commission:.4f}, in fee {closed_entry_fee:.4f}'
         )
         session.add(history)
         await session.commit()
@@ -346,6 +358,7 @@ async def api_get_configs():
                     'symbol': c.symbol, 'entry_pct': c.entry_pct,
                     'grid_step_pct': c.grid_step_pct, 'grid_step_multiplier': c.grid_step_multiplier,
                     'max_steps': c.max_steps, 'initial_exit_pct': c.initial_exit_pct,
+                    'exit_step_multiplier': c.exit_step_multiplier,
                     'exit_contract_pct': c.exit_contract_pct,
                     'position_size_entry': c.position_size_entry, 'position_size_grid': c.position_size_grid,
                 }
@@ -361,7 +374,7 @@ async def api_post_configs(request: Request):
         if not cfg:
             cfg = SymbolConfig(symbol=data["symbol"])
             session.add(cfg)
-        for k in ["entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_contract_pct", "position_size_entry", "position_size_grid"]:
+        for k in ["entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_step_multiplier", "exit_contract_pct", "position_size_entry", "position_size_grid", "min_confidence"]:
             if k in data:
                 setattr(cfg, k, float(data[k]) if k != "max_steps" else int(data[k]))
         await session.commit()
@@ -379,8 +392,10 @@ async def api_get_settings():
             "min_turnover": s.min_turnover, "min_leverage": s.min_leverage,
             "entry_pct": s.entry_pct, "grid_step_pct": s.grid_step_pct,
             "grid_step_multiplier": s.grid_step_multiplier, "max_steps": s.max_steps,
-            "initial_exit_pct": s.initial_exit_pct, "exit_contract_pct": s.exit_contract_pct,
-            "position_size_entry": s.position_size_entry, "position_size_grid": s.position_size_grid
+            "initial_exit_pct": s.initial_exit_pct, "exit_step_multiplier": s.exit_step_multiplier,
+            "exit_contract_pct": s.exit_contract_pct,
+            "position_size_entry": s.position_size_entry, "position_size_grid": s.position_size_grid,
+            "fee_pct": s.fee_pct, "min_confidence": s.min_confidence,
         }
 
 @app.post("/api/settings")
@@ -391,7 +406,7 @@ async def api_post_settings(request: Request):
         if not s:
             s = Settings(id=1)
             session.add(s)
-        for k in ["min_turnover", "min_leverage", "entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_contract_pct", "position_size_entry", "position_size_grid"]:
+        for k in ["min_turnover", "min_leverage", "entry_pct", "grid_step_pct", "grid_step_multiplier", "max_steps", "initial_exit_pct", "exit_step_multiplier", "exit_contract_pct", "position_size_entry", "position_size_grid", "fee_pct", "min_confidence"]:
             if k in data:
                 setattr(s, k, float(data[k]) if k != "max_steps" else int(data[k]))
         await session.commit()

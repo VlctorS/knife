@@ -197,7 +197,7 @@ class TradingBot:
                                 change_pct=change_pct, timeframe=tf_label
                             ))
                             
-                            await self._open_trade(session, sym, side, current_price, st.max_leverage, cfg, gs, change_pct)
+                            await self._open_trade(session, sym, side, current_price, st.max_leverage, cfg, gs, change_pct, fee_pct=gs.fee_pct if gs and gs.fee_pct > 0 else 0.055)
                             
                             log.info(f'SIGNAL {kind} {sym} ({tf_label}) {change_pct:.2f}% -> OPEN {side} at {current_price}')
                             
@@ -208,7 +208,7 @@ class TradingBot:
                     log.warning(f'Check entries failed for {sym}: {e}')
             await session.commit()
 
-    async def _open_trade(self, session, sym, side, price, max_lev, cfg, gs, change_pct=None):
+    async def _open_trade(self, session, sym, side, price, max_lev, cfg, gs, change_pct=None, fee_pct=0.055):
         if cfg and cfg.position_size_entry > 0:
             pos_size = cfg.position_size_entry
         else:
@@ -217,6 +217,8 @@ class TradingBot:
         pos_size = max(MIN_POS_SIZE, pos_size)
         margin = pos_size / max_lev
         qty = pos_size / price
+        # Bybit берёт taker-комиссию с каждой стороны по факту исполнения
+        entry_fee = pos_size * (fee_pct / 100.0)
 
         if cfg and cfg.max_steps > 0:
             max_steps = cfg.max_steps
@@ -227,21 +229,22 @@ class TradingBot:
             symbol=sym, side=side, entry_price=price, avg_entry_price=price,
             total_qty=qty, total_margin=margin, initial_margin=margin, status='OPEN',
             grid_step=0, max_steps=max_steps,
-            leverage=max_lev, current_price=price, exit_step=0
+            leverage=max_lev, current_price=price, exit_step=0,
+            entry_fee=entry_fee, pnl=-entry_fee,
         )
         session.add(trade)
         await session.flush()
         
-        notes = f'{side} OPEN (size: {pos_size:.2f} USDT)'
+        notes = f'{side} OPEN (size: {pos_size:.2f} USDT, fee {entry_fee:.4f})'
         if change_pct is not None:
             notes += f', change: {change_pct:.2f}%'
             
         history = TradeHistory(
             trade_id=trade.id, action='OPEN', price=price, qty=qty,
-            margin=margin, pnl=0.0, notes=notes
+            margin=margin, pnl=-entry_fee, notes=notes
         )
         session.add(history)
-        log.info('OPEN %s %s @ %.6f (size: %.2f USDT, qty: %.2f, lev: %.0fx)', side, sym, price, pos_size, qty, max_lev)
+        log.info('OPEN %s %s @ %.6f (size: %.2f USDT, qty: %.2f, lev: %.0fx, fee: %.4f)', side, sym, price, pos_size, qty, max_lev, entry_fee)
 
     async def update_open_trades(self):
         async with SessionLocal() as session:
@@ -335,36 +338,52 @@ class TradingBot:
                     else:
                         action = 'PARTIAL_CLOSE'
                         t.exit_step = current_exit_step + 1
-                    
+
+                    # Доля комиссии входа, приходящаяся на закрываемую часть
+                    closed_frac = closed_qty / t.total_qty if t.total_qty > 0 else 1.0
+                    entry_fee_part = t.entry_fee * closed_frac
+
                     if t.side == 'LONG':
                         closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
                     else:
                         closed_pnl = (closed_qty * t.avg_entry_price) - (closed_qty * price)
-                    
+
                     close_commission = (closed_qty * price) * (fee_pct / 100.0)
-                    closed_pnl -= close_commission
-                    
+                    t.exit_fee += close_commission
+                    # Реализуем PnL части: цена минус обе комиссии (вход и выход)
+                    closed_pnl -= close_commission + entry_fee_part
+                    t.realized_pnl += closed_pnl
+
                     old_avg = t.avg_entry_price
-                    old_total_qty = t.total_qty
-                    
+                    t.entry_fee -= entry_fee_part
+
                     t.total_qty -= closed_qty
                     t.total_margin -= (closed_qty * old_avg / t.leverage)
-                    t.pnl = (t.pnl or 0) + closed_pnl
-                    
+
+                    # Остаток позиции: пересчитываем плавающий PnL от realized
+                    if t.total_qty > 0.0001:
+                        open_gross = t.total_qty * (price - t.avg_entry_price) if t.side == 'LONG' \
+                            else t.total_qty * (t.avg_entry_price - price)
+                        open_exit_fee = t.total_qty * price * (fee_pct / 100.0)
+                        t.pnl = t.realized_pnl + open_gross - t.entry_fee - open_exit_fee
+                    else:
+                        t.pnl = t.realized_pnl
+
                     # Фиксируем новую среднюю цену при частичном закрытии
                     if action == 'PARTIAL_CLOSE':
                         t.avg_entry_price = price
-                    
+
                     if t.status == 'CLOSED' or t.total_qty <= 0.0001:
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
                         t.total_qty = 0.0
                         t.total_margin = 0.0
-                    
+                        t.entry_fee = 0.0
+
                     history = TradeHistory(
                         trade_id=t.id, action=action, price=price, qty=closed_qty,
                         margin=t.total_margin, pnl=closed_pnl, 
-                        notes=f'SELL {close_pct}% (qty: {closed_qty:.2f}, left: {t.total_qty:.2f}, target {target_exit_pct:.1f}%, actual {change_pct:.2f}%, fee {close_commission:.4f})'
+                        notes=f'SELL {close_pct}% (qty: {closed_qty:.2f}, left: {t.total_qty:.2f}, target {target_exit_pct:.1f}%, actual {change_pct:.2f}%, out fee {close_commission:.4f}, in fee {entry_fee_part:.4f})'
                     )
                     session.add(history)
                     await session.commit()
