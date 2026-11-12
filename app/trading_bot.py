@@ -9,7 +9,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .bybit import BybitREST
 from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, TradeHistory, engine, Settings
-from .state import state, Alert
+from .state import state, Alert, classify_event, moving_average
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -126,7 +126,7 @@ class TradingBot:
                 session.add(gs)
                 await session.commit()
 
-            intervals = ['60', '240', 'D']
+            intervals = ['240', 'D']  # ловим ножи на 4ч и 1д
             
             for sym in symbols_to_check:
                 try:
@@ -136,74 +136,89 @@ class TradingBot:
                     st = state.symbols.get(sym)
                     if not st or st.ma is None or st.last_price <= 0:
                         continue
-                    
+
                     if cfg and cfg.entry_pct > 0:
                         threshold = cfg.entry_pct
                     elif gs.entry_pct > 0:
                         threshold = gs.entry_pct
                     else:
-                        threshold = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else 5.0
-                        threshold = max(threshold, 5.0)
-                    
+                        threshold = (stat.avg_prostrel_pct * 0.85) if stat and stat.avg_prostrel_pct > 0 else settings.min_knife_move_pct
+                        threshold = max(threshold, settings.min_knife_move_pct)
+
+                    current_price = st.last_price
+
+                    # Сначала младший ТФ (4h), затем якорь (1d). Вход только если
+                    # нож подтверждён, а якорный ТФ не продолжает движение.
+                    kline_cache = {}
                     for tf in intervals:
                         kl = await self.rest.get_kline(sym, interval=tf, limit=22)
+                        kline_cache[tf] = kl
                         if len(kl) < VOLUME_LOOKBACK + 2:
                             continue
-                        
+
                         last_closed = kl[-2]
                         open_price = float(last_closed[1])
                         close_price_candle = float(last_closed[4])
-                        high_price = float(last_closed[2])
-                        low_price = float(last_closed[3])
                         volume = float(last_closed[5])
-                        
+
                         if open_price <= 0 or volume <= 0:
                             continue
-                        
+
                         avg_vol = _calc_avg_volume(kl, VOLUME_LOOKBACK)
                         if avg_vol <= 0 or volume < avg_vol:
                             continue
-                        
+
                         change_pct = (close_price_candle - open_price) / open_price * 100
-                        
-                        if abs(change_pct) >= threshold:
-                            candle_id = f"{sym}_{tf}_{last_closed[0]}"
-                            if candle_id in self._seen_candles:
-                                continue
+                        if abs(change_pct) < threshold:
+                            continue
+
+                        candle_id = f"{sym}_{tf}_{last_closed[0]}"
+                        if candle_id in self._seen_candles:
+                            continue
+
+                        knife_tf = kline_cache.get(tf) or kl
+                        anchor_tf = kline_cache.get('D') if tf != 'D' else None
+                        if tf == 'D':
+                            # Для дневного ножа якорем служит недельный контекст из 4h-окна
+                            anchor_tf = kline_cache.get('240')
+
+                        ma_knife = moving_average(knife_tf, min(settings.ma_period, 20))
+                        ma_anchor = moving_average(anchor_tf, min(settings.ma_period, 20)) if anchor_tf else None
+
+                        ev = classify_event(knife_tf, anchor_tf, current_price, ma_knife, ma_anchor)
+                        min_conf = _pick(cfg.min_confidence if cfg else 0, gs.min_confidence if gs else 0, 0.4)
+
+                        if not ev['is_spike']:
+                            # Разделили всплеск с трендом: это продолжение — не входим,
+                            # но помечаем свечу, чтобы не пережевывать её каждый тик.
+                            log.debug('SKIP %s %s: %s', sym, tf, ev['reason'])
                             self._seen_candles.add(candle_id)
-                            
-                            kind = 'PUMP' if change_pct > 0 else 'DUMP'
-                            side = 'SHORT' if change_pct > 0 else 'LONG'
-                            
-                            current_price = st.last_price
-                            spike_center = (high_price + low_price) / 2
-                            
-                            if side == 'LONG':
-                                if st.ma is None or current_price >= st.ma:
-                                    continue
-                                if current_price < spike_center:
-                                    continue
-                            else:
-                                if st.ma is None or current_price <= st.ma:
-                                    continue
-                                if current_price > spike_center:
-                                    continue
-                            
-                            tf_label = {'60': '1h', '240': '4h', 'D': '1d'}.get(tf, tf)
-                            
-                            state.add_alert(Alert(
-                                ts=time.time(), symbol=sym, kind=kind,
-                                price_now=current_price, ref_price=open_price, ma=st.ma,
-                                change_pct=change_pct, timeframe=tf_label
-                            ))
-                            
-                            await self._open_trade(session, sym, side, current_price, st.max_leverage, cfg, gs, change_pct, fee_pct=gs.fee_pct if gs and gs.fee_pct > 0 else 0.055)
-                            
-                            log.info(f'SIGNAL {kind} {sym} ({tf_label}) {change_pct:.2f}% -> OPEN {side} at {current_price}')
-                            
-                            open_syms.add(sym)
-                            break
-                            
+                            continue
+                        if ev['confidence'] < min_conf:
+                            log.debug('SKIP %s %s: confidence %.2f < %.2f (%s)', sym, tf, ev['confidence'], min_conf, ev['reason'])
+                            self._seen_candles.add(candle_id)
+                            continue
+
+                        side = 'LONG' if ev['direction'] == 'long' else 'SHORT'
+                        kind = 'DUMP' if side == 'LONG' else 'PUMP'
+
+                        # Экстремум ножа должен быть пройден ценой (не падающий нож) —
+                        # класс уже это проверил; дополнительно требуем возврата за MA ножа? Нет: MA-фильтр ниже.
+                        tf_label = {'60': '1h', '240': '4h', 'D': '1d'}.get(tf, tf)
+
+                        state.add_alert(Alert(
+                            ts=time.time(), symbol=sym, kind=kind,
+                            price_now=current_price, ref_price=open_price, ma=st.ma,
+                            change_pct=change_pct, timeframe=f'{tf_label} knife conf={ev["confidence"]:.2f}'
+                        ))
+
+                        await self._open_trade(session, sym, side, current_price, st.max_leverage, cfg, gs, change_pct, fee_pct=gs.fee_pct if gs and gs.fee_pct > 0 else 0.055)
+
+                        log.info('SIGNAL %s %s (%s) %.2f%% -> OPEN %s @ %.6f | %s', kind, sym, tf_label, change_pct, side, current_price, ev['reason'])
+
+                        open_syms.add(sym)
+                        break
+
                 except Exception as e:
                     log.warning(f'Check entries failed for {sym}: {e}')
             await session.commit()
