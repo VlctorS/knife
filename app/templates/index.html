@@ -159,7 +159,7 @@ button:hover { background:#1d4ed8; }
     </tr></thead>
     <tbody id="closed"><tr><td colspan="8" class="empty">Нет завершенных операций</td></tr></tbody></table></div></div>
     
-  <!-- ВКЛАДКА НАСТРОЕК -->
+    <!-- ВКЛАДКА НАСТРОЕК -->
   <div id="tab-settings" class="tab-content"><div class="panel">
     <h2>Глобальные настройки</h2>
     
@@ -345,9 +345,8 @@ button:hover { background:#1d4ed8; }
 const fmtNum = (n, d=6) => n==null ? "—" : Number(n).toLocaleString(undefined,{maximumFractionDigits:d});
 const fmtPnl = (n) => n==null ? "0.0000" : Number(n).toFixed(4);
 
-// ГЛАВНЫЕ ВКЛАДКИ
-document.querySelectorAll('.tabs > .tab').forEach(t => t.addEventListener('click', () => {
-  document.querySelectorAll('.tabs > .tab').forEach(x => x.classList.toggle('active', x.dataset.tab === t.dataset.tab));
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.tab === t.dataset.tab));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + t.dataset.tab));
   if (t.dataset.tab === 'stats') loadStats();
   if (t.dataset.tab === 'alerts') loadAlerts();
@@ -356,15 +355,13 @@ document.querySelectorAll('.tabs > .tab').forEach(t => t.addEventListener('click
   if (t.dataset.tab === 'settings') loadSettings();
 }));
 
-// ПОДВКЛАДКИ НАСТРОЕК (строго внутри #tab-settings)
-document.querySelectorAll('#tab-settings .sub-tab').forEach(t => t.addEventListener('click', () => {
-  document.querySelectorAll('#tab-settings .sub-tab').forEach(x => x.classList.toggle('active', x.dataset.subtab === t.dataset.subtab));
-  document.querySelectorAll('#tab-settings .sub-tab-content').forEach(c => c.classList.toggle('active', c.id === 'subtab-' + t.dataset.subtab));
+document.querySelectorAll('.sub-tab').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.sub-tab').forEach(x => x.classList.toggle('active', x.dataset.subtab === t.dataset.subtab));
+  document.querySelectorAll('.sub-tab-content').forEach(c => c.classList.toggle('active', c.id === 'subtab-' + t.dataset.subtab));
 }));
 
-// ПОДВКЛАДКИ СИМУЛЯЦИИ (строго внутри #sim-modal)
-document.querySelectorAll('#sim-modal .sub-tab').forEach(t => t.addEventListener('click', () => {
-  document.querySelectorAll('#sim-modal .sub-tab').forEach(x => x.classList.toggle('active', x.dataset.simtab === t.dataset.simtab));
+document.querySelectorAll('.sub-tab[data-simtab]').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.sub-tab[data-simtab]').forEach(x => x.classList.toggle('active', x.dataset.simtab === t.dataset.simtab));
   document.querySelectorAll('#sim-modal .sub-tab-content').forEach(c => c.classList.toggle('active', c.id === 'simtab-' + t.dataset.simtab));
 }));
 
@@ -853,7 +850,7 @@ async function openConfig(symbol) {
   setPosField('cfg-position_size_grid', cfg.position_size_grid, globalData.position_size_grid);
   
   // Принудительно активируем первую вкладку "Вход и усреднения"
-  document.querySelector('#config-modal .sub-tab[data-subtab="main"]').click();
+  document.querySelector('.sub-tab[data-subtab="main"]').click();
   
   document.getElementById('config-modal').classList.add('active');
 }
@@ -934,7 +931,7 @@ async function openSimulation() {
   document.getElementById('sim-title').textContent = `Симуляция для ${symbol} (${tradeData.side}, Вход: ${tradeData.entry_price})`;
   
   // Принудительно активируем первую вкладку "Профит"
-  document.querySelector('#sim-modal .sub-tab[data-simtab="profit"]').click();
+  document.querySelector('.sub-tab[data-simtab="profit"]').click();
   
   document.getElementById('sim-modal').classList.add('active');
   
