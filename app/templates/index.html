@@ -296,6 +296,12 @@ button:hover { background:#1d4ed8; }
   <div class="modal-content sim-modal-content">
     <h2 id="sim-title">Моделирование</h2>
     
+    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px; background: #141820; padding: 12px; border-radius: 8px; border: 1px solid #252b36;">
+        <label style="color: #8a93a6; font-size: 13px;">Бумажный баланс (USDT):</label>
+        <input type="number" id="sim-balance" value="100" step="1" min="1" style="width: 100px; padding: 6px;">
+        <button onclick="runSimulation()" style="background: #2563eb; padding: 6px 12px; font-size: 13px;">Пересчитать</button>
+    </div>
+
     <div class="sub-tabs">
       <div class="sub-tab active" data-simtab="profit">Профит (движение в нашу сторону)</div>
       <div class="sub-tab" data-simtab="loss">Убыток (движение против нас)</div>
@@ -930,6 +936,52 @@ async function openSimulation() {
   document.getElementById('sim-modal').classList.add('active');
   
   await runSimulation();
+}
+
+async function runSimulation() {
+  if (!lastSimPayload) return;
+  
+  // Обновляем баланс из поля ввода
+  lastSimPayload.balance = parseFloat(document.getElementById('sim-balance').value) || 100;
+
+  document.getElementById('sim-profit-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
+  document.getElementById('sim-loss-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
+
+  const res = await fetch('/api/simulate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(lastSimPayload)
+  });
+  
+  const data = await res.json();
+  if (!data.ok) {
+      alert('Ошибка симуляции: ' + (data.error || 'unknown'));
+      return;
+  }
+
+  // Рендер профита
+  document.getElementById('sim-profit-body').innerHTML = data.profit_steps.map(s => `
+    <tr>
+      <td class="step-col">${s.step}</td>
+      <td>${fmtNum(s.price)}</td>
+      <td>${s.action}</td>
+      <td>${fmtNum(s.qty, 2)}</td>
+      <td>${fmtNum(s.position_usdt, 2)}</td>
+      <td class="${s.pnl >= 0 ? 'pump' : 'dump'}">${s.pnl > 0 ? '+' : ''}${fmtNum(s.pnl, 4)}</td>
+    </tr>
+  `).join('');
+
+  // Рендер убытка
+  document.getElementById('sim-loss-body').innerHTML = data.loss_steps.map(s => `
+    <tr>
+      <td class="step-col">${s.step}</td>
+      <td>${fmtNum(s.price)}</td>
+      <td>${s.action}</td>
+      <td>${fmtNum(s.qty, 2)}</td>
+      <td>${fmtNum(s.position_usdt, 2)}</td>
+      <td class="${s.pnl >= 0 ? 'pump' : 'dump'}">${s.pnl > 0 ? '+' : ''}${fmtNum(s.pnl, 4)}</td>
+    </tr>
+  `).join('');
 }
 
 async function tick() { 
