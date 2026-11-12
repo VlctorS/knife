@@ -481,14 +481,19 @@ async def api_simulate(request: Request):
 
     current_price = entry_price
     for i in range(1, max_steps + 1):
-        step_pct = grid_step_pct * (grid_step_mult ** (i - 1))
+        # Шаг сетки (с защитой от переполнения)
+        step_pct = min(grid_step_pct * (grid_step_mult ** (i - 1)), 50.0) 
         
         if side == 'LONG':
-            current_price = current_price * (1 - step_pct / 100)
+            new_price = current_price * (1 - step_pct / 100)
+            if new_price <= 0.0000001: # Защита от нулевой цены
+                break
+            current_price = new_price
         else:
             current_price = current_price * (1 + step_pct / 100)
             
-        add_size = entry_size * (grid_size_mult ** (i - 1))
+        # Размер усреднения
+        add_size = min(entry_size * (grid_size_mult ** (i - 1)), 100000) # Ограничитель
         add_size = max(6.0, add_size)
         add_qty = add_size / current_price
         
@@ -547,8 +552,15 @@ async def api_simulate(request: Request):
         else:
             current_price = current_price * (1 - target_exit_pct / 100)
             
-        close_qty = remaining_qty * (exit_contract_pct / 100)
-        close_qty = min(close_qty, remaining_qty)
+        # Гибкая схема выхода: если остаток меньше 1 USDT по текущей цене, 
+        # то закрываем его полностью (чтобы не продавать 0.0001 контракта)
+        min_remainder_usdt = 1.0
+        if remaining_qty * current_price < min_remainder_usdt:
+            close_qty = remaining_qty
+            action_label = 'Полное закрытие (остаток)'
+        else:
+            close_qty = remaining_qty * (exit_contract_pct / 100)
+            action_label = f'Выход {exit_step} ({exit_contract_pct}%)'
         
         if side == 'LONG':
             part_pnl = close_qty * (current_price - avg_price)
@@ -557,6 +569,7 @@ async def api_simulate(request: Request):
             
         exit_fee = (close_qty * current_price) * (fee_pct / 100)
         
+        # Пропорционально распределяем комиссию входа
         entry_fee_part = total_entry_fee * (close_qty / total_qty) if total_qty > 0 else 0
         net_part_pnl = part_pnl - exit_fee - entry_fee_part
         
@@ -571,7 +584,7 @@ async def api_simulate(request: Request):
             'avg_price': avg_price,
             'position_usdt': remaining_qty * current_price,
             'pnl': realized_pnl,
-            'action': f'Выход {exit_step} ({exit_contract_pct}%)'
+            'action': action_label
         })
         
         if remaining_qty < 0.0001:
