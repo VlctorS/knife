@@ -64,10 +64,6 @@ button:hover { background:#1d4ed8; }
 .grid-item .val { color: #e6e6e6; font-weight: 600; }
 .grid-total { border-top: 1px solid #252b36; padding-top: 12px; margin-top: 8px; font-weight: bold; color: #2563eb; text-align: center; font-size: 14px; }
 
-/* Стили для детализации истории */
-.history-detail-row { background: #141820; }
-.history-detail-cell { padding: 8px 16px; font-size: 12px; }
-
 /* Индикатор активности */
 .status-dot {
   display: inline-block;
@@ -108,7 +104,6 @@ button:hover { background:#1d4ed8; }
     <div class="stat"><div class="k">Алертов</div><div class="v" id="s-alerts">—</div></div>
     <div class="stat"><div class="k"><span class="status-dot"></span>Время в сети</div><div class="v" id="s-uptime">—</div></div>
     
-    <!-- НОВЫЕ БЛОКИ: Баланс и PnL -->
     <div class="stat balance-card">
       <div class="k">Бумажный баланс</div>
       <div class="v" id="s-balance">100.00 USDT</div>
@@ -123,7 +118,7 @@ button:hover { background:#1d4ed8; }
     <div class="tab active" data-tab="alerts">Сигналы</div>
     <div class="tab" data-tab="stats">Монеты</div>
     <div class="tab" data-tab="trades">Сделки</div>
-    <div class="tab" data-tab="closed">История сделок</div>
+    <div class="tab" data-tab="closed">Завершенные операции</div>
     <div class="tab" data-tab="settings">Настройки</div>
   </div>
   
@@ -145,7 +140,7 @@ button:hover { background:#1d4ed8; }
     <tbody id="trades"><tr><td colspan="13" class="empty">Нет сделок</td></tr></tbody></table></div></div>
     
   <div id="tab-closed" class="tab-content"><div class="panel">
-    <h2>История закрытых сделок</h2>
+    <h2>История всех выходов (частичных и полных)</h2>
     <div class="stats-row" id="closed-stats">
       <!-- Сюда JS вставит статистику -->
     </div>
@@ -154,11 +149,10 @@ button:hover { background:#1d4ed8; }
       <button onclick="clearClosedTrades('all')" style="background:#ef4444;">Очистить всё</button>
     </div>
     <table><thead><tr>
-      <th>Закрыто (МСК)</th><th>Символ</th><th>Тип</th>
-      <th>Ср. цена входа</th><th>Кол-во</th><th>Размер (USDT)</th>
-      <th>Плечо</th><th>Итоговый PnL</th><th>Выходы</th><th></th>
+      <th>Время выхода (МСК)</th><th>Символ</th><th>Тип</th><th>Действие</th>
+      <th>Цена выхода</th><th>Кол-во</th><th>PnL</th><th>Детали</th>
     </tr></thead>
-    <tbody id="closed"><tr><td colspan="10" class="empty">Нет закрытых сделок</td></tr></tbody></table></div></div>
+    <tbody id="closed"><tr><td colspan="8" class="empty">Нет завершенных операций</td></tr></tbody></table></div></div>
     
   <!-- ОБНОВЛЕННАЯ ВКЛАДКА НАСТРОЕК -->
   <div id="tab-settings" class="tab-content"><div class="panel">
@@ -211,10 +205,7 @@ button:hover { background:#1d4ed8; }
       <p class="muted">Всего усреднений не более, чем:</p>
       <div class="form-row"><input type="number" id="s-max_steps" step="1"></div>
 
-      <!-- Калькулятор сетки -->
-      <div class="grid-preview" id="grid-preview">
-        <!-- Заполняется через JS -->
-      </div>
+      <div class="grid-preview" id="grid-preview"></div>
 
       <div style="margin-top:24px">
         <button onclick="saveSettings()">Сохранить</button>
@@ -275,8 +266,6 @@ button:hover { background:#1d4ed8; }
 const fmtNum = (n, d=6) => n==null ? "—" : Number(n).toLocaleString(undefined,{maximumFractionDigits:d});
 const fmtPnl = (n) => n==null ? "0.0000" : Number(n).toFixed(4);
 
-let currentBalance = 100.00; // Бумажный баланс
-
 document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.tab === t.dataset.tab));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + t.dataset.tab));
@@ -299,7 +288,6 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// Живой калькулятор сетки
 function toggleSizeMult() {
   const use = document.getElementById('s-use_size_mult').checked;
   const multInput = document.getElementById('s-grid_size_multiplier');
@@ -372,7 +360,6 @@ async function loadStatus() {
   document.getElementById('s-symbols').textContent = d.symbols_count;
   document.getElementById('s-alerts').textContent = d.alerts_count;
   
-  // Форматируем Uptime в ЧЧ:ММ:СС
   const uptimeSec = d.uptime_sec;
   const h = Math.floor(uptimeSec / 3600);
   const m = Math.floor((uptimeSec % 3600) / 60);
@@ -381,7 +368,6 @@ async function loadStatus() {
   
   document.getElementById('updated').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
 
-  // Загружаем баланс
   await updateBalanceAndPnl();
 }
 
@@ -411,7 +397,6 @@ async function updateBalanceAndPnl() {
     pnlEl.textContent = (livePnl >= 0 ? '+' : '') + livePnl.toFixed(2) + ' USDT';
     pnlEl.className = 'v ' + (livePnl >= 0 ? 'pump' : 'dump');
     
-    // Красим карточку PnL
     const pnlCard = document.getElementById('pnl-card');
     if (livePnl >= 0) {
       pnlCard.style.borderColor = '#22c55e';
@@ -486,8 +471,6 @@ async function loadTrades() {
     const position_size = (t.total_qty * t.current_price).toFixed(2);
     const timeStr = t.opened_at ? new Date(t.opened_at + 'Z').toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
     const changeClass = t.change_pct > 0 ? 'pump' : (t.change_pct < 0 ? 'dump' : '');
-    
-    // Проверяем, были ли выходы (по exit_step)
     const hasExits = t.exit_step > 0 ? '<span class="pump">Да</span>' : '<span class="muted">Нет</span>';
 
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
@@ -520,39 +503,36 @@ async function loadClosedTrades() {
   const todayPnlClass = stats.today_pnl >= 0 ? 'pump' : 'dump';
   
   statsDiv.innerHTML = `
-    <span class="stat-item"><span class="lbl">Общий PnL:</span><span class="${pnlClass}">${stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)} USDT</span></span>
+    <span class="stat-item"><span class="lbl">Общий PnL (все выходы):</span><span class="${pnlClass}">${stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)} USDT</span></span>
     <span class="stat-item"><span class="lbl">Сегодня:</span><span class="${todayPnlClass}">${stats.today_pnl >= 0 ? '+' : ''}${stats.today_pnl.toFixed(2)} USDT</span></span>
-    <span class="stat-item"><span class="lbl">Всего сделок:</span>${stats.total_count}</span>
-    <span class="stat-item"><span class="lbl">Сегодня:</span>${stats.today_count}</span>
+    <span class="stat-item"><span class="lbl">Всего полных сделок:</span>${stats.total_count}</span>
+    <span class="stat-item"><span class="lbl">Выходов сегодня:</span>${stats.today_count}</span>
     <span class="stat-item"><span class="lbl">WinRate:</span>${stats.win_rate}% (${stats.win_count}W / ${stats.loss_count}L)</span>
     <span class="stat-item"><span class="lbl">Profit Factor:</span><span class="${pfClass}">${stats.profit_factor}</span></span>
   `;
   
-  const d = await (await fetch('/api/closed_trades?limit=100')).json();
+  const d = await (await fetch('/api/all_exits?limit=100')).json();
   const tb = document.getElementById('closed');
-  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="10" class="empty">Нет закрытых сделок</td></tr>'; return; }
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">Нет завершенных операций</td></tr>'; return; }
   
-  tb.innerHTML = d.items.map(t => {
-    const position_size = (t.total_qty * t.avg_entry_price).toFixed(2);
-    const timeStr = t.closed_at ? new Date(t.closed_at + 'Z').toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
+  tb.innerHTML = d.items.map(h => {
+    const timeStr = new Date(h.ts + 'Z').toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
+    const pnlClass = h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : '');
     
-    // Проверяем, были ли частичные выходы (по exit_step)
-    const hasExits = t.exit_step > 0 ? '<span class="pump">Да</span>' : '<span class="muted">Нет</span>';
+    let actionName = h.action;
+    if (h.action === 'PARTIAL_CLOSE') actionName = 'Частичный выход';
+    if (h.action === 'FULL_CLOSE') actionName = 'Полное закрытие';
+    if (h.action === 'MANUAL_CLOSE') actionName = 'Ручное закрытие';
 
-    return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
+    return '<tr>'+
       '<td class="muted">'+timeStr+'</td>'+
-      '<td>'+t.symbol+'</td>'+
-      '<td class="'+(t.side==='LONG'?'pump':'dump')+'">'+t.side+'</td>'+
-      '<td>'+fmtNum(t.avg_entry_price)+'</td>'+
-      '<td>'+fmtNum(t.total_qty, 2)+'</td>'+
-      '<td>'+position_size+'</td>'+
-      '<td>'+(t.leverage||10)+'x</td>'+
-      '<td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td>'+
-      '<td>'+hasExits+'</td>'+
-      '<td style="display:flex; gap:8px;">'+
-        '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#8a93a6; cursor:pointer;" onclick="event.stopPropagation(); openHistory('+t.id+', \''+t.symbol+'\')">📋</button>'+
-        '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#ef4444; cursor:pointer; font-weight:600;" onclick="event.stopPropagation(); deleteClosedTrade('+t.id+')">✕</button>'+
-      '</td>'+
+      '<td>'+h.symbol+'</td>'+
+      '<td class="'+(h.side==='LONG'?'pump':'dump')+'">'+h.side+'</td>'+
+      '<td>'+actionName+'</td>'+
+      '<td>'+fmtNum(h.price)+'</td>'+
+      '<td>'+fmtNum(h.qty, 2)+'</td>'+
+      '<td class="'+pnlClass+'">'+fmtNum(h.pnl, 4)+'</td>'+
+      '<td><button style="padding:4px 8px; font-size:12px;" onclick="openHistory('+h.trade_id+', \''+h.symbol+'\')">📋</button></td>'+
     '</tr>';
   }).join('');
 }
@@ -624,7 +604,6 @@ async function openHistory(tradeId, symbol) {
   document.getElementById('history-title').innerHTML = title +
     `<div style="font-size:12px; color:#8a93a6; font-weight:400; margin-top:6px;">Следующее уср. при изм. цены = ${d.next_step_pct}% (шаг ${d.current_grid_step} из ${d.max_steps})</div>`;
   
-  // Подсчитываем итоговый реализованный PnL (только для закрытых сделок)
   let totalRealizedPnl = 0;
   
   document.getElementById('history-content').innerHTML = `
@@ -634,12 +613,10 @@ async function openHistory(tradeId, symbol) {
         ${d.items.map(h => {
           const timeStr = new Date(h.ts + 'Z').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
           
-          // Считаем итог только по закрытиям
           if (h.action.includes('CLOSE')) {
               totalRealizedPnl += (h.pnl || 0);
           }
 
-          // Красим строки: зеленый для прибыли, красный для убытка
           const pnlClass = h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : '');
           
           return `
@@ -654,7 +631,7 @@ async function openHistory(tradeId, symbol) {
         }).join('')}
         ${d.items.some(h => h.action.includes('CLOSE')) ? `
           <tr style="font-weight:bold; border-top: 2px solid #252b36;">
-            <td colspan="4" style="text-align:right;">Итого реализовано:</td>
+            <td colspan="4" style="text-align:right;">Итого реализовано по сделке:</td>
             <td class="${totalRealizedPnl > 0 ? 'pump' : (totalRealizedPnl < 0 ? 'dump' : '')}">${fmtNum(totalRealizedPnl, 4)}</td>
           </tr>
         ` : ''}

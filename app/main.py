@@ -103,20 +103,17 @@ async def api_stats(limit: int = 50):
         for s in r.scalars().all():
             cfg = configs.get(s.symbol)
             
-            # Если есть индивидуальная настройка > 0 - используем её
             if cfg and cfg.entry_pct > 0:
                 effective_entry = cfg.entry_pct
                 is_manual = True
-            # Если есть глобальная настройка > 0 - используем её
             elif gs and gs.entry_pct > 0:
                 effective_entry = gs.entry_pct
                 is_manual = True
-            # Иначе считаем автоматически (без жестких минимумов в 5% или 3%)
             else:
                 if s.avg_prostrel_pct > 0:
                     effective_entry = s.avg_prostrel_pct * 0.85
                 else:
-                    effective_entry = 5.0  # Фоллбек, если нет статистики
+                    effective_entry = 5.0
                 is_manual = False
             
             items.append({
@@ -154,6 +151,7 @@ async def api_trades(limit: int = 100):
                 'total_qty': t.total_qty, 'total_margin': t.total_margin,
                 'status': t.status, 'pnl': t.pnl, 'leverage': t.leverage,
                 'change_pct': round(change_pct, 2),
+                'exit_step': t.exit_step,
                 'opened_at': t.opened_at.isoformat() if t.opened_at else None,
                 'closed_at': t.closed_at.isoformat() if t.closed_at else None,
             })
@@ -177,41 +175,80 @@ async def api_closed_trades(limit: int = 100):
             })
         return {'items': items}
 
+# НОВЫЙ ЭНДПОИНТ: История всех выходов (частичных и полных)
+@app.get('/api/all_exits')
+async def api_all_exits(limit: int = 100):
+    async with SessionLocal() as session:
+        r = await session.execute(
+            select(TradeHistory, Trade)
+            .join(Trade, TradeHistory.trade_id == Trade.id)
+            .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+            .order_by(TradeHistory.ts.desc())
+            .limit(limit)
+        )
+        
+        items = []
+        for h, t in r.all():
+            items.append({
+                'id': h.id,
+                'trade_id': h.trade_id,
+                'symbol': t.symbol,
+                'side': t.side,
+                'action': h.action,
+                'ts': h.ts.isoformat(),
+                'price': h.price,
+                'qty': h.qty,
+                'pnl': h.pnl,
+                'notes': h.notes
+            })
+        return {'items': items}
+
 @app.get('/api/closed_stats')
 async def api_closed_stats():
     async with SessionLocal() as session:
-        # Все закрытые сделки
-        r = await session.execute(
-            select(Trade).where(Trade.status == 'CLOSED')
-        )
+        # Статистика по всем сделкам, включая закрытые частично
+        r = await session.execute(select(Trade))
         all_trades = r.scalars().all()
         
-        # Статистика по всем
         total_pnl = sum(t.pnl or 0 for t in all_trades)
-        total_count = len(all_trades)
+        total_count = len([t for t in all_trades if t.status == 'CLOSED'])
         
-        wins = [t for t in all_trades if (t.pnl or 0) > 0]
-        losses = [t for t in all_trades if (t.pnl or 0) < 0]
+        # Считаем профит от всех закрытий
+        hist_res = await session.execute(
+            select(func.sum(TradeHistory.pnl)).where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+        )
+        total_realized = hist_res.scalar() or 0.0
+        
+        # Сделки с положительным итоговым PnL (полностью закрытые)
+        wins = [t for t in all_trades if t.status == 'CLOSED' and (t.pnl or 0) > 0]
+        losses = [t for t in all_trades if t.status == 'CLOSED' and (t.pnl or 0) < 0]
         
         win_count = len(wins)
         loss_count = len(losses)
-        
         win_rate = (win_count / total_count * 100) if total_count > 0 else 0
         
         gross_profit = sum(t.pnl for t in wins if t.pnl)
         gross_loss = abs(sum(t.pnl for t in losses if t.pnl))
-        
         profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (999.99 if gross_profit > 0 else 0)
         
-        # Сегодня (с 00:00 по UTC)
         today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         
-        today_trades = [t for t in all_trades if t.closed_at and t.closed_at >= today_start]
-        today_pnl = sum(t.pnl or 0 for t in today_trades)
-        today_count = len(today_trades)
+        today_hist_res = await session.execute(
+            select(func.sum(TradeHistory.pnl))
+            .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+            .where(TradeHistory.ts >= today_start)
+        )
+        today_pnl = today_hist_res.scalar() or 0.0
+        
+        today_count_res = await session.execute(
+            select(func.count(TradeHistory.id))
+            .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+            .where(TradeHistory.ts >= today_start)
+        )
+        today_count = today_count_res.scalar() or 0
         
         return {
-            'total_pnl': round(total_pnl, 4),
+            'total_pnl': round(total_realized, 4),
             'total_count': total_count,
             'win_count': win_count,
             'loss_count': loss_count,
@@ -256,7 +293,6 @@ async def api_close_trade(request: Request):
         gs = await session.get(Settings, 1)
         fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
 
-        # Закрываем всю оставшуюся позицию
         closed_qty = t.total_qty
         if t.side == 'LONG':
             closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
@@ -265,19 +301,18 @@ async def api_close_trade(request: Request):
 
         exit_commission = closed_qty * price * (fee_pct / 100.0)
         t.exit_fee += exit_commission
-        # Реализованный PnL = gross за вычетом обеих комиссий Bybit (вход и выход)
+        
         realized_part = closed_pnl - exit_commission - t.entry_fee
         t.realized_pnl += realized_part
         total_pnl = t.realized_pnl
         closed_entry_fee = t.entry_fee
 
-        # Обновляем сделку
         t.status = 'CLOSED'
         t.closed_at = datetime.datetime.utcnow()
         t.current_price = price
-        t.pnl = total_pnl           # <-- СОХРАНЯЕМ PnL в базе
-        t.total_qty = 0.0           # <-- Обнуляем остаток
-        t.total_margin = 0.0        # <-- Обнуляем маржу
+        t.pnl = total_pnl
+        t.total_qty = 0.0
+        t.total_margin = 0.0
         t.entry_fee = 0.0
         
         history = TradeHistory(
