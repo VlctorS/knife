@@ -102,15 +102,20 @@ async def api_stats(limit: int = 50):
         for s in r.scalars().all():
             cfg = configs.get(s.symbol)
             
+            # Если есть индивидуальная настройка > 0 - используем её
             if cfg and cfg.entry_pct > 0:
                 effective_entry = cfg.entry_pct
                 is_manual = True
+            # Если есть глобальная настройка > 0 - используем её
             elif gs and gs.entry_pct > 0:
                 effective_entry = gs.entry_pct
                 is_manual = True
+            # Иначе считаем автоматически (без жестких минимумов в 5% или 3%)
             else:
-                auto_th = s.avg_prostrel_pct * 0.85 if s.avg_prostrel_pct > 0 else 5.0
-                effective_entry = max(auto_th, 5.0)
+                if s.avg_prostrel_pct > 0:
+                    effective_entry = s.avg_prostrel_pct * 0.85
+                else:
+                    effective_entry = 5.0  # Фоллбек, если нет статистики
                 is_manual = False
             
             items.append({
