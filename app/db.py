@@ -138,7 +138,18 @@ def _migrate_add_columns(conn):
     for table, column, ddl in additions:
         if table not in insp.get_table_names():
             continue
+        
+        # Проверяем существование колонки
         existing = {c['name'] for c in insp.get_columns(table)}
         if column in existing:
             continue
-        conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}'))
+        
+        # Пытаемся добавить, но ловим ошибку, если колонка уже есть (кэш asyncpg)
+        try:
+            conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}'))
+        except Exception as e:
+            # Если ошибка "already exists" — просто игнорируем
+            if 'already exists' in str(e).lower() or 'duplicate column' in str(e).lower():
+                pass
+            else:
+                raise e
