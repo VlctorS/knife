@@ -6,9 +6,9 @@ body { margin:0; font-family: sans-serif; background:#0e1117; color:#e6e6e6; }
 header { padding:16px 24px; border-bottom:1px solid #252b36; display:flex; gap:16px; align-items:center; }
 .pill { background:#171b23; border:1px solid #252b36; border-radius:999px; padding:4px 12px; font-size:12px; color:#8a93a6; }
 main { padding:24px; }
-.row { display:grid; grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); gap:12px; margin-bottom:24px; }
+.row { display:grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap:12px; margin-bottom:24px; }
 .stat { background:#171b23; border:1px solid #252b36; border-radius:12px; padding:14px 16px; }
-.k { font-size:12px; color:#8a93a6; } .v { font-size:20px; font-weight:600; }
+.k { font-size:12px; color:#8a93a6; } .v { font-size:24px; font-weight:600; }
 .tabs { display:flex; gap:8px; margin-bottom:16px; }
 .tab { padding:8px 16px; border-radius:8px; background:#171b23; color:#8a93a6; cursor:pointer; border:1px solid #252b36; }
 .tab.active { background:#252b36; color:#e6e6e6; font-weight:600; }
@@ -47,7 +47,7 @@ button:hover { background:#1d4ed8; }
 .reason-skip { color: #8a93a6; }
 .reason-radar { color: #f59e0b; }
 
-/* Стили для калькулятора сетки (два столбца, сверху-вниз) */
+/* Стили для калькулятора сетки */
 .grid-preview { 
   background: #0e1117; 
   border: 1px solid #252b36; 
@@ -58,28 +58,40 @@ button:hover { background:#1d4ed8; }
   font-family: monospace; 
   font-size: 13px; 
 }
-.grid-columns {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  column-gap: 32px;
-}
-.grid-item { 
-  display: flex; 
-  justify-content: space-between; 
-  padding: 4px 0; 
-  border-bottom: 1px solid #1f242d; 
-}
+.grid-columns { display: grid; grid-template-columns: 1fr 1fr; column-gap: 32px; }
+.grid-item { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #1f242d; }
 .grid-item .left { color: #8a93a6; }
 .grid-item .val { color: #e6e6e6; font-weight: 600; }
-.grid-total { 
-  border-top: 1px solid #252b36; 
-  padding-top: 12px; 
-  margin-top: 8px; 
-  font-weight: bold; 
-  color: #2563eb; 
-  text-align: center; 
-  font-size: 14px;
+.grid-total { border-top: 1px solid #252b36; padding-top: 12px; margin-top: 8px; font-weight: bold; color: #2563eb; text-align: center; font-size: 14px; }
+
+/* Стили для детализации истории */
+.history-detail-row { background: #141820; }
+.history-detail-cell { padding: 8px 16px; font-size: 12px; }
+
+/* Индикатор активности */
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+  margin-right: 6px;
+  animation: pulse 1.5s infinite;
 }
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.4; }
+  100% { opacity: 1; }
+}
+
+/* Стили для баланса и PnL */
+.balance-card { background: linear-gradient(135deg, #1e293b, #0f172a); border: 1px solid #2563eb; }
+.balance-card .k { color: #93c5fd; }
+.balance-card .v { color: #e0f2fe; }
+.pnl-card { background: linear-gradient(135deg, #1e293b, #0f172a); border: 1px solid #22c55e; }
+.pnl-card .k { color: #86efac; }
+.pnl-card .v { color: #dcfce7; }
 </style></head>
 <body>
 <header>
@@ -94,7 +106,17 @@ button:hover { background:#1d4ed8; }
   <div class="row">
     <div class="stat"><div class="k">Символов</div><div class="v" id="s-symbols">—</div></div>
     <div class="stat"><div class="k">Алертов</div><div class="v" id="s-alerts">—</div></div>
-    <div class="stat"><div class="k">Uptime</div><div class="v" id="s-uptime">—</div></div>
+    <div class="stat"><div class="k"><span class="status-dot"></span>Время в сети</div><div class="v" id="s-uptime">—</div></div>
+    
+    <!-- НОВЫЕ БЛОКИ: Баланс и PnL -->
+    <div class="stat balance-card">
+      <div class="k">Бумажный баланс</div>
+      <div class="v" id="s-balance">100.00 USDT</div>
+    </div>
+    <div class="stat pnl-card" id="pnl-card">
+      <div class="k">Живой PnL (с комиссиями)</div>
+      <div class="v" id="s-live-pnl">0.00 USDT</div>
+    </div>
   </div>
   
   <div class="tabs">
@@ -118,9 +140,9 @@ button:hover { background:#1d4ed8; }
       <th>Время (МСК)</th><th>Символ</th><th>Тип</th>
       <th>Ср. цена</th><th>Тек. цена</th><th>Изм. %</th>
       <th>Кол-во</th><th>Размер (USDT)</th>
-      <th>Сетка</th><th>Плечо</th><th>PnL</th><th></th>
+      <th>Сетка</th><th>Плечо</th><th>PnL (тек)</th><th>Выходы</th><th></th>
     </tr></thead>
-    <tbody id="trades"><tr><td colspan="12" class="empty">Нет сделок</td></tr></tbody></table></div></div>
+    <tbody id="trades"><tr><td colspan="13" class="empty">Нет сделок</td></tr></tbody></table></div></div>
     
   <div id="tab-closed" class="tab-content"><div class="panel">
     <h2>История закрытых сделок</h2>
@@ -134,9 +156,9 @@ button:hover { background:#1d4ed8; }
     <table><thead><tr>
       <th>Закрыто (МСК)</th><th>Символ</th><th>Тип</th>
       <th>Ср. цена входа</th><th>Кол-во</th><th>Размер (USDT)</th>
-      <th>Плечо</th><th>PnL</th><th></th>
+      <th>Плечо</th><th>Итоговый PnL</th><th>Выходы</th><th></th>
     </tr></thead>
-    <tbody id="closed"><tr><td colspan="9" class="empty">Нет закрытых сделок</td></tr></tbody></table></div></div>
+    <tbody id="closed"><tr><td colspan="10" class="empty">Нет закрытых сделок</td></tr></tbody></table></div></div>
     
   <!-- ОБНОВЛЕННАЯ ВКЛАДКА НАСТРОЕК -->
   <div id="tab-settings" class="tab-content"><div class="panel">
@@ -253,6 +275,8 @@ button:hover { background:#1d4ed8; }
 const fmtNum = (n, d=6) => n==null ? "—" : Number(n).toLocaleString(undefined,{maximumFractionDigits:d});
 const fmtPnl = (n) => n==null ? "0.0000" : Number(n).toFixed(4);
 
+let currentBalance = 100.00; // Бумажный баланс
+
 document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.tab === t.dataset.tab));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + t.dataset.tab));
@@ -305,10 +329,8 @@ function updateGridPreview() {
   
   const stepsToShow = Math.min(maxSteps, 10);
   
-  // Рассчитываем общую сумму, даже если шагов больше 10
   for (let i = 0; i < maxSteps; i++) {
     const stepPct = startPct * (stepMult ** i);
-    
     let size = startSize;
     if (useSizeMult) {
       size = startSize * (sizeMult ** i);
@@ -316,18 +338,13 @@ function updateGridPreview() {
     size = Math.max(6, size);
     totalSum += size;
     
-    // Строим HTML только для первых 10 шагов
     if (i < stepsToShow) {
-      // Формат: 1 уср. 5% = 6.0
       const itemHtml = `<div class="grid-item">
                           <span class="left">${i+1} уср. ${stepPct.toFixed(1)}%</span> 
                           <span class="val">= ${size.toFixed(1)}</span>
                         </div>`;
-      if (i < 5) {
-        col1Html += itemHtml;
-      } else {
-        col2Html += itemHtml;
-      }
+      if (i < 5) col1Html += itemHtml;
+      else col2Html += itemHtml;
     }
   }
 
@@ -342,7 +359,6 @@ function updateGridPreview() {
   previewDiv.innerHTML = html;
 }
 
-// Навешиваем слушатели на поля для калькулятора
 ['s-grid_step_pct', 's-grid_step_multiplier', 's-pos-size-grid', 's-grid_size_multiplier', 's-max_steps'].forEach(id => {
   document.getElementById(id).addEventListener('input', updateGridPreview);
 });
@@ -355,8 +371,57 @@ async function loadStatus() {
   document.getElementById('p-lev').textContent = 'Плечо ≥ ' + d.min_max_leverage;
   document.getElementById('s-symbols').textContent = d.symbols_count;
   document.getElementById('s-alerts').textContent = d.alerts_count;
-  document.getElementById('s-uptime').textContent = d.uptime_sec + 'с';
+  
+  // Форматируем Uptime в ЧЧ:ММ:СС
+  const uptimeSec = d.uptime_sec;
+  const h = Math.floor(uptimeSec / 3600);
+  const m = Math.floor((uptimeSec % 3600) / 60);
+  const s = uptimeSec % 60;
+  document.getElementById('s-uptime').textContent = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  
   document.getElementById('updated').textContent = 'обновлено ' + new Date().toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
+
+  // Загружаем баланс
+  await updateBalanceAndPnl();
+}
+
+async function updateBalanceAndPnl() {
+  try {
+    const res = await fetch('/api/closed_stats');
+    const stats = await res.json();
+    
+    // Бумажный баланс = 100 + (общий реализованный PnL)
+    const totalRealizedPnl = stats.total_pnl || 0;
+    const currentBalance = 100.00 + totalRealizedPnl;
+    
+    const balEl = document.getElementById('s-balance');
+    balEl.textContent = currentBalance.toFixed(2) + ' USDT';
+    balEl.className = currentBalance >= 100 ? 'v pump' : 'v dump';
+    
+    // Живой PnL (реализованный + нереализованный открытых)
+    let livePnl = totalRealizedPnl;
+    
+    const tradesRes = await fetch('/api/trades?limit=100');
+    const tradesData = await tradesRes.json();
+    for (const t of tradesData.items) {
+      livePnl += (t.pnl || 0);
+    }
+    
+    const pnlEl = document.getElementById('s-live-pnl');
+    pnlEl.textContent = (livePnl >= 0 ? '+' : '') + livePnl.toFixed(2) + ' USDT';
+    pnlEl.className = 'v ' + (livePnl >= 0 ? 'pump' : 'dump');
+    
+    // Красим карточку PnL
+    const pnlCard = document.getElementById('pnl-card');
+    if (livePnl >= 0) {
+      pnlCard.style.borderColor = '#22c55e';
+    } else {
+      pnlCard.style.borderColor = '#ef4444';
+    }
+    
+  } catch(e) {
+    console.error('Failed to update balance:', e);
+  }
 }
 
 async function loadAlerts() {
@@ -367,7 +432,6 @@ async function loadAlerts() {
   tb.innerHTML = d.items.map(a => {
     const timeStr = new Date(a.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
     
-    // Определяем причину и стиль
     let reasonText = a.reason || '';
     let reasonClass = 'reason-skip';
     
@@ -379,7 +443,6 @@ async function loadAlerts() {
     } else if (!reasonText) {
         reasonText = 'Ожидание данных';
     } else {
-        // Переводим технические термины на русский
         reasonText = reasonText
             .replace(/not a rejection candle/g, 'Не нож (нет длинной тени)')
             .replace(/body=/g, 'Тело: ')
@@ -417,12 +480,16 @@ async function loadStats() {
 async function loadTrades() {
   const d = await (await fetch('/api/trades?limit=100')).json();
   const tb = document.getElementById('trades');
-  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="12" class="empty">Нет сделок</td></tr>'; return; }
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="13" class="empty">Нет сделок</td></tr>'; return; }
   
   tb.innerHTML = d.items.map(t => {
     const position_size = (t.total_qty * t.current_price).toFixed(2);
     const timeStr = t.opened_at ? new Date(t.opened_at + 'Z').toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
     const changeClass = t.change_pct > 0 ? 'pump' : (t.change_pct < 0 ? 'dump' : '');
+    
+    // Проверяем, были ли выходы (по exit_step)
+    const hasExits = t.exit_step > 0 ? '<span class="pump">Да</span>' : '<span class="muted">Нет</span>';
+
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
       '<td class="muted">'+timeStr+'</td>'+
       '<td>'+t.symbol+'</td>'+
@@ -435,6 +502,7 @@ async function loadTrades() {
       '<td class="'+(t.grid_step>0?'pump':'')+'">'+t.grid_step+'</td>'+
       '<td>'+(t.leverage||10)+'x</td>'+
       '<td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td>'+
+      '<td>'+hasExits+'</td>'+
       '<td style="display:flex; gap:8px;">'+
         '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#8a93a6; cursor:pointer;" onclick="event.stopPropagation(); openConfig(\''+t.symbol+'\')">⚙️</button>'+
         '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#ef4444; cursor:pointer; font-weight:600;" onclick="event.stopPropagation(); closeTrade('+t.id+')">✕</button>'+
@@ -462,11 +530,15 @@ async function loadClosedTrades() {
   
   const d = await (await fetch('/api/closed_trades?limit=100')).json();
   const tb = document.getElementById('closed');
-  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="9" class="empty">Нет закрытых сделок</td></tr>'; return; }
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="10" class="empty">Нет закрытых сделок</td></tr>'; return; }
   
   tb.innerHTML = d.items.map(t => {
     const position_size = (t.total_qty * t.avg_entry_price).toFixed(2);
     const timeStr = t.closed_at ? new Date(t.closed_at + 'Z').toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
+    
+    // Проверяем, были ли частичные выходы (по exit_step)
+    const hasExits = t.exit_step > 0 ? '<span class="pump">Да</span>' : '<span class="muted">Нет</span>';
+
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
       '<td class="muted">'+timeStr+'</td>'+
       '<td>'+t.symbol+'</td>'+
@@ -476,6 +548,7 @@ async function loadClosedTrades() {
       '<td>'+position_size+'</td>'+
       '<td>'+(t.leverage||10)+'x</td>'+
       '<td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td>'+
+      '<td>'+hasExits+'</td>'+
       '<td style="display:flex; gap:8px;">'+
         '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#8a93a6; cursor:pointer;" onclick="event.stopPropagation(); openHistory('+t.id+', \''+t.symbol+'\')">📋</button>'+
         '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#ef4444; cursor:pointer; font-weight:600;" onclick="event.stopPropagation(); deleteClosedTrade('+t.id+')">✕</button>'+
@@ -521,6 +594,7 @@ async function closeTrade(tradeId) {
     alert('Сделка закрыта');
     loadTrades();
     loadClosedTrades();
+    updateBalanceAndPnl();
   } else {
     alert('Ошибка: ' + (d.error || 'unknown'));
   }
@@ -550,22 +624,40 @@ async function openHistory(tradeId, symbol) {
   document.getElementById('history-title').innerHTML = title +
     `<div style="font-size:12px; color:#8a93a6; font-weight:400; margin-top:6px;">Следующее уср. при изм. цены = ${d.next_step_pct}% (шаг ${d.current_grid_step} из ${d.max_steps})</div>`;
   
+  // Подсчитываем итоговый реализованный PnL (только для закрытых сделок)
+  let totalRealizedPnl = 0;
+  
   document.getElementById('history-content').innerHTML = `
     <table style="width:100%">
       <thead><tr><th>Время (МСК)</th><th>Действие</th><th>Цена</th><th>Кол-во</th><th>PnL</th></tr></thead>
       <tbody>
         ${d.items.map(h => {
           const timeStr = new Date(h.ts + 'Z').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+          
+          // Считаем итог только по закрытиям
+          if (h.action.includes('CLOSE')) {
+              totalRealizedPnl += (h.pnl || 0);
+          }
+
+          // Красим строки: зеленый для прибыли, красный для убытка
+          const pnlClass = h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : '');
+          
           return `
             <tr>
               <td class="muted">${timeStr}</td>
               <td>${h.action} (${h.notes})</td>
               <td>${fmtNum(h.price)}</td>
               <td>${fmtNum(h.qty, 2)}</td>
-              <td class="${h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : '')}">${fmtNum(h.pnl, 4)}</td>
+              <td class="${pnlClass}">${fmtNum(h.pnl, 4)}</td>
             </tr>
           `;
         }).join('')}
+        ${d.items.some(h => h.action.includes('CLOSE')) ? `
+          <tr style="font-weight:bold; border-top: 2px solid #252b36;">
+            <td colspan="4" style="text-align:right;">Итого реализовано:</td>
+            <td class="${totalRealizedPnl > 0 ? 'pump' : (totalRealizedPnl < 0 ? 'dump' : '')}">${fmtNum(totalRealizedPnl, 4)}</td>
+          </tr>
+        ` : ''}
       </tbody>
     </table>
   `;
@@ -582,11 +674,9 @@ function closeModal() {
 async function loadSettings() {
   const d = await (await fetch('/api/settings')).json();
   
-  // Основные
   document.getElementById('min-turnover').value = d.min_turnover;
   document.getElementById('min-lev').value = d.min_leverage;
   
-  // Вход и усреднения
   document.getElementById('s-entry_pct').value = d.entry_pct;
   document.getElementById('s-grid_step_pct').value = d.grid_step_pct;
   document.getElementById('s-grid_step_multiplier').value = d.grid_step_multiplier;
@@ -594,21 +684,17 @@ async function loadSettings() {
   document.getElementById('s-pos-size-grid').value = Math.max(6, d.position_size_grid || 6);
   document.getElementById('s-max_steps').value = d.max_steps;
   
-  // Множитель ставки
-  const sizeMult = d.grid_size_multiplier || 1.2; // Дефолт 1.2, если не задано
+  const sizeMult = d.grid_size_multiplier || 1.2;
   document.getElementById('s-grid_size_multiplier').value = sizeMult;
   
-  // Всегда ставим галочку, если множитель > 1, или если это дефолтное значение
   const useMult = sizeMult > 1.0;
   document.getElementById('s-use_size_mult').checked = useMult;
   document.getElementById('s-grid_size_multiplier').disabled = !useMult;
 
-  // Выходы
   document.getElementById('s-initial_exit_pct').value = d.initial_exit_pct;
   document.getElementById('s-exit_step_multiplier').value = d.exit_step_multiplier;
   document.getElementById('s-exit_contract_pct').value = d.exit_contract_pct;
   
-  // Обновляем превью сетки
   updateGridPreview();
 }
 
