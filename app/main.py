@@ -447,7 +447,7 @@ async def api_simulate(request: Request):
     data = await request.json()
     
     entry_price = float(data.get('entry_price', 0))
-    entry_size = float(data.get('entry_size', 6))
+    entry_size = float(data.get('entry_size', 6)) # Размер в USDT (номинал)
     grid_step_pct = float(data.get('grid_step_pct', 5))
     grid_step_mult = float(data.get('grid_step_mult', 2.5))
     grid_size_mult = float(data.get('grid_size_mult', 1.0))
@@ -459,7 +459,6 @@ async def api_simulate(request: Request):
     leverage = float(data.get('leverage', 10))
     side = data.get('side', 'LONG')
     
-    # Бумажный баланс
     current_balance = 100.0 
 
     if entry_price <= 0:
@@ -469,10 +468,13 @@ async def api_simulate(request: Request):
     # СЦЕНАРИЙ УБЫТКА (движение против нас)
     # ==========================================
     loss_steps = []
+    
+    # Начальные данные
     total_qty = entry_size / entry_price
+    total_position_nominal = entry_size  # Полная стоимость контрактов
     avg_price = entry_price
     total_entry_fee = entry_size * (fee_pct / 100)
-    used_margin = entry_size / leverage
+    used_margin = entry_size / leverage  # Маржа (залог)
     
     loss_steps.append({
         'step': 0,
@@ -480,7 +482,7 @@ async def api_simulate(request: Request):
         'qty': total_qty,
         'total_qty': total_qty,
         'avg_price': avg_price,
-        'position_usdt': total_qty * entry_price,
+        'position_usdt': total_position_nominal,
         'pnl': -total_entry_fee,
         'action': 'Вход',
         'margin': used_margin
@@ -490,7 +492,7 @@ async def api_simulate(request: Request):
     is_liquidated = False
 
     for i in range(1, max_steps + 1):
-        # Шаг сетки с защитой от переполнения
+        # Шаг сетки (защита от переполнения)
         step_pct = min(grid_step_pct * (grid_step_mult ** (i - 1)), 90.0) 
         
         # Движение цены против нас
@@ -503,21 +505,44 @@ async def api_simulate(request: Request):
         else:
             current_price = current_price * (1 + step_pct / 100)
 
-        # 1. СНАЧАЛА ДЕЛАЕМ УСРЕДНЕНИЕ (добавляем маржу, сдвигаем среднюю)
+        # Проверка на ликвидацию ДО усреднения (по текущей средней)
+        if side == 'LONG':
+            liq_price = avg_price * (1 - 1.0 / leverage)
+            if current_price <= liq_price:
+                is_liquidated = True
+        else:
+            liq_price = avg_price * (1 + 1.0 / leverage)
+            if current_price >= liq_price:
+                is_liquidated = True
+
+        if is_liquidated:
+            loss_steps.append({
+                'step': i,
+                'price': current_price,
+                'qty': 0,
+                'total_qty': 0,
+                'avg_price': avg_price,
+                'position_usdt': 0,
+                'pnl': -used_margin, # Потеряли всю маржу
+                'action': 'ЛИКВИДАЦИЯ',
+                'margin': 0
+            })
+            break
+
+        # Если не ликвидированы - делаем усреднение
         add_size = min(entry_size * (grid_size_mult ** (i - 1)), 1000000)
         add_size = max(6.0, add_size)
         required_margin = add_size / leverage
         
         if used_margin + required_margin > current_balance:
-            # Если баланса не хватает на усреднение - стоп
             loss_steps.append({
                 'step': i,
                 'price': current_price,
                 'qty': 0,
                 'total_qty': total_qty,
                 'avg_price': avg_price,
-                'position_usdt': total_qty * current_price,
-                'pnl': -used_margin, # Потеряли всю маржу
+                'position_usdt': total_position_nominal,
+                'pnl': -used_margin, 
                 'action': 'СТОП (Мало маржи)',
                 'margin': used_margin
             })
@@ -532,18 +557,9 @@ async def api_simulate(request: Request):
         
         add_fee = add_size * (fee_pct / 100)
         total_entry_fee += add_fee
-
-        # 2. ТЕПЕРЬ ПРОВЕРЯЕМ ЛИКВИДАЦИЮ (по новой средней цене)
-        if side == 'LONG':
-            liq_price = avg_price * (1 - 1.0 / leverage)
-            if current_price <= liq_price:
-                is_liquidated = True
-        else:
-            liq_price = avg_price * (1 + 1.0 / leverage)
-            if current_price >= liq_price:
-                is_liquidated = True
-
-        # Считаем текущий PnL
+        total_position_nominal += add_size
+        
+        # Считаем PnL от полной стоимости позиции (номинала)
         if side == 'LONG':
             floating_pnl = total_qty * (current_price - avg_price)
         else:
@@ -551,26 +567,17 @@ async def api_simulate(request: Request):
             
         net_pnl = floating_pnl - total_entry_fee
         
-        action_text = f'Уср. {i}'
-        if is_liquidated:
-            action_text += ' (ЛИКВИДАЦИЯ)'
-            net_pnl = -used_margin # При ликвидации теряем всю маржу
-
         loss_steps.append({
             'step': i,
             'price': current_price,
             'qty': add_qty,
             'total_qty': total_qty,
             'avg_price': avg_price,
-            'position_usdt': total_qty * current_price,
+            'position_usdt': total_position_nominal,
             'pnl': net_pnl,
-            'action': action_text,
+            'action': f'Уср. {i}',
             'margin': used_margin
         })
-        
-        # Если ликвидированы, дальше усредняться нечем (баланс обнулен)
-        if is_liquidated:
-            break
 
     # ==========================================
     # СЦЕНАРИЙ ПРОФИТА (движение в нашу сторону)
