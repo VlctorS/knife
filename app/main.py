@@ -459,7 +459,7 @@ async def api_simulate(request: Request):
     leverage = float(data.get('leverage', 10))
     side = data.get('side', 'LONG')
     
-    # Бумажный баланс (для пометки о нехватке средств)
+    # Бумажный баланс
     current_balance = 100.0 
 
     if entry_price <= 0:
@@ -472,7 +472,10 @@ async def api_simulate(request: Request):
     total_qty = entry_size / entry_price
     avg_price = entry_price
     total_entry_fee = entry_size * (fee_pct / 100)
+    
+    # Маржа (залог) для входа = номинал / плечо
     used_margin = entry_size / leverage
+    total_position_nominal = entry_size
     
     loss_steps.append({
         'step': 0,
@@ -480,37 +483,73 @@ async def api_simulate(request: Request):
         'qty': total_qty,
         'total_qty': total_qty,
         'avg_price': avg_price,
-        'position_usdt': total_qty * entry_price,
+        'position_usdt': total_position_nominal,
         'pnl': -total_entry_fee,
         'action': 'Вход',
         'margin': used_margin
     })
 
     current_price = entry_price
+    is_liquidated = False
+
     for i in range(1, max_steps + 1):
-        # Шаг сетки с защитой от переполнения
         step_pct = min(grid_step_pct * (grid_step_mult ** (i - 1)), 90.0) 
         
         if side == 'LONG':
             new_price = current_price * (1 - step_pct / 100)
             if new_price <= 0.0000001: 
-                current_price = 0.0000001 # Защита от нулевой цены
+                current_price = 0.0000001
             else:
                 current_price = new_price
         else:
             current_price = current_price * (1 + step_pct / 100)
             
-        add_size = min(entry_size * (grid_size_mult ** (i - 1)), 1000000) # Ограничитель от бесконечности
+        add_size = min(entry_size * (grid_size_mult ** (i - 1)), 1000000)
         add_size = max(6.0, add_size)
         
+        # Проверяем, не ликвидированы ли мы уже
+        # Считаем текущий нереализованный PnL (без комиссий)
+        if side == 'LONG':
+            raw_pnl = total_qty * (current_price - avg_price)
+        else:
+            raw_pnl = total_qty * (avg_price - current_price)
+            
+        # Если убыток больше или равен марже -> Ликвидация
+        if raw_pnl <= -used_margin:
+            loss_steps.append({
+                'step': i,
+                'price': current_price,
+                'qty': 0,
+                'total_qty': 0,
+                'avg_price': avg_price,
+                'position_usdt': 0,
+                'pnl': -used_margin, # Теряем всю маржу
+                'action': 'ЛИКВИДАЦИЯ',
+                'margin': 0
+            })
+            is_liquidated = True
+            break
+            
+        # Если не ликвидированы, делаем усреднение
         required_margin = add_size / leverage
-        margin_warning = False
         
         if used_margin + required_margin > current_balance:
-            margin_warning = True
+            loss_steps.append({
+                'step': i,
+                'price': current_price,
+                'qty': add_size / current_price,
+                'total_qty': total_qty,
+                'avg_price': avg_price,
+                'position_usdt': total_position_nominal,
+                'pnl': -9999, 
+                'action': 'СТОП (Мало маржи)',
+                'margin': used_margin
+            })
+            break
             
         used_margin += required_margin
         add_qty = add_size / current_price
+        total_position_nominal += add_size
         
         old_total_qty = total_qty
         total_qty += add_qty
@@ -526,19 +565,15 @@ async def api_simulate(request: Request):
             
         net_pnl = floating_pnl - total_entry_fee
         
-        action_text = f'Уср. {i}'
-        if margin_warning:
-            action_text += ' (Мало маржи)'
-
         loss_steps.append({
             'step': i,
             'price': current_price,
             'qty': add_qty,
             'total_qty': total_qty,
             'avg_price': avg_price,
-            'position_usdt': total_qty * current_price,
+            'position_usdt': total_position_nominal,
             'pnl': net_pnl,
-            'action': action_text,
+            'action': f'Уср. {i}',
             'margin': used_margin
         })
 
@@ -575,10 +610,8 @@ async def api_simulate(request: Request):
         else:
             current_price = current_price * (1 - target_exit_pct / 100)
             
-        # Сколько хотим закрыть по проценту
         close_qty = remaining_qty * (exit_contract_pct / 100)
         
-        # Проверка на минимальный ордер (1 USDT)
         if close_qty * current_price < 1.0:
             close_qty = remaining_qty
             action_label = 'Закрытие (остаток < 1$)'
