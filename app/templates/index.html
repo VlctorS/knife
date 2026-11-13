@@ -1182,6 +1182,7 @@ async function runSimulation() {
 }
 
 // ---------- ЛОГИКА ГРАФИКА ----------
+let maSeries = null;
 let chartInstance = null;
 let candleSeries = null;
 let volumeSeries = null;
@@ -1259,16 +1260,25 @@ function initChart() {
     });
     volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
 
-    // Bollinger Bands (Меняем цвет на розовый #ec4899)
+    // Bollinger Bands (Меняем цвет на розовый #ec4899, делаем пунктирными)
     bbUpperSeries = chartInstance.addLineSeries({ 
       color: '#ec4899', 
       lineWidth: 1, 
+      lineStyle: LightweightCharts.LineStyle.Dashed, // <--- Пунктир
       priceScaleId: 'right' 
     });
     bbLowerSeries = chartInstance.addLineSeries({ 
       color: '#ec4899', 
       lineWidth: 1, 
+      lineStyle: LightweightCharts.LineStyle.Dashed, // <--- Пунктир
       priceScaleId: 'right' 
+    });
+
+    // MA (Желтая линия, период 20)
+    maSeries = chartInstance.addLineSeries({
+      color: '#facc15', // Желтый
+      lineWidth: 2,
+      priceScaleId: 'right'
     });
 
     // Автоматический ресайз
@@ -1371,6 +1381,20 @@ async function fetchChartData() {
 
     bbUpperSeries.setData(bbUpper);
     bbLowerSeries.setData(bbLower);
+  
+    // Расчет MA (период 20)
+    const maPeriod = 20;
+    const maData = [];
+    for (let i = maPeriod - 1; i < closes.length; i++) {
+      let sum = 0;
+      for (let j = 0; j < maPeriod; j++) {
+        sum += closes[i - j];
+      }
+      maData.push({ time: candles[i].time, value: sum / maPeriod });
+    }
+    
+    // Устанавливаем данные для MA
+    maSeries.setData(maData);
 
   } catch (e) {
     console.error('Chart fetch error:', e);
