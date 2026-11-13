@@ -425,6 +425,8 @@ class TradingBot:
                         closed_frac = close_pct / 100.0
                         action = 'PARTIAL_CLOSE'
                         t.exit_step = current_exit_step + 1
+                        # --- СБРОС СЕТКИ УСРЕДНЕНИЙ ---
+                        t.grid_step = 0
 
                     # Доля комиссии входа, приходящаяся на закрываемую часть
                     entry_fee_part = t.entry_fee * closed_frac
