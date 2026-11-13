@@ -460,9 +460,6 @@ async def api_trade_history(trade_id: int):
             'est_profit': round(float(est_profit), 2)
         }
 
-# ============================================================================
-# ИСПРАВЛЕННАЯ СИМУЛЯЦИЯ
-# ============================================================================
 @app.post('/api/simulate')
 async def api_simulate(request: Request):
     data = await request.json()
@@ -479,20 +476,20 @@ async def api_simulate(request: Request):
     fee_pct = float(data.get('fee_pct', 0.055))
     leverage = float(data.get('leverage', 10))
     side = data.get('side', 'LONG')
-
-    # ✅ ИСПРАВЛЕНИЕ: читаем баланс из запроса, а не хардкодим 100
+    
+    # ✅ Читаем баланс из запроса (было захардкожено 100.0)
     initial_balance = float(data.get('balance', 100))
     if initial_balance <= 0:
         initial_balance = 100.0
 
-    # MMR (maintenance margin rate) — для симуляции берём 0.5%
+    # MMR для кросс-маржи
     mmr = 0.005
 
     if entry_price <= 0:
         return {'ok': False, 'error': 'Invalid entry price'}
 
     # ==========================================
-    # СЦЕНАРИЙ УБЫТКА (движение против нас)
+    # СЦЕНАРИЙ УБЫТКА
     # ==========================================
     loss_steps = []
     
@@ -501,16 +498,10 @@ async def api_simulate(request: Request):
     total_position_nominal = entry_size
     total_entry_fee = entry_size * (fee_pct / 100)
     
-    # Маржа, ушедшая в залог под текущую позицию
     used_margin = entry_size / leverage
-    # Реализованный PnL пока 0 (ничего не закрывали)
     realized_pnl = 0.0
 
     def equity_at(price, qty, avg):
-        """
-        Equity = начальный баланс + реализованный PnL + нереализованный PnL - уплаченные комиссии.
-        Залог (used_margin) здесь НЕ вычитается — он уже "внутри" позиции.
-        """
         if side == 'LONG':
             unreal = qty * (price - avg)
         else:
@@ -540,7 +531,7 @@ async def api_simulate(request: Request):
         else:
             current_price = current_price * (1 + step_pct / 100)
 
-        # ✅ ИСПРАВЛЕНИЕ: ликвидация по кросс-марже: equity <= used_margin * MMR
+        # Ликвидация по кросс-марже: equity <= used_margin * MMR
         eq = equity_at(current_price, total_qty, avg_price)
         liq_threshold = used_margin * mmr
         if eq <= liq_threshold:
@@ -551,18 +542,18 @@ async def api_simulate(request: Request):
                 'total_qty': total_qty,
                 'avg_price': avg_price,
                 'position_usdt': total_position_nominal,
-                'pnl': eq - initial_balance,  # фактическая потеря equity
-                'action': f'ЛИКВИДАЦИЯ (equity {eq:.2f} ≤ MMR {liq_threshold:.2f})',
+                'pnl': eq - initial_balance,
+                'action': 'ЛИКВИДАЦИЯ',
                 'margin': used_margin
             })
             break
 
-        # Пытаемся усредниться
+        # Размер следующего усреднения
         add_size = entry_size * (grid_size_mult ** (i - 1))
         add_size = max(6.0, min(add_size, 1_000_000))
         required_margin = add_size / leverage
         
-        # ✅ ИСПРАВЛЕНИЕ: свободная маржа = equity - used_margin (пересчитывается на каждом шаге)
+        # Свободная маржа = equity - used_margin
         free_margin = eq - used_margin
         if free_margin < required_margin:
             loss_steps.append({
@@ -573,12 +564,11 @@ async def api_simulate(request: Request):
                 'avg_price': avg_price,
                 'position_usdt': total_position_nominal,
                 'pnl': eq - initial_balance,
-                'action': f'СТОП (свободно {free_margin:.2f} < нужно {required_margin:.2f})',
+                'action': 'СТОП (мало маржи)',
                 'margin': used_margin
             })
             break
             
-        # Усредняемся
         used_margin += required_margin
         add_qty = add_size / current_price
         
@@ -590,7 +580,6 @@ async def api_simulate(request: Request):
         total_entry_fee += add_fee
         total_position_nominal += add_size
         
-        # Пересчитываем equity после усреднения
         eq_after = equity_at(current_price, total_qty, avg_price)
         net_pnl = eq_after - initial_balance
         
@@ -607,7 +596,7 @@ async def api_simulate(request: Request):
         })
 
     # ==========================================
-    # СЦЕНАРИЙ ПРОФИТА (движение в нашу сторону)
+    # СЦЕНАРИЙ ПРОФИТА (не меняем — работает)
     # ==========================================
     profit_steps = []
     current_price = entry_price
@@ -680,7 +669,6 @@ async def api_simulate(request: Request):
         'loss_steps': loss_steps,
         'profit_steps': profit_steps
     }
-# ============================================================================
 
 @app.get("/api/configs")
 async def api_get_configs():
