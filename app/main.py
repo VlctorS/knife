@@ -330,7 +330,14 @@ async def api_closed_stats():
         gross_loss = abs(sum(t.pnl for t in losses if t.pnl))
         profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (999.99 if gross_profit > 0 else 0)
         
-        today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        # --- ИСПРАВЛЕНИЕ: Начало суток по МСК (UTC+3) ---
+        # 1. Берем текущее время в UTC
+        now_utc = datetime.datetime.utcnow()
+        # 2. Вычитаем 3 часа, чтобы получить "условное" текущее время по МСК
+        msk_now = now_utc - datetime.timedelta(hours=3)
+        # 3. Округляем до начала дня (00:00:00) и прибавляем 3 часа обратно.
+        # Теперь today_start — это 00:00 по МСК, но выраженное в UTC для корректного сравнения в БД.
+        today_start = msk_now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(hours=3)
         
         today_hist_res = await session.execute(
             select(func.sum(TradeHistory.pnl))
@@ -364,7 +371,11 @@ async def api_clear_closed_trades(request: Request):
     
     async with SessionLocal() as session:
         if mode == 'today':
-            today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            # --- ИСПРАВЛЕНИЕ: Начало суток по МСК (UTC+3) ---
+            now_utc = datetime.datetime.utcnow()
+            msk_now = now_utc - datetime.timedelta(hours=3)
+            today_start = msk_now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(hours=3)
+            
             result = await session.execute(
                 delete(Trade).where(Trade.status == 'CLOSED').where(Trade.closed_at >= today_start)
             )
