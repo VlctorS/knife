@@ -345,6 +345,7 @@ button:hover { background:#1d4ed8; }
 const fmtNum = (n, d=6) => n==null ? "—" : Number(n).toLocaleString(undefined,{maximumFractionDigits:d});
 const fmtPnl = (n) => n==null ? "0.0000" : Number(n).toFixed(4);
 
+// ---------- Главные вкладки ----------
 document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.tab === t.dataset.tab));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + t.dataset.tab));
@@ -355,15 +356,33 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   if (t.dataset.tab === 'settings') loadSettings();
 }));
 
-document.querySelectorAll('.sub-tab').forEach(t => t.addEventListener('click', () => {
-  document.querySelectorAll('.sub-tab').forEach(x => x.classList.toggle('active', x.dataset.subtab === t.dataset.subtab));
-  document.querySelectorAll('.sub-tab-content').forEach(c => c.classList.toggle('active', c.id === 'subtab-' + t.dataset.subtab));
-}));
+// ---------- Подвкладки НАСТРОЕК ----------
+// Работаем строго внутри #tab-settings, чтобы не задеть вкладки симуляции.
+function activateSettingsTab(name) {
+  const panel = document.getElementById('tab-settings');
+  panel.querySelectorAll('.sub-tab[data-subtab]').forEach(x =>
+    x.classList.toggle('active', x.dataset.subtab === name));
+  panel.querySelectorAll('.sub-tab-content').forEach(c =>
+    c.classList.toggle('active', c.id === 'subtab-' + name));
+}
 
-document.querySelectorAll('.sub-tab[data-simtab]').forEach(t => t.addEventListener('click', () => {
-  document.querySelectorAll('.sub-tab[data-simtab]').forEach(x => x.classList.toggle('active', x.dataset.simtab === t.dataset.simtab));
-  document.querySelectorAll('#sim-modal .sub-tab-content').forEach(c => c.classList.toggle('active', c.id === 'simtab-' + t.dataset.simtab));
-}));
+document.getElementById('tab-settings')
+  .querySelectorAll('.sub-tab[data-subtab]')
+  .forEach(t => t.addEventListener('click', () => activateSettingsTab(t.dataset.subtab)));
+
+// ---------- Подвкладки СИМУЛЯЦИИ ----------
+// Работаем строго внутри #sim-modal.
+function activateSimTab(name) {
+  const modal = document.getElementById('sim-modal');
+  modal.querySelectorAll('.sub-tab[data-simtab]').forEach(x =>
+    x.classList.toggle('active', x.dataset.simtab === name));
+  modal.querySelectorAll('.sub-tab-content').forEach(c =>
+    c.classList.toggle('active', c.id === 'simtab-' + name));
+}
+
+document.getElementById('sim-modal')
+  .querySelectorAll('.sub-tab[data-simtab]')
+  .forEach(t => t.addEventListener('click', () => activateSimTab(t.dataset.simtab)));
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
@@ -816,21 +835,26 @@ async function openConfig(symbol) {
     fetch('/api/configs').then(r => r.json()),
     fetch('/api/settings').then(r => r.json())
   ]);
-  
+
   let cfg = cfgData.items.find(i => i.symbol === symbol);
   if (!cfg) {
-    cfg = { symbol: symbol, entry_pct: 0, grid_step_pct: 0, grid_step_multiplier: 0, grid_size_multiplier: 0, max_steps: 0, initial_exit_pct: 0, exit_step_multiplier: 0, exit_contract_pct: 0, position_size_entry: 0, position_size_grid: 0 };
+    cfg = {
+      symbol: symbol, entry_pct: 0, grid_step_pct: 0, grid_step_multiplier: 0,
+      grid_size_multiplier: 0, max_steps: 0, initial_exit_pct: 0,
+      exit_step_multiplier: 0, exit_contract_pct: 0,
+      position_size_entry: 0, position_size_grid: 0
+    };
   }
-  
+
   document.getElementById('modal-title').textContent = 'Настройки ' + symbol;
   document.getElementById('cfg-symbol').value = symbol;
-  
+
   const setField = (id, value, globalValue) => {
     const el = document.getElementById(id);
     el.value = value;
     el.placeholder = `Глобальное: ${globalValue}`;
   };
-  
+
   setField('cfg-entry_pct', cfg.entry_pct, globalData.entry_pct);
   setField('cfg-grid_step_pct', cfg.grid_step_pct, globalData.grid_step_pct);
   setField('cfg-grid_step_multiplier', cfg.grid_step_multiplier, globalData.grid_step_multiplier);
@@ -839,19 +863,19 @@ async function openConfig(symbol) {
   setField('cfg-initial_exit_pct', cfg.initial_exit_pct, globalData.initial_exit_pct);
   setField('cfg-exit_step_multiplier', cfg.exit_step_multiplier, globalData.exit_step_multiplier);
   setField('cfg-exit_contract_pct', cfg.exit_contract_pct, globalData.exit_contract_pct);
-  
+
   const setPosField = (id, value, globalValue) => {
     const el = document.getElementById(id);
     el.value = value;
     el.placeholder = `Глобальное: ${globalValue} (мин. 6)`;
   };
-  
+
   setPosField('cfg-position_size_entry', cfg.position_size_entry, globalData.position_size_entry);
   setPosField('cfg-position_size_grid', cfg.position_size_grid, globalData.position_size_grid);
-  
-  // Принудительно активируем первую вкладку "Вход и усреднения"
-  document.querySelector('.sub-tab[data-subtab="main"]').click();
-  
+
+  // Надёжно активируем первую подвкладку "Основные настройки"
+  activateSettingsTab('main');
+
   document.getElementById('config-modal').classList.add('active');
 }
 
@@ -896,22 +920,22 @@ let lastSimPayload = null;
 
 async function openSimulation() {
   const symbol = document.getElementById('cfg-symbol').value;
-  
+
   const tradeRes = await fetch('/api/trade_by_symbol?symbol=' + symbol);
   const tradeData = await tradeRes.json();
-  
+
   if (!tradeData.ok) {
-      alert('Не удалось найти открытую сделку по ' + symbol);
-      return;
+    alert('Не удалось найти открытую сделку по ' + symbol);
+    return;
   }
 
   const globalData = await (await fetch('/api/settings')).json();
-  
+
   const getVal = (id, fallback) => {
     const v = parseFloat(document.getElementById(id).value);
     return v > 0 ? v : fallback;
   };
-  
+
   lastSimPayload = {
     entry_price: tradeData.entry_price,
     entry_size: getVal('cfg-position_size_entry', globalData.position_size_entry) || 6,
@@ -928,13 +952,14 @@ async function openSimulation() {
     balance: parseFloat(document.getElementById('sim-balance').value) || 100
   };
 
-  document.getElementById('sim-title').textContent = `Симуляция для ${symbol} (${tradeData.side}, Вход: ${tradeData.entry_price})`;
-  
-  // Принудительно активируем первую вкладку "Профит"
-  document.querySelector('.sub-tab[data-simtab="profit"]').click();
-  
+  document.getElementById('sim-title').textContent =
+    `Симуляция для ${symbol} (${tradeData.side}, Вход: ${tradeData.entry_price})`;
+
+  // Надёжно активируем подвкладку "Профит" до открытия модалки
+  activateSimTab('profit');
+
   document.getElementById('sim-modal').classList.add('active');
-  
+
   await runSimulation();
 }
 
