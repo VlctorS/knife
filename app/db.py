@@ -93,6 +93,7 @@ class Trade(Base):
     leverage: Mapped[float] = mapped_column(Float, default=10.0)
     opened_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
     closed_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=True)
+    tf: Mapped[str] = mapped_column(String, default='60') # '1', '5', '15', '30', '60', '240', 'D'
 
 
 class TradeHistory(Base):
@@ -131,6 +132,7 @@ def _migrate_add_columns(conn):
         ('trades', 'entry_fee', 'FLOAT DEFAULT 0'),
         ('trades', 'exit_fee', 'FLOAT DEFAULT 0'),
         ('trades', 'realized_pnl', 'FLOAT DEFAULT 0'),
+        ('trades', 'tf', "VARCHAR DEFAULT '60'"),
         ('trade_history', 'details', 'TEXT'), # НОВОЕ ПОЛЕ
     ]
     for table, column, ddl in additions:

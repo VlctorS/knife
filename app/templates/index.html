@@ -1191,19 +1191,20 @@ let chartSymbol = null;
 let chartInterval = '60';
 let chartTimer = null;
 
-async function openChart(symbol) {
+async function openChart(symbol, defaultTf) {
   chartSymbol = symbol;
   document.getElementById('chart-title').textContent = 'График: ' + symbol;
   document.getElementById('chart-modal').classList.add('active');
   
-  // Сброс таймфрейма на 1ч по умолчанию при открытии
-  setChartTF('60');
+  // Устанавливаем ТФ из сделки, если он передан, иначе 1ч
+  const initialTf = defaultTf || '60';
+  setChartTF(initialTf);
 }
+
 
 function setChartTF(tf) {
   chartInterval = tf;
   
-  // Визуальное обновление кнопок ТФ
   document.querySelectorAll('.tf-btn').forEach(b => {
     if (b.dataset.tf === tf) {
       b.classList.add('active');
@@ -1215,55 +1216,62 @@ function setChartTF(tf) {
   initChart();
 }
 
+
 function initChart() {
   const container = document.getElementById('chart-container');
-  container.innerHTML = ''; // Очищаем перед пересозданием
   
-  // Создаем инстанс графика
-  chartInstance = LightweightCharts.createChart(container, {
-    layout: { background: { color: '#171b23' }, textColor: '#8a93a6' },
-    grid: { vertLines: { color: '#252b36' }, horzLines: { color: '#252b36' } },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    timeScale: { 
-      borderColor: '#252b36',
-      // Отступ справа на 1/5 ширины графика (20%)
-      rightOffset: Math.floor(container.clientWidth / 20),
-    },
-    rightPriceScale: { borderColor: '#252b36' },
-  });
+  // Проверка, что библиотека загрузилась
+  if (typeof LightweightCharts === 'undefined') {
+    container.innerHTML = '<div style="color:#ef4444; padding:20px; text-align:center;">Ошибка: Библиотека графиков не загрузилась. Проверьте интернет или блокировщик рекламы.</div>';
+    return;
+  }
 
-  // Свечи
-  candleSeries = chartInstance.addCandlestickSeries({
-    upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
-    wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-  });
-
-  // Объемы (внизу)
-  volumeSeries = chartInstance.addHistogramSeries({
-    color: '#3b82f6', priceFormat: { type: 'volume' },
-    priceScaleId: '', // Наложение на основной график
-  });
-  volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-
-  // Bollinger Bands (Верхняя и Нижняя)
-  bbUpperSeries = chartInstance.addLineSeries({ color: '#f59e0b', lineWidth: 1, title: 'BB Upper' });
-  bbLowerSeries = chartInstance.addLineSeries({ color: '#f59e0b', lineWidth: 1, title: 'BB Lower' });
-
-  // Автоматический ресайз
-  new ResizeObserver(entries => {
-    if (entries.length === 0 || !entries[0].contentRect) return;
-    const { width, height } = entries[0].contentRect;
-    chartInstance.applyOptions({ width, height });
-    chartInstance.timeScale().applyOptions({
-      rightOffset: Math.floor(width / 20)
+  container.innerHTML = ''; 
+  
+  try {
+    chartInstance = LightweightCharts.createChart(container, {
+      layout: { background: { color: '#171b23' }, textColor: '#8a93a6' },
+      grid: { vertLines: { color: '#252b36' }, horzLines: { color: '#252b36' } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      timeScale: { borderColor: '#252b36' },
+      rightPriceScale: { borderColor: '#252b36' },
     });
-  }).observe(container);
 
-  // Запуск автообновления
-  if (chartTimer) clearInterval(chartTimer);
-  fetchChartData();
-  chartTimer = setInterval(fetchChartData, 5000); // каждые 5 сек
+    candleSeries = chartInstance.addCandlestickSeries({
+      upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
+      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+    });
+
+    volumeSeries = chartInstance.addHistogramSeries({
+      priceFormat: { type: 'volume' },
+      priceScaleId: '', 
+    });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+
+    bbUpperSeries = chartInstance.addLineSeries({ color: '#f59e0b', lineWidth: 1 });
+    bbLowerSeries = chartInstance.addLineSeries({ color: '#f59e0b', lineWidth: 1 });
+
+    // Отступ справа 20% (1/5 ширины)
+    chartInstance.timeScale().applyOptions({
+      rightOffset: Math.floor(container.clientWidth / 20)
+    });
+
+    new ResizeObserver(entries => {
+      if (entries.length === 0 || !entries[0].contentRect) return;
+      const { width, height } = entries[0].contentRect;
+      chartInstance.applyOptions({ width, height });
+      chartInstance.timeScale().applyOptions({ rightOffset: Math.floor(width / 20) });
+    }).observe(container);
+
+    if (chartTimer) clearInterval(chartTimer);
+    fetchChartData();
+    chartTimer = setInterval(fetchChartData, 5000);
+
+  } catch (e) {
+    container.innerHTML = '<div style="color:#ef4444; padding:20px;">Ошибка инициализации графика: ' + e.message + '</div>';
+  }
 }
+
 
 function closeChart() {
   document.getElementById('chart-modal').classList.remove('active');
@@ -1276,20 +1284,43 @@ function closeChart() {
 async function fetchChartData() {
   if (!chartSymbol) return;
   
+  const container = document.getElementById('chart-container');
+  
   try {
     const res = await fetch(`/api/klines?symbol=${chartSymbol}&interval=${chartInterval}&limit=200`);
+    
+    // Если сервер вернул не JSON (например, 500 ошибку)
+    if (!res.ok) {
+        container.insertAdjacentHTML('beforeend', `<div style="position:absolute; top:10px; left:10px; color:#ef4444; background:rgba(0,0,0,0.8); padding:10px; border-radius:4px; z-index:10;">Ошибка сервера: HTTP ${res.status}</div>`);
+        return;
+    }
+
     const data = await res.json();
-    if (!data.ok || !data.items) return;
+    
+    if (!data.ok) {
+      if (container.querySelector('.error-msg')) {
+        container.querySelector('.error-msg').innerText = 'Ошибка данных: ' + (data.error || 'unknown');
+      } else {
+        container.insertAdjacentHTML('beforeend', `<div class="error-msg" style="position:absolute; top:10px; left:10px; color:#ef4444; background:rgba(0,0,0,0.8); padding:10px; border-radius:4px; z-index:10;">Ошибка данных: ${data.error || 'unknown'}</div>`);
+      }
+      return;
+    }
+
+    if (!data.items || data.items.length === 0) {
+        container.insertAdjacentHTML('beforeend', `<div class="error-msg" style="position:absolute; top:10px; left:10px; color:#f59e0b; background:rgba(0,0,0,0.8); padding:10px; border-radius:4px; z-index:10;">Нет данных для ${chartSymbol} на ТФ ${chartInterval}</div>`);
+        return;
+    }
+
+    const errEl = container.querySelector('.error-msg');
+    if (errEl) errEl.remove();
 
     const klines = data.items;
-    
-    // Парсинг свечей
     const candles = [];
     const volumes = [];
     const closes = [];
     
     for (let k of klines) {
-      const time = Math.floor(Number(k[0]) / 1000); // ms -> sec
+      const time = Math.floor(Number(k[0]) / 1000);
       const open = parseFloat(k[1]);
       const high = parseFloat(k[2]);
       const low = parseFloat(k[3]);
@@ -1304,7 +1335,6 @@ async function fetchChartData() {
     candleSeries.setData(candles);
     volumeSeries.setData(volumes);
 
-    // Расчет Bollinger Bands (period=20, mult=2)
     const period = 20;
     const mult = 2;
     const bbUpper = [];
@@ -1328,8 +1358,10 @@ async function fetchChartData() {
 
   } catch (e) {
     console.error('Chart fetch error:', e);
+    container.insertAdjacentHTML('beforeend', `<div class="error-msg" style="position:absolute; top:10px; left:10px; color:#ef4444; background:rgba(0,0,0,0.8); padding:10px; border-radius:4px; z-index:10;">Ошибка JS: ${e.message}</div>`);
   }
 }
+
 
 // Обработчик кнопок ТФ
 document.querySelectorAll('.tf-btn').forEach(btn => {

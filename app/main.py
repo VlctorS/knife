@@ -212,6 +212,7 @@ async def api_trades(limit: int = 100):
                 'leverage': float(t.leverage) if t.leverage else 10.0,
                 'change_pct': round(change_pct, 2),
                 'exit_step': t.exit_step,
+                'tf': t.tf or '60',
                 'opened_at': t.opened_at.isoformat() if t.opened_at else None,
                 'closed_at': t.closed_at.isoformat() if t.closed_at else None,
             })

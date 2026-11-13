@@ -275,8 +275,10 @@ class TradingBot:
                             session, sym, side, current_price, st.max_leverage, 
                             cfg, gs, change_pct, 
                             fee_pct=gs.fee_pct if gs and gs.fee_pct > 0 else 0.055,
-                            details=entry_details
+                            details=entry_details,
+                            tf=tf  # <--- ПЕРЕДАЕМ ТФ ('240' или 'D')
                         )
+
 
                         log.info('SIGNAL %s %s (%s) %.2f%% -> OPEN %s @ %.6f | %s', kind, sym, tf_label, change_pct, side, current_price, ev['reason'])
 
@@ -287,7 +289,8 @@ class TradingBot:
                     log.warning(f'Check entries failed for {sym}: {e}')
             await session.commit()
 
-    async def _open_trade(self, session, sym, side, price, max_lev, cfg, gs, change_pct=None, fee_pct=0.055, details=None):
+    async def _open_trade(self, session, sym, side, price, max_lev, cfg, gs, change_pct=None, fee_pct=0.055, details=None, tf='60'):
+
         if cfg and cfg.position_size_entry > 0:
             pos_size = cfg.position_size_entry
         else:
@@ -310,7 +313,9 @@ class TradingBot:
             grid_step=0, max_steps=max_steps,
             leverage=max_lev, current_price=price, exit_step=0,
             entry_fee=entry_fee, pnl=-entry_fee,
+            tf=tf # <--- СОХРАНЯЕМ
         )
+
         session.add(trade)
         await session.flush()
         
