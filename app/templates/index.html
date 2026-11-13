@@ -34,20 +34,17 @@ button:hover { background:#1d4ed8; }
 .stats-row .stat-item { color:#e6e6e6; }
 .stats-row .stat-item .lbl { color:#8a93a6; margin-right:4px; }
 
-/* Стили для подвкладок настроек */
 .sub-tabs { display:flex; gap:8px; border-bottom:1px solid #252b36; padding: 0 16px; background: #141820; }
 .sub-tab { padding:12px 16px; cursor:pointer; color:#8a93a6; font-size:13px; border-bottom:2px solid transparent; }
 .sub-tab.active { color:#e6e6e6; border-bottom-color:#2563eb; font-weight:600; }
 .sub-tab-content { display:none; padding:16px; }
 .sub-tab-content.active { display:block; }
 
-/* Стиль для колонки с причинами */
 .reason-cell { white-space: normal !important; max-width: 400px; font-size: 12px; line-height: 1.4; }
 .reason-success { color: #22c55e; }
 .reason-skip { color: #8a93a6; }
 .reason-radar { color: #f59e0b; }
 
-/* Стили для калькулятора сетки */
 .grid-preview { 
   background: #0e1117; 
   border: 1px solid #252b36; 
@@ -64,7 +61,6 @@ button:hover { background:#1d4ed8; }
 .grid-item .val { color: #e6e6e6; font-weight: 600; }
 .grid-total { border-top: 1px solid #252b36; padding-top: 12px; margin-top: 8px; font-weight: bold; color: #2563eb; text-align: center; font-size: 14px; }
 
-/* Индикатор активности */
 .status-dot {
   display: inline-block;
   width: 10px;
@@ -81,7 +77,6 @@ button:hover { background:#1d4ed8; }
   100% { opacity: 1; }
 }
 
-/* Стили для баланса и PnL */
 .balance-card { background: linear-gradient(135deg, #1e293b, #0f172a); border: 1px solid #2563eb; }
 .balance-card .k { color: #93c5fd; }
 .balance-card .v { color: #e0f2fe; }
@@ -89,7 +84,6 @@ button:hover { background:#1d4ed8; }
 .pnl-card .k { color: #86efac; }
 .pnl-card .v { color: #dcfce7; }
 
-/* Стили для симуляции */
 .sim-modal-content { width: 800px; max-width: 95vw; }
 .sim-table th, .sim-table td { padding: 8px 12px; font-size: 12px; }
 .sim-table .step-col { width: 50px; text-align: center; }
@@ -159,7 +153,6 @@ button:hover { background:#1d4ed8; }
     </tr></thead>
     <tbody id="closed"><tr><td colspan="8" class="empty">Нет завершенных операций</td></tr></tbody></table></div></div>
     
-    <!-- ВКЛАДКА НАСТРОЕК -->
   <div id="tab-settings" class="tab-content"><div class="panel">
     <h2>Глобальные настройки</h2>
     
@@ -169,7 +162,6 @@ button:hover { background:#1d4ed8; }
       <div class="sub-tab" data-subtab="exit">Выходы</div>
     </div>
 
-    <!-- Подвкладка: Основные -->
     <div id="subtab-main" class="sub-tab-content active">
       <p class="muted">Мин. оборот за 24ч (млн USDT):</p>
       <div class="form-row"><input type="number" id="min-turnover" step="0.1"></div>
@@ -181,7 +173,6 @@ button:hover { background:#1d4ed8; }
       </div>
     </div>
 
-    <!-- Подвкладка: Вход и усреднения -->
     <div id="subtab-grid" class="sub-tab-content">
       <p class="muted">Первый вход по % изм. цены (0 = авто):</p>
       <div class="form-row"><input type="number" id="s-entry_pct" step="0.1"></div>
@@ -217,7 +208,6 @@ button:hover { background:#1d4ed8; }
       </div>
     </div>
 
-    <!-- Подвкладка: Выходы -->
     <div id="subtab-exit" class="sub-tab-content">
       <p class="muted">Выход % (начальный):</p>
       <div class="form-row"><input type="number" id="s-initial_exit_pct" step="0.1"></div>
@@ -286,7 +276,10 @@ button:hover { background:#1d4ed8; }
         <button onclick="saveConfig()">Сохранить</button>
         <button onclick="closeModal()" style="background:#4b5563;">Отмена</button>
       </div>
-      <button onclick="openSimulation()" style="background:#8b5cf6;">Расчет профита и убытков</button>
+      <div>
+        <button onclick="showEntryDetails()" style="background:#f59e0b;">Условия входа</button>
+        <button onclick="openSimulation()" style="background:#8b5cf6;">Расчет профита и убытков</button>
+      </div>
     </div>
   </div>
 </div>
@@ -331,12 +324,24 @@ button:hover { background:#1d4ed8; }
   </div>
 </div>
 
+<!-- МОДАЛЬНОЕ ОКНО ИСТОРИИ СДЕЛКИ -->
 <div class="modal" id="history-modal">
   <div class="modal-content" style="width: 900px; max-width: 95vw;">
     <h2 id="history-title">История сделки</h2>
     <div id="history-content" style="overflow-x: auto;"></div>
     <div style="margin-top:24px;">
       <button onclick="closeHistory()" style="background:#4b5563;">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<!-- МОДАЛЬНОЕ ОКНО УСЛОВИЙ ВХОДА -->
+<div class="modal" id="entry-details-modal" style="z-index: 1100;">
+  <div class="modal-content" style="width: 600px;">
+    <h2 id="details-title">Условия входа</h2>
+    <div id="details-content" style="margin-top:16px; font-size:14px; line-height:1.6;"></div>
+    <div style="margin-top:24px;">
+      <button onclick="document.getElementById('entry-details-modal').classList.remove('active')" style="background:#4b5563;">Закрыть</button>
     </div>
   </div>
 </div>
@@ -357,7 +362,6 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
 }));
 
 // ---------- Подвкладки НАСТРОЕК ----------
-// Работаем строго внутри #tab-settings, чтобы не задеть вкладки симуляции.
 function activateSettingsTab(name) {
   const panel = document.getElementById('tab-settings');
   panel.querySelectorAll('.sub-tab[data-subtab]').forEach(x =>
@@ -365,13 +369,11 @@ function activateSettingsTab(name) {
   panel.querySelectorAll('.sub-tab-content').forEach(c =>
     c.classList.toggle('active', c.id === 'subtab-' + name));
 }
-
 document.getElementById('tab-settings')
   .querySelectorAll('.sub-tab[data-subtab]')
   .forEach(t => t.addEventListener('click', () => activateSettingsTab(t.dataset.subtab)));
 
 // ---------- Подвкладки СИМУЛЯЦИИ ----------
-// Работаем строго внутри #sim-modal.
 function activateSimTab(name) {
   const modal = document.getElementById('sim-modal');
   modal.querySelectorAll('.sub-tab[data-simtab]').forEach(x =>
@@ -379,7 +381,6 @@ function activateSimTab(name) {
   modal.querySelectorAll('.sub-tab-content').forEach(c =>
     c.classList.toggle('active', c.id === 'simtab-' + name));
 }
-
 document.getElementById('sim-modal')
   .querySelectorAll('.sub-tab[data-simtab]')
   .forEach(t => t.addEventListener('click', () => activateSimTab(t.dataset.simtab)));
@@ -389,6 +390,7 @@ document.addEventListener('keydown', (e) => {
     document.getElementById('config-modal').classList.remove('active');
     document.getElementById('history-modal').classList.remove('active');
     document.getElementById('sim-modal').classList.remove('active');
+    document.getElementById('entry-details-modal').classList.remove('active');
   }
 });
 
@@ -568,7 +570,6 @@ async function loadStats() {
     '</tr>';
   }).join('');
 }
-
 
 async function loadTrades() {
   const d = await (await fetch('/api/trades?limit=100')).json();
@@ -845,31 +846,29 @@ async function clearData() {
   location.reload();
 }
 
+let currentConfigSymbol = null;
+
 async function openConfig(symbol) {
+  currentConfigSymbol = symbol;
   const [cfgData, globalData] = await Promise.all([
     fetch('/api/configs').then(r => r.json()),
     fetch('/api/settings').then(r => r.json())
   ]);
-
+  
   let cfg = cfgData.items.find(i => i.symbol === symbol);
   if (!cfg) {
-    cfg = {
-      symbol: symbol, entry_pct: 0, grid_step_pct: 0, grid_step_multiplier: 0,
-      grid_size_multiplier: 0, max_steps: 0, initial_exit_pct: 0,
-      exit_step_multiplier: 0, exit_contract_pct: 0,
-      position_size_entry: 0, position_size_grid: 0
-    };
+    cfg = { symbol: symbol, entry_pct: 0, grid_step_pct: 0, grid_step_multiplier: 0, grid_size_multiplier: 0, max_steps: 0, initial_exit_pct: 0, exit_step_multiplier: 0, exit_contract_pct: 0, position_size_entry: 0, position_size_grid: 0 };
   }
-
+  
   document.getElementById('modal-title').textContent = 'Настройки ' + symbol;
   document.getElementById('cfg-symbol').value = symbol;
-
+  
   const setField = (id, value, globalValue) => {
     const el = document.getElementById(id);
     el.value = value;
     el.placeholder = `Глобальное: ${globalValue}`;
   };
-
+  
   setField('cfg-entry_pct', cfg.entry_pct, globalData.entry_pct);
   setField('cfg-grid_step_pct', cfg.grid_step_pct, globalData.grid_step_pct);
   setField('cfg-grid_step_multiplier', cfg.grid_step_multiplier, globalData.grid_step_multiplier);
@@ -878,20 +877,73 @@ async function openConfig(symbol) {
   setField('cfg-initial_exit_pct', cfg.initial_exit_pct, globalData.initial_exit_pct);
   setField('cfg-exit_step_multiplier', cfg.exit_step_multiplier, globalData.exit_step_multiplier);
   setField('cfg-exit_contract_pct', cfg.exit_contract_pct, globalData.exit_contract_pct);
-
+  
   const setPosField = (id, value, globalValue) => {
     const el = document.getElementById(id);
     el.value = value;
     el.placeholder = `Глобальное: ${globalValue} (мин. 6)`;
   };
-
+  
   setPosField('cfg-position_size_entry', cfg.position_size_entry, globalData.position_size_entry);
   setPosField('cfg-position_size_grid', cfg.position_size_grid, globalData.position_size_grid);
-
-  // Надёжно активируем первую подвкладку "Основные настройки"
+  
   activateSettingsTab('main');
-
+  
   document.getElementById('config-modal').classList.add('active');
+}
+
+async function showEntryDetails() {
+  if (!currentConfigSymbol) return;
+  
+  const res = await fetch('/api/trade_by_symbol?symbol=' + currentConfigSymbol);
+  const data = await res.json();
+  
+  if (!data.ok || !data.entry_details) {
+    alert('Нет сохраненных данных о входе в эту сделку (возможно, она была открыта до обновления бота).');
+    return;
+  }
+  
+  const d = data.entry_details;
+  const side = data.side;
+  
+  let explanation = "";
+  if (side === 'LONG') {
+    explanation = `Бот искал <b>падающий нож</b> (Dump) на таймфрейме <b>${d.timeframe}</b>.<br>
+    Свеча упала на <b>${Math.abs(d.change_pct)}%</b> от открытия, но длинная нижняя тень (<b>${d.knife_low}</b>) показала, что покупатели откупили падение. 
+    Текущая цена (<b>${d.current_price}</b>) поднялась выше минимума свечи. 
+    Старший тренд: <b>${d.anchor_trend}</b> (сила ${d.anchor_strength}). 
+    Уверенность сигнала: <b>${d.confidence}</b> (требовалось не менее ${d.min_confidence}). 
+    Объем: <b>${Math.round(d.volume)}</b> (средний ${Math.round(d.avg_volume)}).`;
+  } else {
+    explanation = `Бот искал <b>летящий нож</b> (Pump) на таймфрейме <b>${d.timeframe}</b>.<br>
+    Свеча выросла на <b>${Math.abs(d.change_pct)}%</b> от открытия, но длинная верхняя тень (<b>${d.knife_high}</b>) показала, что продавцы сбили цену. 
+    Текущая цена (<b>${d.current_price}</b>) упала ниже максимума свечи. 
+    Старший тренд: <b>${d.anchor_trend}</b> (сила ${d.anchor_strength}). 
+    Уверенность сигнала: <b>${d.confidence}</b> (требовалось не менее ${d.min_confidence}). 
+    Объем: <b>${Math.round(d.volume)}</b> (средний ${Math.round(d.avg_volume)}).`;
+  }
+
+  const rawHtml = Object.entries(d).map(([k, v]) => {
+    if (k === 'reason') return '';
+    const name = k.replace(/_/g, ' ').toUpperCase();
+    return `<tr><td class="muted">${name}</td><td><b>${typeof v === 'number' ? v.toFixed(5) : v}</b></td></tr>`;
+  }).join('');
+
+  document.getElementById('details-title').innerHTML = `Условия входа: ${data.symbol} (${side})`;
+  document.getElementById('details-content').innerHTML = `
+    <div style="background:#141820; padding:16px; border-radius:8px; border:1px solid #252b36; margin-bottom:16px;">
+      <h3 style="margin-top:0; color:#2563eb; font-size:15px;">Логика принятия решения:</h3>
+      ${explanation}
+      <br><br>
+      <i style="color:#8a93a6;">Техническая причина: ${d.reason}</i>
+    </div>
+    <h3 style="font-size:14px; color:#8a93a6;">Снимок индикаторов на момент входа:</h3>
+    <table style="width:100%; font-size:13px;">
+      <tbody>${rawHtml}</tbody>
+    </table>
+  `;
+  
+  document.getElementById('entry-details-modal').classList.add('active');
 }
 
 async function saveConfig() {
@@ -930,27 +982,26 @@ async function saveConfig() {
   }
 }
 
-// ИСПРАВЛЕННАЯ ФУНКЦИЯ СИМУЛЯЦИИ
 let lastSimPayload = null;
 
 async function openSimulation() {
   const symbol = document.getElementById('cfg-symbol').value;
-
+  
   const tradeRes = await fetch('/api/trade_by_symbol?symbol=' + symbol);
   const tradeData = await tradeRes.json();
-
+  
   if (!tradeData.ok) {
-    alert('Не удалось найти открытую сделку по ' + symbol);
-    return;
+      alert('Не удалось найти открытую сделку по ' + symbol);
+      return;
   }
 
   const globalData = await (await fetch('/api/settings')).json();
-
+  
   const getVal = (id, fallback) => {
     const v = parseFloat(document.getElementById(id).value);
     return v > 0 ? v : fallback;
   };
-
+  
   lastSimPayload = {
     entry_price: tradeData.entry_price,
     entry_size: getVal('cfg-position_size_entry', globalData.position_size_entry) || 6,
@@ -967,21 +1018,18 @@ async function openSimulation() {
     balance: parseFloat(document.getElementById('sim-balance').value) || 100
   };
 
-  document.getElementById('sim-title').textContent =
-    `Симуляция для ${symbol} (${tradeData.side}, Вход: ${tradeData.entry_price})`;
-
-  // Надёжно активируем подвкладку "Профит" до открытия модалки
+  document.getElementById('sim-title').textContent = `Симуляция для ${symbol} (${tradeData.side}, Вход: ${tradeData.entry_price})`;
+  
   activateSimTab('profit');
-
+  
   document.getElementById('sim-modal').classList.add('active');
-
+  
   await runSimulation();
 }
 
 async function runSimulation() {
   if (!lastSimPayload) return;
   
-  // Обновляем баланс из поля ввода
   lastSimPayload.balance = parseFloat(document.getElementById('sim-balance').value) || 100;
 
   document.getElementById('sim-profit-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
@@ -999,7 +1047,6 @@ async function runSimulation() {
       return;
   }
 
-  // Рендер профита
   document.getElementById('sim-profit-body').innerHTML = data.profit_steps.map(s => `
     <tr>
       <td class="step-col">${s.step}</td>
@@ -1011,7 +1058,6 @@ async function runSimulation() {
     </tr>
   `).join('');
 
-  // Рендер убытка
   document.getElementById('sim-loss-body').innerHTML = data.loss_steps.map(s => `
     <tr>
       <td class="step-col">${s.step}</td>

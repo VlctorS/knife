@@ -3,6 +3,7 @@ import logging
 import os
 import time
 import datetime
+import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Body
@@ -94,13 +95,11 @@ async def api_alerts(limit: int = 100):
 @app.get('/api/stats')
 async def api_stats(limit: int = 50):
     async with SessionLocal() as session:
-        # Символы с открытыми сделками — они обязательны в выдаче
         open_res = await session.execute(
             select(Trade.symbol).where(Trade.status.in_(['OPEN', 'PARTIAL']))
         )
         open_symbols = {row[0] for row in open_res.all()}
 
-        # Все stats (без limit — их немного), потом отфильтруем
         r = await session.execute(select(SymbolStat))
         all_stats = list(r.scalars().all())
 
@@ -118,10 +117,8 @@ async def api_stats(limit: int = 50):
                 return s.avg_prostrel_pct * 0.85, False
             return 5.0, False
 
-        # Сортируем по ЭФФЕКТИВНОМУ entry (а не по сырому полю в БД)
         all_stats.sort(key=lambda s: effective_entry(s)[0], reverse=True)
 
-        # Отбираем: символы с открытыми сделками — всегда; остальные — до limit
         selected = []
         seen = set()
         for s in all_stats:
@@ -136,8 +133,6 @@ async def api_stats(limit: int = 50):
             selected.append(s)
             seen.add(s.symbol)
 
-        # Символы с открытыми сделками, которых вообще нет в symbol_stats
-        # (история не досчитана) — добавим псевдо-строки
         missing = open_symbols - {s.symbol for s in all_stats}
         pseudo = []
         for sym in missing:
@@ -183,7 +178,6 @@ async def api_trades(limit: int = 100):
             avg_price = float(t.avg_entry_price) if t.avg_entry_price else 0.0
             curr_price = float(t.current_price) if t.current_price else 0.0
             
-            # 1. Считаем изменение цены (в %)
             if avg_price > 0:
                 if t.side == 'LONG':
                     change_pct = (curr_price - avg_price) / avg_price * 100
@@ -192,21 +186,17 @@ async def api_trades(limit: int = 100):
             else:
                 change_pct = 0.0
             
-            # 2. Считаем ЧИСТЫЙ PnL (как будто мы закрываем прямо сейчас)
             total_qty = float(t.total_qty) if t.total_qty else 0.0
             
-            # Валовая прибыль по текущей цене
             if t.side == 'LONG':
                 gross = total_qty * (curr_price - avg_price)
             else:
                 gross = total_qty * (avg_price - curr_price)
             
-            # Комиссия за выход по текущей цене
             gs = await session.get(Settings, 1)
             fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
             exit_fee = (total_qty * curr_price) * (fee_pct / 100.0)
             
-            # Итоговый чистый PnL = Реализовано + Валовая - Комиссия входа - Комиссия выхода
             net_pnl = float(t.realized_pnl) + gross - float(t.entry_fee) - exit_fee
             
             items.append({
@@ -218,7 +208,7 @@ async def api_trades(limit: int = 100):
                 'total_qty': total_qty, 
                 'total_margin': float(t.total_margin) if t.total_margin else 0.0,
                 'status': t.status, 
-                'pnl': round(net_pnl, 4), # <-- ВОТ ТУТ ТЕПЕРЬ ЧИСТЫЙ PNL
+                'pnl': round(net_pnl, 4),
                 'leverage': float(t.leverage) if t.leverage else 10.0,
                 'change_pct': round(change_pct, 2),
                 'exit_step': t.exit_step,
@@ -227,7 +217,6 @@ async def api_trades(limit: int = 100):
             })
         return {'items': items}
 
-# НОВЫЙ ЭНДПОИНТ: Получить данные открытой сделки по символу
 @app.get('/api/trade_by_symbol')
 async def api_trade_by_symbol(symbol: str):
     async with SessionLocal() as session:
@@ -238,6 +227,18 @@ async def api_trade_by_symbol(symbol: str):
         if not t:
             return {'ok': False, 'error': 'Trade not found'}
         
+        hist_res = await session.execute(
+            select(TradeHistory).where(TradeHistory.trade_id == t.id).where(TradeHistory.action == 'OPEN')
+        )
+        open_hist = hist_res.scalars().first()
+        
+        entry_details = None
+        if open_hist and open_hist.details:
+            try:
+                entry_details = json.loads(open_hist.details)
+            except Exception:
+                pass
+        
         return {
             'ok': True,
             'symbol': t.symbol,
@@ -246,6 +247,7 @@ async def api_trade_by_symbol(symbol: str):
             'avg_entry_price': float(t.avg_entry_price) if t.avg_entry_price else 0.0,
             'current_price': float(t.current_price) if t.current_price else 0.0,
             'leverage': float(t.leverage) if t.leverage else 10.0,
+            'entry_details': entry_details
         }
 
 @app.get('/api/open_pnl')
@@ -330,13 +332,8 @@ async def api_closed_stats():
         gross_loss = abs(sum(t.pnl for t in losses if t.pnl))
         profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (999.99 if gross_profit > 0 else 0)
         
-        # --- ИСПРАВЛЕНИЕ: Начало суток по МСК (UTC+3) ---
-        # 1. Берем текущее время в UTC
         now_utc = datetime.datetime.utcnow()
-        # 2. Вычитаем 3 часа, чтобы получить "условное" текущее время по МСК
         msk_now = now_utc - datetime.timedelta(hours=3)
-        # 3. Округляем до начала дня (00:00:00) и прибавляем 3 часа обратно.
-        # Теперь today_start — это 00:00 по МСК, но выраженное в UTC для корректного сравнения в БД.
         today_start = msk_now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(hours=3)
         
         today_hist_res = await session.execute(
@@ -371,7 +368,6 @@ async def api_clear_closed_trades(request: Request):
     
     async with SessionLocal() as session:
         if mode == 'today':
-            # --- ИСПРАВЛЕНИЕ: Начало суток по МСК (UTC+3) ---
             now_utc = datetime.datetime.utcnow()
             msk_now = now_utc - datetime.timedelta(hours=3)
             today_start = msk_now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(hours=3)
@@ -532,20 +528,15 @@ async def api_simulate(request: Request):
     leverage = float(data.get('leverage', 10))
     side = data.get('side', 'LONG')
     
-    # ✅ Читаем баланс из запроса (было захардкожено 100.0)
     initial_balance = float(data.get('balance', 100))
     if initial_balance <= 0:
         initial_balance = 100.0
 
-    # MMR для кросс-маржи
     mmr = 0.005
 
     if entry_price <= 0:
         return {'ok': False, 'error': 'Invalid entry price'}
 
-    # ==========================================
-    # СЦЕНАРИЙ УБЫТКА
-    # ==========================================
     loss_steps = []
     
     total_qty = entry_size / entry_price
@@ -586,7 +577,6 @@ async def api_simulate(request: Request):
         else:
             current_price = current_price * (1 + step_pct / 100)
 
-        # Ликвидация по кросс-марже: equity <= used_margin * MMR
         eq = equity_at(current_price, total_qty, avg_price)
         liq_threshold = used_margin * mmr
         if eq <= liq_threshold:
@@ -603,12 +593,10 @@ async def api_simulate(request: Request):
             })
             break
 
-        # Размер следующего усреднения
         add_size = entry_size * (grid_size_mult ** (i - 1))
         add_size = max(6.0, min(add_size, 1_000_000))
         required_margin = add_size / leverage
         
-        # Свободная маржа = equity - used_margin
         free_margin = eq - used_margin
         if free_margin < required_margin:
             loss_steps.append({
@@ -650,9 +638,6 @@ async def api_simulate(request: Request):
             'margin': used_margin
         })
 
-    # ==========================================
-    # СЦЕНАРИЙ ПРОФИТА (не меняем — работает)
-    # ==========================================
     profit_steps = []
     current_price = entry_price
     total_qty = entry_size / entry_price

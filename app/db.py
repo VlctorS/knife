@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from sqlalchemy import String, Float, Integer, DateTime
+from sqlalchemy import String, Float, Integer, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
@@ -32,19 +32,17 @@ class Settings(Base):
     min_leverage: Mapped[float] = mapped_column(Float, default=10.0)
     
     entry_pct: Mapped[float] = mapped_column(Float, default=0.0)
-    # --- Усреднение (сетка): шаг и его рост по экспоненте ---
     grid_step_pct: Mapped[float] = mapped_column(Float, default=5.0)
     grid_step_multiplier: Mapped[float] = mapped_column(Float, default=2.5)
-    grid_size_multiplier: Mapped[float] = mapped_column(Float, default=1.0) # <--- НОВОЕ
+    grid_size_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
     max_steps: Mapped[int] = mapped_column(Integer, default=10)
     position_size_entry: Mapped[float] = mapped_column(Float, default=6.0)
     position_size_grid: Mapped[float] = mapped_column(Float, default=6.0)
-    # --- Выход: своя прогрессия, независимая от сетки ---
     initial_exit_pct: Mapped[float] = mapped_column(Float, default=15.0)
     exit_step_multiplier: Mapped[float] = mapped_column(Float, default=1.6)
     exit_contract_pct: Mapped[float] = mapped_column(Float, default=50.0)
     min_confidence: Mapped[float] = mapped_column(Float, default=0.4)
-    fee_pct: Mapped[float] = mapped_column(Float, default=0.055)  # taker, % на каждую сторону
+    fee_pct: Mapped[float] = mapped_column(Float, default=0.055)
 
 class SymbolStat(Base):
     __tablename__ = 'symbol_stats'
@@ -63,7 +61,7 @@ class SymbolConfig(Base):
     entry_pct: Mapped[float] = mapped_column(Float, default=0.0) 
     grid_step_pct: Mapped[float] = mapped_column(Float, default=0.0)
     grid_step_multiplier: Mapped[float] = mapped_column(Float, default=0.0)
-    grid_size_multiplier: Mapped[float] = mapped_column(Float, default=0.0) # <--- НОВОЕ
+    grid_size_multiplier: Mapped[float] = mapped_column(Float, default=0.0)
     max_steps: Mapped[int] = mapped_column(Integer, default=0)
     position_size_entry: Mapped[float] = mapped_column(Float, default=0.0)
     position_size_grid: Mapped[float] = mapped_column(Float, default=0.0)
@@ -85,14 +83,12 @@ class Trade(Base):
     initial_margin: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[str] = mapped_column(String, default='OPEN')
     pnl: Mapped[float] = mapped_column(Float, default=0.0)
-    # Реализованный PnL закрытых частей (уже за вычетом комиссий входа и выхода)
     realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
-    # Сумма уплаченных комиссий: вход+усреднения и выходы считаются раздельно
     entry_fee: Mapped[float] = mapped_column(Float, default=0.0)
     exit_fee: Mapped[float] = mapped_column(Float, default=0.0)
     current_price: Mapped[float] = mapped_column(Float, default=0.0)
     grid_step: Mapped[int] = mapped_column(Integer, default=0)
-    exit_step: Mapped[int] = mapped_column(Integer, default=0)  # <--- ДОБАВИТЬ ЭТО
+    exit_step: Mapped[int] = mapped_column(Integer, default=0)
     max_steps: Mapped[int] = mapped_column(Integer, default=10)
     leverage: Mapped[float] = mapped_column(Float, default=10.0)
     opened_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
@@ -110,6 +106,7 @@ class TradeHistory(Base):
     margin: Mapped[float] = mapped_column(Float)
     pnl: Mapped[float] = mapped_column(Float, default=0.0)
     notes: Mapped[str] = mapped_column(String, default='')
+    details: Mapped[str] = mapped_column(Text, nullable=True) # НОВОЕ ПОЛЕ
 
 async def init_db():
     os.makedirs('data', exist_ok=True)
@@ -127,13 +124,14 @@ def _migrate_add_columns(conn):
     additions = [
         ('settings', 'exit_step_multiplier', 'FLOAT DEFAULT 1.6'),
         ('settings', 'min_confidence', 'FLOAT DEFAULT 0.4'),
-        ('settings', 'grid_size_multiplier', 'FLOAT DEFAULT 1.0'), # <--- НОВОЕ
+        ('settings', 'grid_size_multiplier', 'FLOAT DEFAULT 1.0'),
         ('symbol_configs', 'exit_step_multiplier', 'FLOAT DEFAULT 0'),
         ('symbol_configs', 'min_confidence', 'FLOAT DEFAULT 0'),
-        ('symbol_configs', 'grid_size_multiplier', 'FLOAT DEFAULT 0'), # <--- НОВОЕ
+        ('symbol_configs', 'grid_size_multiplier', 'FLOAT DEFAULT 0'),
         ('trades', 'entry_fee', 'FLOAT DEFAULT 0'),
         ('trades', 'exit_fee', 'FLOAT DEFAULT 0'),
         ('trades', 'realized_pnl', 'FLOAT DEFAULT 0'),
+        ('trade_history', 'details', 'TEXT'), # НОВОЕ ПОЛЕ
     ]
     for table, column, ddl in additions:
         if table not in insp.get_table_names():

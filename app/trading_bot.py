@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import logging
 import time
+import json
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -243,7 +244,34 @@ class TradingBot:
                             reason='Успешный вход (открытие сделки)'
                         ))
 
-                        await self._open_trade(session, sym, side, current_price, st.max_leverage, cfg, gs, change_pct, fee_pct=gs.fee_pct if gs and gs.fee_pct > 0 else 0.055)
+                        # СБОР СНИМКА ИНДИКАТОРОВ
+                        entry_details = {
+                            'timeframe': tf_label,
+                            'confidence': round(ev['confidence'], 2),
+                            'min_confidence': min_conf,
+                            'reason': ev['reason'],
+                            'change_pct': round(change_pct, 2),
+                            'volume': volume,
+                            'avg_volume': avg_vol,
+                            'open_price': open_price,
+                            'close_price': close_price_candle,
+                            'high_price': float(last_closed[2]),
+                            'low_price': float(last_closed[3]),
+                            'knife_low': float(knife_tf[-2][3]) if len(knife_tf) >= 2 else 0,
+                            'knife_high': float(knife_tf[-2][2]) if len(knife_tf) >= 2 else 0,
+                            'current_price': current_price,
+                            'ma_knife': ma_knife,
+                            'ma_anchor': ma_anchor,
+                            'anchor_trend': ev.get('analysis').trend_direction if ev.get('analysis') else 'unknown',
+                            'anchor_strength': round(ev.get('analysis').trend_strength, 2) if ev.get('analysis') else 0,
+                        }
+
+                        await self._open_trade(
+                            session, sym, side, current_price, st.max_leverage, 
+                            cfg, gs, change_pct, 
+                            fee_pct=gs.fee_pct if gs and gs.fee_pct > 0 else 0.055,
+                            details=entry_details
+                        )
 
                         log.info('SIGNAL %s %s (%s) %.2f%% -> OPEN %s @ %.6f | %s', kind, sym, tf_label, change_pct, side, current_price, ev['reason'])
 
@@ -254,7 +282,7 @@ class TradingBot:
                     log.warning(f'Check entries failed for {sym}: {e}')
             await session.commit()
 
-    async def _open_trade(self, session, sym, side, price, max_lev, cfg, gs, change_pct=None, fee_pct=0.055):
+    async def _open_trade(self, session, sym, side, price, max_lev, cfg, gs, change_pct=None, fee_pct=0.055, details=None):
         if cfg and cfg.position_size_entry > 0:
             pos_size = cfg.position_size_entry
         else:
@@ -287,7 +315,8 @@ class TradingBot:
             
         history = TradeHistory(
             trade_id=trade.id, action='OPEN', price=price, qty=qty,
-            margin=margin, pnl=-entry_fee, notes=notes
+            margin=margin, pnl=-entry_fee, notes=notes,
+            details=json.dumps(details) if details else None
         )
         session.add(history)
         log.info('OPEN %s %s @ %.6f (size: %.2f USDT, qty: %.2f, lev: %.0fx, fee: %.4f)', side, sym, price, pos_size, qty, max_lev, entry_fee)
