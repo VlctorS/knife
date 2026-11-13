@@ -551,9 +551,24 @@ async function loadStats() {
   tb.innerHTML = d.items.map(s => {
     const entryClass = s.is_manual ? 'style="color:#ef4444; font-weight:600;"' : '';
     const entryText = s.is_manual ? s.entry_long_pct + '% *' : s.entry_long_pct + '%';
-    return '<tr><td>'+s.symbol+'</td><td>'+s.avg_prostrel_pct+'%</td><td>'+s.max_prostrel_pct+'%</td><td '+entryClass+'>'+entryText+'</td><td>'+(s.max_leverage||10)+'x</td><td><button style="padding:4px 8px; font-size:12px;" onclick="openConfig(\''+s.symbol+'\')">Настроить</button></td></tr>';
+    const openMark = s.has_open_trade
+      ? '<span class="pump" title="Есть открытая сделка">●</span> '
+      : '';
+    const missingMark = s.stats_missing
+      ? ' <span class="muted" title="Статистика не досчитана — символ появился позже или не прошел фильтр объёма">(нет статистики)</span>'
+      : '';
+    const missingClass = s.stats_missing ? 'class="muted"' : '';
+    return '<tr>'+
+      '<td>'+openMark+'<span '+missingClass+'>'+s.symbol+'</span>'+missingMark+'</td>'+
+      '<td>'+s.avg_prostrel_pct+'%</td>'+
+      '<td>'+s.max_prostrel_pct+'%</td>'+
+      '<td '+entryClass+'>'+entryText+'</td>'+
+      '<td>'+(s.max_leverage||10)+'x</td>'+
+      '<td><button style="padding:4px 8px; font-size:12px;" onclick="openConfig(\''+s.symbol+'\')">Настроить</button></td>'+
+    '</tr>';
   }).join('');
 }
+
 
 async function loadTrades() {
   const d = await (await fetch('/api/trades?limit=100')).json();

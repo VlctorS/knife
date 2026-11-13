@@ -94,38 +94,82 @@ async def api_alerts(limit: int = 100):
 @app.get('/api/stats')
 async def api_stats(limit: int = 50):
     async with SessionLocal() as session:
-        r = await session.execute(select(SymbolStat).order_by(SymbolStat.entry_long_pct.desc()).limit(limit))
+        # Символы с открытыми сделками — они обязательны в выдаче
+        open_res = await session.execute(
+            select(Trade.symbol).where(Trade.status.in_(['OPEN', 'PARTIAL']))
+        )
+        open_symbols = {row[0] for row in open_res.all()}
+
+        # Все stats (без limit — их немного), потом отфильтруем
+        r = await session.execute(select(SymbolStat))
+        all_stats = list(r.scalars().all())
+
         configs_res = await session.execute(select(SymbolConfig))
         configs = {c.symbol: c for c in configs_res.scalars().all()}
         gs = await session.get(Settings, 1)
-        
-        items = []
-        for s in r.scalars().all():
+
+        def effective_entry(s):
             cfg = configs.get(s.symbol)
-            
             if cfg and cfg.entry_pct > 0:
-                effective_entry = cfg.entry_pct
-                is_manual = True
-            elif gs and gs.entry_pct > 0:
-                effective_entry = gs.entry_pct
-                is_manual = True
-            else:
-                if s.avg_prostrel_pct > 0:
-                    effective_entry = s.avg_prostrel_pct * 0.85
-                else:
-                    effective_entry = 5.0
-                is_manual = False
-            
+                return cfg.entry_pct, True
+            if gs and gs.entry_pct > 0:
+                return gs.entry_pct, True
+            if s.avg_prostrel_pct > 0:
+                return s.avg_prostrel_pct * 0.85, False
+            return 5.0, False
+
+        # Сортируем по ЭФФЕКТИВНОМУ entry (а не по сырому полю в БД)
+        all_stats.sort(key=lambda s: effective_entry(s)[0], reverse=True)
+
+        # Отбираем: символы с открытыми сделками — всегда; остальные — до limit
+        selected = []
+        seen = set()
+        for s in all_stats:
+            if s.symbol in open_symbols:
+                selected.append(s)
+                seen.add(s.symbol)
+        for s in all_stats:
+            if len(selected) >= max(limit, len(open_symbols)):
+                break
+            if s.symbol in seen:
+                continue
+            selected.append(s)
+            seen.add(s.symbol)
+
+        # Символы с открытыми сделками, которых вообще нет в symbol_stats
+        # (история не досчитана) — добавим псевдо-строки
+        missing = open_symbols - {s.symbol for s in all_stats}
+        pseudo = []
+        for sym in missing:
+            st = state.symbols.get(sym)
+            pseudo.append({
+                'symbol': sym,
+                'avg_prostrel_pct': 0.0,
+                'max_prostrel_pct': 0.0,
+                'freq_per_day': 0.0,
+                'entry_long_pct': 0.0,
+                'is_manual': False,
+                'max_leverage': st.max_leverage if st else 0.0,
+                'has_open_trade': True,
+                'stats_missing': True,
+            })
+
+        items = []
+        for s in selected:
+            eff, is_manual = effective_entry(s)
             items.append({
                 'symbol': s.symbol,
                 'avg_prostrel_pct': round(s.avg_prostrel_pct, 2),
                 'max_prostrel_pct': round(s.max_prostrel_pct, 2),
                 'freq_per_day': round(s.freq_per_day, 2),
-                'entry_long_pct': round(effective_entry, 2),
+                'entry_long_pct': round(eff, 2),
                 'is_manual': is_manual,
                 'max_leverage': s.max_leverage,
+                'has_open_trade': s.symbol in open_symbols,
+                'stats_missing': False,
             })
-            
+
+        items.extend(pseudo)
         return {'items': items}
 
 @app.get('/api/trades')
