@@ -2,7 +2,7 @@
 <html lang="ru">
 <head><meta charset="utf-8"><title>Knife Bot</title>
 <!-- Подключаем библиотеку для графиков -->
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 body { margin:0; font-family: sans-serif; background:#0e1117; color:#e6e6e6; }
 header { padding:16px 24px; border-bottom:1px solid #252b36; display:flex; gap:16px; align-items:center; }
@@ -627,7 +627,7 @@ async function loadTrades() {
       '<td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td>'+
       '<td>'+hasExits+'</td>'+
       '<td style="display:flex; gap:8px;">'+
-        '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#8a93a6; cursor:pointer;" onclick="event.stopPropagation(); openChart(\''+t.symbol+'\')">🖥️</button>'+
+        '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#8a93a6; cursor:pointer;" onclick="event.stopPropagation(); openChart(\''+t.symbol+'\', \''+ (t.tf || '60') + '\')">🖥️</button>'+
         '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#8a93a6; cursor:pointer;" onclick="event.stopPropagation(); openConfig(\''+t.symbol+'\')">⚙️</button>'+
         '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#ef4444; cursor:pointer; font-weight:600;" onclick="event.stopPropagation(); closeTrade('+t.id+')">✕</button>'+
       '</td>'+
