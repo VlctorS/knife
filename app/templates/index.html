@@ -987,20 +987,43 @@ async function showEntryDetails() {
 function copyEntryDetails() {
   if (!lastEntryDetailsText) return;
   
-  navigator.clipboard.writeText(lastEntryDetailsText).then(() => {
-    const btn = event.target;
-    const originalText = btn.textContent;
-    btn.textContent = 'Скопировано!';
-    btn.style.background = '#22c55e';
-    
-    setTimeout(() => {
-      btn.textContent = originalText;
-      btn.style.background = '#10b981';
-    }, 2000);
-  }).catch(err => {
+  // Классический метод копирования через скрытый textarea
+  const textarea = document.createElement('textarea');
+  textarea.value = lastEntryDetailsText;
+  // Делаем элемент невидимым, но присутствующим в DOM
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  
+  textarea.select();
+  textarea.setSelectionRange(0, 99999); // Для мобильных устройств
+  
+  try {
+    const successful = document.execCommand('copy');
+    if (successful) {
+      // Меняем текст кнопки для визуального подтверждения
+      const btn = event.target;
+      const originalText = btn.textContent;
+      const originalBg = btn.style.background;
+      
+      btn.textContent = 'Скопировано!';
+      btn.style.background = '#22c55e'; // Зеленый
+      
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.style.background = originalBg;
+      }, 2000);
+    } else {
+      alert('Не удалось скопировать текст. Попробуйте выделить его вручную.');
+    }
+  } catch (err) {
     console.error('Ошибка копирования: ', err);
     alert('Не удалось скопировать текст.');
-  });
+  } finally {
+    // Убираем textarea из DOM
+    document.body.removeChild(textarea);
+  }
 }
 
 async function saveConfig() {
