@@ -1220,7 +1220,6 @@ function setChartTF(tf) {
 function initChart() {
   const container = document.getElementById('chart-container');
   
-  // Проверка, что библиотека загрузилась
   if (typeof LightweightCharts === 'undefined') {
     container.innerHTML = '<div style="color:#ef4444; padding:20px; text-align:center;">Ошибка: Библиотека графиков не загрузилась. Проверьте интернет или блокировщик рекламы.</div>';
     return;
@@ -1233,29 +1232,46 @@ function initChart() {
       layout: { background: { color: '#171b23' }, textColor: '#8a93a6' },
       grid: { vertLines: { color: '#252b36' }, horzLines: { color: '#252b36' } },
       crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-      timeScale: { borderColor: '#252b36' },
-      rightPriceScale: { borderColor: '#252b36' },
+      timeScale: { 
+        borderColor: '#252b36',
+        rightOffset: Math.floor(container.clientWidth / 20)
+      },
+      // Настраиваем правую шкалу
+      rightPriceScale: { 
+        borderColor: '#252b36',
+        visible: true, // Включаем отображение
+        scaleMargins: { top: 0.1, bottom: 0.2 } // Оставляем место для объемов внизу
+      },
     });
 
+    // Свечи (привязаны к правой шкале по умолчанию)
     candleSeries = chartInstance.addCandlestickSeries({
       upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
       wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+      priceScaleId: 'right', // Явно указываем правую шкалу
     });
 
+    // Объемы (накладываем на график снизу, отдельная шкала)
     volumeSeries = chartInstance.addHistogramSeries({
       priceFormat: { type: 'volume' },
       priceScaleId: '', 
+      color: '#3b82f6',
     });
     volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
 
-    bbUpperSeries = chartInstance.addLineSeries({ color: '#f59e0b', lineWidth: 1 });
-    bbLowerSeries = chartInstance.addLineSeries({ color: '#f59e0b', lineWidth: 1 });
-
-    // Отступ справа 20% (1/5 ширины)
-    chartInstance.timeScale().applyOptions({
-      rightOffset: Math.floor(container.clientWidth / 20)
+    // Bollinger Bands (Меняем цвет на розовый #ec4899)
+    bbUpperSeries = chartInstance.addLineSeries({ 
+      color: '#ec4899', 
+      lineWidth: 1, 
+      priceScaleId: 'right' 
+    });
+    bbLowerSeries = chartInstance.addLineSeries({ 
+      color: '#ec4899', 
+      lineWidth: 1, 
+      priceScaleId: 'right' 
     });
 
+    // Автоматический ресайз
     new ResizeObserver(entries => {
       if (entries.length === 0 || !entries[0].contentRect) return;
       const { width, height } = entries[0].contentRect;
