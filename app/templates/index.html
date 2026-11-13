@@ -1182,6 +1182,9 @@ async function runSimulation() {
 }
 
 // ---------- ЛОГИКА ГРАФИКА ----------
+let priceLineEntry = null;
+let priceLineExit = null;
+let priceLineGrid = null;
 let maSeries = null;
 let chartInstance = null;
 let candleSeries = null;
@@ -1197,13 +1200,41 @@ async function openChart(symbol, defaultTf) {
   document.getElementById('chart-title').textContent = 'График: ' + symbol;
   document.getElementById('chart-modal').classList.add('active');
   
-  // Устанавливаем ТФ из сделки, если он передан, иначе 1ч
+  // Запрашиваем данные текущей сделки, чтобы получить цены уровней
+  let entryPrice = null;
+  let exitPrice = null;
+  let gridPrice = null;
+  
+  try {
+    const tradeRes = await fetch('/api/trade_by_symbol?symbol=' + symbol);
+    const tradeData = await tradeRes.json();
+    
+    if (tradeData.ok) {
+      entryPrice = tradeData.avg_entry_price;
+      
+      // Получаем точные цены для следующего выхода и усреднения
+      // Нам нужен trade_id, поэтому берем его из активных сделок
+      const tradesRes = await fetch('/api/trades?limit=100');
+      const tradesList = await tradesRes.json();
+      const activeTrade = tradesList.items.find(t => t.symbol === symbol);
+      
+      if (activeTrade) {
+        const histRes = await fetch('/api/trade_history?trade_id=' + activeTrade.id);
+        const histData = await histRes.json();
+        exitPrice = histData.next_exit_price;
+        gridPrice = histData.next_grid_price;
+      }
+    }
+  } catch (e) {
+    console.error("Не удалось загрузить уровни сделки:", e);
+  }
+
+  // Инициализируем график, передавая уровни
   const initialTf = defaultTf || '60';
-  setChartTF(initialTf);
+  setChartTF(initialTf, entryPrice, exitPrice, gridPrice);
 }
 
-
-function setChartTF(tf) {
+function setChartTF(tf, entryPrice = null, exitPrice = null, gridPrice = null) {
   chartInterval = tf;
   
   document.querySelectorAll('.tf-btn').forEach(b => {
@@ -1214,15 +1245,14 @@ function setChartTF(tf) {
     }
   });
   
-  initChart();
+  initChart(entryPrice, exitPrice, gridPrice);
 }
 
-
-function initChart() {
+function initChart(entryPrice = null, exitPrice = null, gridPrice = null) {
   const container = document.getElementById('chart-container');
   
   if (typeof LightweightCharts === 'undefined') {
-    container.innerHTML = '<div style="color:#ef4444; padding:20px; text-align:center;">Ошибка: Библиотека графиков не загрузилась. Проверьте интернет или блокировщик рекламы.</div>';
+    container.innerHTML = '<div style="color:#ef4444; padding:20px; text-align:center;">Ошибка: Библиотека графиков не загрузилась.</div>';
     return;
   }
 
@@ -1237,51 +1267,84 @@ function initChart() {
         borderColor: '#252b36',
         rightOffset: Math.floor(container.clientWidth / 20)
       },
-      // Настраиваем правую шкалу
       rightPriceScale: { 
         borderColor: '#252b36',
-        visible: true, // Включаем отображение
-        scaleMargins: { top: 0.1, bottom: 0.2 } // Оставляем место для объемов внизу
+        visible: true,
+        scaleMargins: { top: 0.1, bottom: 0.2 }
       },
     });
 
-    // Свечи (привязаны к правой шкале по умолчанию)
     candleSeries = chartInstance.addCandlestickSeries({
       upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
       wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-      priceScaleId: 'right', // Явно указываем правую шкалу
+      priceScaleId: 'right',
     });
 
-    // Объемы (накладываем на график снизу, отдельная шкала)
     volumeSeries = chartInstance.addHistogramSeries({
       priceFormat: { type: 'volume' },
       priceScaleId: '', 
-      color: '#3b82f6',
     });
     volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
 
-    // Bollinger Bands (Меняем цвет на розовый #ec4899, делаем пунктирными)
+    // BB (Розовые, пунктирные)
     bbUpperSeries = chartInstance.addLineSeries({ 
       color: '#ec4899', 
       lineWidth: 1, 
-      lineStyle: LightweightCharts.LineStyle.Dashed, // <--- Пунктир
+      lineStyle: LightweightCharts.LineStyle.Dashed,
       priceScaleId: 'right' 
     });
     bbLowerSeries = chartInstance.addLineSeries({ 
       color: '#ec4899', 
       lineWidth: 1, 
-      lineStyle: LightweightCharts.LineStyle.Dashed, // <--- Пунктир
+      lineStyle: LightweightCharts.LineStyle.Dashed,
       priceScaleId: 'right' 
     });
 
-    // MA (Желтая линия, период 20)
+    // MA (Желтая)
     maSeries = chartInstance.addLineSeries({
-      color: '#facc15', // Желтый
+      color: '#facc15',
       lineWidth: 2,
       priceScaleId: 'right'
     });
 
-    // Автоматический ресайз
+    // === УРОВНИ (priceLine) ===
+    // 1. Средняя цена входа (Голубой)
+    if (entryPrice) {
+      priceLineEntry = candleSeries.createPriceLine({
+        price: entryPrice,
+        color: '#00bfff',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+        axisLabelVisible: true,
+        title: 'Вход',
+      });
+    }
+
+    // 2. Ближайший выход (Салатовый)
+    if (exitPrice) {
+      priceLineExit = candleSeries.createPriceLine({
+        price: exitPrice,
+        color: '#32cd32',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: 'Выход',
+      });
+    }
+
+    // 3. Ближайшее усреднение (Оранжевый)
+    if (gridPrice) {
+      priceLineGrid = candleSeries.createPriceLine({
+        price: gridPrice,
+        color: '#f59e0b',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: 'Усреднение',
+      });
+    }
+    // =======================
+
     new ResizeObserver(entries => {
       if (entries.length === 0 || !entries[0].contentRect) return;
       const { width, height } = entries[0].contentRect;
@@ -1294,7 +1357,120 @@ function initChart() {
     chartTimer = setInterval(fetchChartData, 5000);
 
   } catch (e) {
-    container.innerHTML = '<div style="color:#ef4444; padding:20px;">Ошибка инициализации графика: ' + e.message + '</div>';
+    container.innerHTML = '<div style="color:#ef4444; padding:20px;">Ошибка инициализации: ' + e.message + '</div>';
+  }
+}
+
+function initChart(entryPrice = null, exitPrice = null, gridPrice = null) {
+  const container = document.getElementById('chart-container');
+  
+  if (typeof LightweightCharts === 'undefined') {
+    container.innerHTML = '<div style="color:#ef4444; padding:20px; text-align:center;">Ошибка: Библиотека графиков не загрузилась.</div>';
+    return;
+  }
+
+  container.innerHTML = ''; 
+  
+  try {
+    chartInstance = LightweightCharts.createChart(container, {
+      layout: { background: { color: '#171b23' }, textColor: '#8a93a6' },
+      grid: { vertLines: { color: '#252b36' }, horzLines: { color: '#252b36' } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      timeScale: { 
+        borderColor: '#252b36',
+        rightOffset: Math.floor(container.clientWidth / 20)
+      },
+      rightPriceScale: { 
+        borderColor: '#252b36',
+        visible: true,
+        scaleMargins: { top: 0.1, bottom: 0.2 }
+      },
+    });
+
+    candleSeries = chartInstance.addCandlestickSeries({
+      upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
+      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+      priceScaleId: 'right',
+    });
+
+    volumeSeries = chartInstance.addHistogramSeries({
+      priceFormat: { type: 'volume' },
+      priceScaleId: '', 
+    });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+
+    // BB (Розовые, пунктирные)
+    bbUpperSeries = chartInstance.addLineSeries({ 
+      color: '#ec4899', 
+      lineWidth: 1, 
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      priceScaleId: 'right' 
+    });
+    bbLowerSeries = chartInstance.addLineSeries({ 
+      color: '#ec4899', 
+      lineWidth: 1, 
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      priceScaleId: 'right' 
+    });
+
+    // MA (Желтая)
+    maSeries = chartInstance.addLineSeries({
+      color: '#facc15',
+      lineWidth: 2,
+      priceScaleId: 'right'
+    });
+
+    // === УРОВНИ (priceLine) ===
+    // 1. Средняя цена входа (Голубой)
+    if (entryPrice) {
+      priceLineEntry = candleSeries.createPriceLine({
+        price: entryPrice,
+        color: '#00bfff',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+        axisLabelVisible: true,
+        title: 'Вход',
+      });
+    }
+
+    // 2. Ближайший выход (Салатовый)
+    if (exitPrice) {
+      priceLineExit = candleSeries.createPriceLine({
+        price: exitPrice,
+        color: '#32cd32',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: 'Выход',
+      });
+    }
+
+    // 3. Ближайшее усреднение (Оранжевый)
+    if (gridPrice) {
+      priceLineGrid = candleSeries.createPriceLine({
+        price: gridPrice,
+        color: '#f59e0b',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: 'Усреднение',
+      });
+    }
+    // =======================
+
+    new ResizeObserver(entries => {
+      if (entries.length === 0 || !entries[0].contentRect) return;
+      const { width, height } = entries[0].contentRect;
+      chartInstance.applyOptions({ width, height });
+      chartInstance.timeScale().applyOptions({ rightOffset: Math.floor(width / 20) });
+    }).observe(container);
+
+    if (chartTimer) clearInterval(chartTimer);
+    fetchChartData();
+    chartTimer = setInterval(fetchChartData, 5000);
+
+  } catch (e) {
+    container.innerHTML = '<div style="color:#ef4444; padding:20px;">Ошибка инициализации: ' + e.message + '</div>';
   }
 }
 
@@ -1405,7 +1581,15 @@ async function fetchChartData() {
 
 // Обработчик кнопок ТФ
 document.querySelectorAll('.tf-btn').forEach(btn => {
-  btn.addEventListener('click', () => setChartTF(btn.dataset.tf));
+  btn.addEventListener('click', () => {
+    // Нам нужно хранить текущие уровни, чтобы при переключении ТФ они не пропадали
+    let entry = null, exit = null, grid = null;
+    if (priceLineEntry) entry = priceLineEntry.options().price;
+    if (priceLineExit) exit = priceLineExit.options().price;
+    if (priceLineGrid) grid = priceLineGrid.options().price;
+    
+    setChartTF(btn.dataset.tf, entry, exit, grid);
+  });
 });
 
 async function tick() { 
