@@ -802,3 +802,17 @@ async def favicon():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+@app.get("/api/klines")
+async def api_klines(symbol: str, interval: str, limit: int = 200):
+    # interval: 1, 5, 15, 30, 60, 240, D
+    if not monitor._rest:
+        return {"ok": False, "error": "REST not ready"}
+    
+    try:
+        # Ваш метод get_kline принимает строки '240', 'D' и т.д.
+        # Для 1ч Bybit использует '60'
+        kl = await monitor._rest.get_kline(symbol, interval=interval, limit=limit)
+        return {"ok": True, "items": kl}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}    

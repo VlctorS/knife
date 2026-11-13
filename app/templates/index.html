@@ -1,6 +1,8 @@
 <!doctype html>
 <html lang="ru">
 <head><meta charset="utf-8"><title>Knife Bot</title>
+<!-- Подключаем библиотеку для графиков -->
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 body { margin:0; font-family: sans-serif; background:#0e1117; color:#e6e6e6; }
 header { padding:16px 24px; border-bottom:1px solid #252b36; display:flex; gap:16px; align-items:center; }
@@ -87,6 +89,10 @@ button:hover { background:#1d4ed8; }
 .sim-modal-content { width: 800px; max-width: 95vw; }
 .sim-table th, .sim-table td { padding: 8px 12px; font-size: 12px; }
 .sim-table .step-col { width: 50px; text-align: center; }
+
+/* Стили для кнопок таймфреймов */
+.tf-btn { background:#252b36; color:#e6e6e6; padding:4px 12px; border-radius:4px; border:1px solid #3b4351; cursor:pointer; }
+.tf-btn.active { background:#2563eb !important; color:white !important; border:none !important; }
 </style></head>
 <body>
 <header>
@@ -347,6 +353,29 @@ button:hover { background:#1d4ed8; }
   </div>
 </div>
 
+<!-- МОДАЛЬНОЕ ОКНО ГРАФИКА -->
+<div class="modal" id="chart-modal" style="z-index: 1200; background: rgba(0,0,0,0.9);">
+  <div class="modal-content" style="width: 95vw; max-width: 1400px; height: 85vh; padding: 16px; display: flex; flex-direction: column;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+      <h2 id="chart-title" style="margin:0; border:none; padding:0;">График</h2>
+      <button onclick="closeChart()" style="background:#ef4444;">Закрыть</button>
+    </div>
+    
+    <div style="display: flex; gap: 8px; margin-bottom: 12px;" id="chart-tfs">
+      <button class="tf-btn" data-tf="1">1м</button>
+      <button class="tf-btn" data-tf="5">5м</button>
+      <button class="tf-btn" data-tf="15">15м</button>
+      <button class="tf-btn" data-tf="30">30м</button>
+      <button class="tf-btn active" data-tf="60">1ч</button>
+      <button class="tf-btn" data-tf="240">4ч</button>
+      <button class="tf-btn" data-tf="D">1д</button>
+    </div>
+
+    <!-- Контейнер для графика -->
+    <div id="chart-container" style="flex: 1; position: relative; width: 100%;"></div>
+  </div>
+</div>
+
 <script>
 const fmtNum = (n, d=6) => n==null ? "—" : Number(n).toLocaleString(undefined,{maximumFractionDigits:d});
 const fmtPnl = (n) => n==null ? "0.0000" : Number(n).toFixed(4);
@@ -392,6 +421,7 @@ document.addEventListener('keydown', (e) => {
     document.getElementById('history-modal').classList.remove('active');
     document.getElementById('sim-modal').classList.remove('active');
     document.getElementById('entry-details-modal').classList.remove('active');
+    closeChart();
   }
 });
 
@@ -597,6 +627,7 @@ async function loadTrades() {
       '<td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td>'+
       '<td>'+hasExits+'</td>'+
       '<td style="display:flex; gap:8px;">'+
+        '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#8a93a6; cursor:pointer;" onclick="event.stopPropagation(); openChart(\''+t.symbol+'\')">🖥️</button>'+
         '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#8a93a6; cursor:pointer;" onclick="event.stopPropagation(); openConfig(\''+t.symbol+'\')">⚙️</button>'+
         '<button style="padding:2px 6px; font-size:12px; background:none; border:none; color:#ef4444; cursor:pointer; font-weight:600;" onclick="event.stopPropagation(); closeTrade('+t.id+')">✕</button>'+
       '</td>'+
@@ -1149,6 +1180,161 @@ async function runSimulation() {
     </tr>
   `).join('');
 }
+
+// ---------- ЛОГИКА ГРАФИКА ----------
+let chartInstance = null;
+let candleSeries = null;
+let volumeSeries = null;
+let bbUpperSeries = null;
+let bbLowerSeries = null;
+let chartSymbol = null;
+let chartInterval = '60';
+let chartTimer = null;
+
+async function openChart(symbol) {
+  chartSymbol = symbol;
+  document.getElementById('chart-title').textContent = 'График: ' + symbol;
+  document.getElementById('chart-modal').classList.add('active');
+  
+  // Сброс таймфрейма на 1ч по умолчанию при открытии
+  setChartTF('60');
+}
+
+function setChartTF(tf) {
+  chartInterval = tf;
+  
+  // Визуальное обновление кнопок ТФ
+  document.querySelectorAll('.tf-btn').forEach(b => {
+    if (b.dataset.tf === tf) {
+      b.classList.add('active');
+    } else {
+      b.classList.remove('active');
+    }
+  });
+  
+  initChart();
+}
+
+function initChart() {
+  const container = document.getElementById('chart-container');
+  container.innerHTML = ''; // Очищаем перед пересозданием
+  
+  // Создаем инстанс графика
+  chartInstance = LightweightCharts.createChart(container, {
+    layout: { background: { color: '#171b23' }, textColor: '#8a93a6' },
+    grid: { vertLines: { color: '#252b36' }, horzLines: { color: '#252b36' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    timeScale: { 
+      borderColor: '#252b36',
+      // Отступ справа на 1/5 ширины графика (20%)
+      rightOffset: Math.floor(container.clientWidth / 20),
+    },
+    rightPriceScale: { borderColor: '#252b36' },
+  });
+
+  // Свечи
+  candleSeries = chartInstance.addCandlestickSeries({
+    upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
+    wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+  });
+
+  // Объемы (внизу)
+  volumeSeries = chartInstance.addHistogramSeries({
+    color: '#3b82f6', priceFormat: { type: 'volume' },
+    priceScaleId: '', // Наложение на основной график
+  });
+  volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+
+  // Bollinger Bands (Верхняя и Нижняя)
+  bbUpperSeries = chartInstance.addLineSeries({ color: '#f59e0b', lineWidth: 1, title: 'BB Upper' });
+  bbLowerSeries = chartInstance.addLineSeries({ color: '#f59e0b', lineWidth: 1, title: 'BB Lower' });
+
+  // Автоматический ресайз
+  new ResizeObserver(entries => {
+    if (entries.length === 0 || !entries[0].contentRect) return;
+    const { width, height } = entries[0].contentRect;
+    chartInstance.applyOptions({ width, height });
+    chartInstance.timeScale().applyOptions({
+      rightOffset: Math.floor(width / 20)
+    });
+  }).observe(container);
+
+  // Запуск автообновления
+  if (chartTimer) clearInterval(chartTimer);
+  fetchChartData();
+  chartTimer = setInterval(fetchChartData, 5000); // каждые 5 сек
+}
+
+function closeChart() {
+  document.getElementById('chart-modal').classList.remove('active');
+  if (chartTimer) {
+    clearInterval(chartTimer);
+    chartTimer = null;
+  }
+}
+
+async function fetchChartData() {
+  if (!chartSymbol) return;
+  
+  try {
+    const res = await fetch(`/api/klines?symbol=${chartSymbol}&interval=${chartInterval}&limit=200`);
+    const data = await res.json();
+    if (!data.ok || !data.items) return;
+
+    const klines = data.items;
+    
+    // Парсинг свечей
+    const candles = [];
+    const volumes = [];
+    const closes = [];
+    
+    for (let k of klines) {
+      const time = Math.floor(Number(k[0]) / 1000); // ms -> sec
+      const open = parseFloat(k[1]);
+      const high = parseFloat(k[2]);
+      const low = parseFloat(k[3]);
+      const close = parseFloat(k[4]);
+      const vol = parseFloat(k[5]);
+      
+      candles.push({ time, open, high, low, close });
+      volumes.push({ time, value: vol, color: close >= open ? 'rgba(34,197,94,0.5)' : 'rgba(239,68,68,0.5)' });
+      closes.push(close);
+    }
+
+    candleSeries.setData(candles);
+    volumeSeries.setData(volumes);
+
+    // Расчет Bollinger Bands (period=20, mult=2)
+    const period = 20;
+    const mult = 2;
+    const bbUpper = [];
+    const bbLower = [];
+
+    for (let i = period - 1; i < closes.length; i++) {
+      let sum = 0;
+      for (let j = 0; j < period; j++) sum += closes[i - j];
+      const sma = sum / period;
+
+      let varianceSum = 0;
+      for (let j = 0; j < period; j++) varianceSum += Math.pow(closes[i - j] - sma, 2);
+      const stdDev = Math.sqrt(varianceSum / period);
+
+      bbUpper.push({ time: candles[i].time, value: sma + mult * stdDev });
+      bbLower.push({ time: candles[i].time, value: sma - mult * stdDev });
+    }
+
+    bbUpperSeries.setData(bbUpper);
+    bbLowerSeries.setData(bbLower);
+
+  } catch (e) {
+    console.error('Chart fetch error:', e);
+  }
+}
+
+// Обработчик кнопок ТФ
+document.querySelectorAll('.tf-btn').forEach(btn => {
+  btn.addEventListener('click', () => setChartTF(btn.dataset.tf));
+});
 
 async function tick() { 
   try { 
