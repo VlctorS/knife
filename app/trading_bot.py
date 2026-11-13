@@ -244,7 +244,12 @@ class TradingBot:
                             reason='Успешный вход (открытие сделки)'
                         ))
 
-                        # СБОР СНИМКА ИНДИКАТОРОВ
+                        # --- СБОР СНИМКА ИНДИКАТОРОВ ---
+                        # Выносим analysis в переменную, чтобы Pylance не ругался на Optional
+                        analysis = ev.get('analysis')
+                        anchor_trend = analysis.trend_direction if analysis else 'unknown'
+                        anchor_strength = round(analysis.trend_strength, 2) if analysis else 0.0
+
                         entry_details = {
                             'timeframe': tf_label,
                             'confidence': round(ev['confidence'], 2),
@@ -262,10 +267,10 @@ class TradingBot:
                             'current_price': current_price,
                             'ma_knife': ma_knife,
                             'ma_anchor': ma_anchor,
-                            'anchor_trend': ev.get('analysis').trend_direction if ev.get('analysis') else 'unknown',
-                            'anchor_strength': round(ev.get('analysis').trend_strength, 2) if ev.get('analysis') else 0,
+                            'anchor_trend': anchor_trend,
+                            'anchor_strength': anchor_strength,
                         }
-
+                        # --------------------------------
                         await self._open_trade(
                             session, sym, side, current_price, st.max_leverage, 
                             cfg, gs, change_pct, 
