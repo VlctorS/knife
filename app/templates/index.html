@@ -340,7 +340,8 @@ button:hover { background:#1d4ed8; }
   <div class="modal-content" style="width: 600px;">
     <h2 id="details-title">Условия входа</h2>
     <div id="details-content" style="margin-top:16px; font-size:14px; line-height:1.6;"></div>
-    <div style="margin-top:24px;">
+    <div style="margin-top:24px; display: flex; gap: 12px;">
+      <button onclick="copyEntryDetails()" style="background:#10b981;">Копировать в буфер</button>
       <button onclick="document.getElementById('entry-details-modal').classList.remove('active')" style="background:#4b5563;">Закрыть</button>
     </div>
   </div>
@@ -892,6 +893,9 @@ async function openConfig(symbol) {
   document.getElementById('config-modal').classList.add('active');
 }
 
+// Глобальная переменная для хранения текста, чтобы не собирать его дважды
+let lastEntryDetailsText = "";
+
 async function showEntryDetails() {
   if (!currentConfigSymbol) return;
   
@@ -905,8 +909,11 @@ async function showEntryDetails() {
   
   const d = data.entry_details;
   const side = data.side;
+  const sym = data.symbol;
   
   let explanation = "";
+  let plainExplanation = "";
+  
   if (side === 'LONG') {
     explanation = `Бот искал <b>падающий нож</b> (Dump) на таймфрейме <b>${d.timeframe}</b>.<br>
     Свеча упала на <b>${Math.abs(d.change_pct)}%</b> от открытия, но длинная нижняя тень (<b>${d.knife_low}</b>) показала, что покупатели откупили падение. 
@@ -914,6 +921,13 @@ async function showEntryDetails() {
     Старший тренд: <b>${d.anchor_trend}</b> (сила ${d.anchor_strength}). 
     Уверенность сигнала: <b>${d.confidence}</b> (требовалось не менее ${d.min_confidence}). 
     Объем: <b>${Math.round(d.volume)}</b> (средний ${Math.round(d.avg_volume)}).`;
+
+    plainExplanation = `Бот искал падающий нож (Dump) на таймфрейме ${d.timeframe}.\n` +
+    `Свеча упала на ${Math.abs(d.change_pct)}% от открытия, но длинная нижняя тень (${d.knife_low}) показала, что покупатели откупили падение.\n` +
+    `Текущая цена (${d.current_price}) поднялась выше минимума свечи.\n` +
+    `Старший тренд: ${d.anchor_trend} (сила ${d.anchor_strength}).\n` +
+    `Уверенность сигнала: ${d.confidence} (требовалось не менее ${d.min_confidence}).\n` +
+    `Объем: ${Math.round(d.volume)} (средний ${Math.round(d.avg_volume)}).`;
   } else {
     explanation = `Бот искал <b>летящий нож</b> (Pump) на таймфрейме <b>${d.timeframe}</b>.<br>
     Свеча выросла на <b>${Math.abs(d.change_pct)}%</b> от открытия, но длинная верхняя тень (<b>${d.knife_high}</b>) показала, что продавцы сбили цену. 
@@ -921,6 +935,13 @@ async function showEntryDetails() {
     Старший тренд: <b>${d.anchor_trend}</b> (сила ${d.anchor_strength}). 
     Уверенность сигнала: <b>${d.confidence}</b> (требовалось не менее ${d.min_confidence}). 
     Объем: <b>${Math.round(d.volume)}</b> (средний ${Math.round(d.avg_volume)}).`;
+
+    plainExplanation = `Бот искал летящий нож (Pump) на таймфрейме ${d.timeframe}.\n` +
+    `Свеча выросла на ${Math.abs(d.change_pct)}% от открытия, но длинная верхняя тень (${d.knife_high}) показала, что продавцы сбили цену.\n` +
+    `Текущая цена (${d.current_price}) упала ниже максимума свечи.\n` +
+    `Старший тренд: ${d.anchor_trend} (сила ${d.anchor_strength}).\n` +
+    `Уверенность сигнала: ${d.confidence} (требовалось не менее ${d.min_confidence}).\n` +
+    `Объем: ${Math.round(d.volume)} (средний ${Math.round(d.avg_volume)}).`;
   }
 
   const rawHtml = Object.entries(d).map(([k, v]) => {
@@ -929,7 +950,24 @@ async function showEntryDetails() {
     return `<tr><td class="muted">${name}</td><td><b>${typeof v === 'number' ? v.toFixed(5) : v}</b></td></tr>`;
   }).join('');
 
-  document.getElementById('details-title').innerHTML = `Условия входа: ${data.symbol} (${side})`;
+  // Собираем чистый текст для буфера обмена
+  let rawText = "";
+  for (const [k, v] of Object.entries(d)) {
+    if (k === 'reason') continue;
+    const name = k.replace(/_/g, ' ').toUpperCase();
+    const val = typeof v === 'number' ? v.toFixed(5) : v;
+    rawText += `${name}: ${val}\n`;
+  }
+
+  lastEntryDetailsText = `Условия входа: ${sym} (${side})\n` +
+                         `----------------------------------------\n` +
+                         `Логика принятия решения:\n${plainExplanation}\n` +
+                         `Техническая причина: ${d.reason}\n` +
+                         `----------------------------------------\n` +
+                         `Снимок индикаторов:\n${rawText}`;
+
+  // Отрисовываем HTML
+  document.getElementById('details-title').innerHTML = `Условия входа: ${sym} (${side})`;
   document.getElementById('details-content').innerHTML = `
     <div style="background:#141820; padding:16px; border-radius:8px; border:1px solid #252b36; margin-bottom:16px;">
       <h3 style="margin-top:0; color:#2563eb; font-size:15px;">Логика принятия решения:</h3>
@@ -944,6 +982,25 @@ async function showEntryDetails() {
   `;
   
   document.getElementById('entry-details-modal').classList.add('active');
+}
+
+function copyEntryDetails() {
+  if (!lastEntryDetailsText) return;
+  
+  navigator.clipboard.writeText(lastEntryDetailsText).then(() => {
+    const btn = event.target;
+    const originalText = btn.textContent;
+    btn.textContent = 'Скопировано!';
+    btn.style.background = '#22c55e';
+    
+    setTimeout(() => {
+      btn.textContent = originalText;
+      btn.style.background = '#10b981';
+    }, 2000);
+  }).catch(err => {
+    console.error('Ошибка копирования: ', err);
+    alert('Не удалось скопировать текст.');
+  });
 }
 
 async function saveConfig() {
