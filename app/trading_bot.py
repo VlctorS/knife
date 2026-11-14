@@ -12,6 +12,7 @@ from .bybit import BybitREST
 from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, TradeHistory, engine, Settings
 from .state import state, Alert, classify_event, moving_average
 from .config import settings
+from .validity import evaluate_validity
 
 log = logging.getLogger(__name__)
 
@@ -114,18 +115,27 @@ class TradingBot:
         self._last_scan_ts = now
 
         async with SessionLocal() as session:
-            result = await session.execute(select(Trade).where(Trade.status == 'OPEN'))
-            open_syms = {t.symbol for t in result.scalars().all()}
+            result = await session.execute(
+                select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL']))
+            )
+            open_trades = result.scalars().all()
+            open_syms = {t.symbol for t in open_trades}
 
-            symbols_to_check = [s for s in state.symbols.keys() if s not in open_syms]
-            if not symbols_to_check:
-                return
-
+            # --- ЛИМИТ ОДНОВРЕМЕННО ОТКРЫТЫХ СДЕЛОК ---
             gs = await session.get(Settings, 1)
             if not gs:
                 gs = Settings(id=1)
                 session.add(gs)
                 await session.commit()
+
+            max_open = gs.max_open_trades if gs and gs.max_open_trades > 0 else 5
+            active_count = len({t.symbol for t in open_trades if t.status in ('OPEN', 'PARTIAL')})
+            if active_count >= max_open:
+                return
+
+            symbols_to_check = [s for s in state.symbols.keys() if s not in open_syms]
+            if not symbols_to_check:
+                return
 
             intervals = ['240', 'D']  # ловим ножи на 4ч и 1д
             
@@ -283,6 +293,9 @@ class TradingBot:
                         log.info('SIGNAL %s %s (%s) %.2f%% -> OPEN %s @ %.6f | %s', kind, sym, tf_label, change_pct, side, current_price, ev['reason'])
 
                         open_syms.add(sym)
+                        active_count += 1
+                        if active_count >= max_open:
+                            break
                         break
 
                 except Exception as e:
@@ -307,13 +320,18 @@ class TradingBot:
         else:
             max_steps = gs.max_steps if gs else 10
 
+        # Максимум шагов выхода (0 = без ограничения)
+        exit_max_steps = gs.exit_max_steps if gs and gs.exit_max_steps > 0 else 0
+
         trade = Trade(
             symbol=sym, side=side, entry_price=price, avg_entry_price=price,
             total_qty=qty, total_margin=margin, initial_margin=margin, status='OPEN',
             grid_step=0, max_steps=max_steps,
             leverage=max_lev, current_price=price, exit_step=0,
             entry_fee=entry_fee, pnl=-entry_fee,
-            tf=tf # <--- СОХРАНЯЕМ
+            tf=tf, # <--- СОХРАНЯЕМ
+            validity='green',
+            exit_max_steps=exit_max_steps,
         )
 
         session.add(trade)
@@ -331,6 +349,75 @@ class TradingBot:
         session.add(history)
         log.info('OPEN %s %s @ %.6f (size: %.2f USDT, qty: %.2f, lev: %.0fx, fee: %.4f)', side, sym, price, pos_size, qty, max_lev, entry_fee)
 
+    async def _check_trade_validity(self, t):
+        """
+        Оценивает актуальность разворота по открытой сделке.
+
+        Возвращает ValidityResult или None если данных недостаточно.
+        """
+        try:
+            kl_1h = await self.rest.get_kline(t.symbol, interval='60', limit=30)
+            kl_4h = await self.rest.get_kline(t.symbol, interval='240', limit=30)
+
+            ma_1h = moving_average(kl_1h, min(20, len(kl_1h) - 1)) if len(kl_1h) > 5 else None
+            ma_4h = moving_average(kl_4h, min(20, len(kl_4h) - 1)) if len(kl_4h) > 5 else None
+
+            st = state.symbols.get(t.symbol)
+            current_price = st.last_price if st and st.last_price > 0 else t.current_price
+
+            return evaluate_validity(
+                symbol=t.symbol,
+                side=t.side,
+                current_price=current_price,
+                avg_entry_price=t.avg_entry_price,
+                klines_1h=kl_1h,
+                klines_4h=kl_4h,
+                ma_1h=ma_1h,
+                ma_4h=ma_4h,
+            )
+        except Exception as e:
+            log.warning('Validity check failed for %s: %r', t.symbol, e)
+            return None
+
+    async def _close_position(self, session, t, price, reason='', close_pct=None):
+        """
+        Закрывает позицию полностью с фиксацией PnL и записью в историю.
+        Используется когда разворот потерян — вместо усреднения выходим.
+        """
+        gs = await session.get(Settings, 1)
+        fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
+
+        closed_qty = t.total_qty
+        if t.side == 'LONG':
+            closed_pnl = closed_qty * (price - t.avg_entry_price)
+        else:
+            closed_pnl = closed_qty * (t.avg_entry_price - price)
+
+        close_commission = closed_qty * price * (fee_pct / 100.0)
+        realized_part = closed_pnl - close_commission - t.entry_fee
+
+        t.realized_pnl += realized_part
+        t.exit_fee += close_commission
+        t.pnl = t.realized_pnl
+        t.status = 'CLOSED'
+        t.closed_at = datetime.datetime.utcnow()
+        t.current_price = price
+        t.total_qty = 0.0
+        t.total_margin = 0.0
+        t.entry_fee = 0.0
+
+        notes = f'VALIDITY EXIT: {reason} (qty: {closed_qty:.2f}, pnl: {realized_part:.4f})' if reason \
+            else f'FULL CLOSE at validity exit (qty: {closed_qty:.2f}, pnl: {realized_part:.4f})'
+
+        history = TradeHistory(
+            trade_id=t.id, action='FULL_CLOSE', price=price, qty=closed_qty,
+            margin=0.0, pnl=realized_part, notes=notes,
+        )
+        session.add(history)
+        await session.commit()
+        log.info('VALIDITY EXIT %s %s @ %.6f | PnL: %.4f | reason: %s',
+                 t.side, t.symbol, price, realized_part, reason)
+
     async def update_open_trades(self):
         async with SessionLocal() as session:
             gs = await session.get(Settings, 1)
@@ -340,9 +427,11 @@ class TradingBot:
                 await session.commit()
             
             fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
+            # Галочка проверки актуальности перед усреднением
+            check_validity = bool(getattr(gs, 'check_validity_before_grid', False))
             
             result = await session.execute(
-                select(Trade).where(Trade.status == 'OPEN').where(Trade.total_qty > 0.0001)
+                select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL'])).where(Trade.total_qty > 0.0001)
             )
             for t in result.scalars().all():
                 st = state.symbols.get(t.symbol)
@@ -355,7 +444,18 @@ class TradingBot:
                 
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
-                
+
+                # --- 0. ВАЛИДАЦИЯ РАЗВОРОТА (обновляем лампочку регулярно) ---
+                validity = None
+                should_check_validity = (
+                    check_validity  # галочка включена — проверяем перед сеткой
+                    or int(time.time()) % 120 < 5  # периодическое обновление для UI
+                )
+                if should_check_validity:
+                    validity = await self._check_trade_validity(t)
+                    if validity:
+                        t.validity = validity.status
+
                 # --- 1. ЛОГИКА УСРЕДНЕНИЯ (своя прогрессия: grid_step_pct * grid_step_multiplier^n) ---
                 if t.grid_step < t.max_steps:
                     start_pct = _pick(cfg.grid_step_pct if cfg else 0, gs.grid_step_pct if gs else 0, 5.0)
@@ -369,6 +469,20 @@ class TradingBot:
                         can_grid = True
                     
                     if can_grid:
+                        # --- ПРОВЕРКА АКТУАЛЬНОСТИ РАЗВОРОТА ПЕРЕД УСРЕДНЕНИЕМ ---
+                        if check_validity:
+                            v = validity if validity is not None else await self._check_trade_validity(t)
+                            if v:
+                                t.validity = v.status
+                                if v.status == 'red':
+                                    # Разворот потерян — ЗАКРЫВАЕМ вместо усреднения
+                                    await self._close_position(
+                                        session, t, price,
+                                        reason='; '.join(v.reasons[:4]) or 'разворот неактуален'
+                                    )
+                                    continue
+                                # green / orange — усредняем как обычно
+                        
                         add_pos_size = _pick(cfg.position_size_grid if cfg else 0, gs.position_size_grid if gs else 0, MIN_POS_SIZE)
                         
                         # Применяем множитель размера для усреднений
@@ -389,13 +503,21 @@ class TradingBot:
                         
                         add_commission = add_pos_size * (fee_pct / 100.0)
                         t.entry_fee += add_commission
-                        
+
+                        # --- СБРОС СЕТКИ ВЫХОДОВ ПРИ 3+ УСРЕДНЕНИИ ---
+                        # После третьего и каждого следующего усреднения обнуляем
+                        # шаг выхода: начинать ступенчатый выход заново.
+                        grid_exit_reset = ''
+                        if t.grid_step >= 3:
+                            t.exit_step = 0
+                            grid_exit_reset = ', exits reset'
+
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
-                            margin=add_margin, pnl=-add_commission, notes=f'BUY {add_qty:.2f} (step {t.grid_step}, left: {t.total_qty:.2f}, fee {add_commission:.4f})'
+                            margin=add_margin, pnl=-add_commission, notes=f'BUY {add_qty:.2f} (step {t.grid_step}, left: {t.total_qty:.2f}, fee {add_commission:.4f}{grid_exit_reset})'
                         )
                         session.add(history)
-                        await session.commit() 
+                        await session.commit()
 
                 # --- 2. РАСЧЕТ PnL: нереализованный = чистая цена минус комиссии обеих сторон ---
                 if t.side == 'LONG':
@@ -416,10 +538,17 @@ class TradingBot:
                 
                 current_exit_step = t.exit_step if t.exit_step is not None else 0
                 target_exit_pct = start_exit * (exit_mult ** current_exit_step)
-                
+
+                # Максимум шагов выхода: последний шаг обязан закрыть без остатка
+                exit_max = t.exit_max_steps if getattr(t, 'exit_max_steps', 0) else (gs.exit_max_steps if gs and gs.exit_max_steps > 0 else 0)
+                force_full_close = exit_max > 0 and (current_exit_step + 1) >= exit_max
+
                 if change_pct >= target_exit_pct:
-                    # Если остаток слишком мал (меньше 1 USDT), закрываем всё
-                    if t.total_qty * (close_pct / 100.0) * price < 1.0 or t.total_qty * (1 - close_pct / 100.0) < 0.001:
+                    # Если остаток слишком мал (меньше 1 USDT), достигнут лимит шагов
+                    # или включён форс — закрываем всё без остатка
+                    if (force_full_close
+                            or t.total_qty * (close_pct / 100.0) * price < 1.0
+                            or t.total_qty * (1 - close_pct / 100.0) < 0.001):
                         closed_qty = t.total_qty
                         closed_frac = 1.0
                         action = 'FULL_CLOSE'
