@@ -99,10 +99,11 @@ class Trade(Base):
     leverage: Mapped[float] = mapped_column(Float, default=10.0)
     opened_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
     closed_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=True)
-    tf: Mapped[str] = mapped_column(String, default='60') # '1', '5', '15', '30', '60', '240', 'D'
+    tf: Mapped[str] = mapped_column(String, default='60')
     
     # --- Новые поля ---
     validity: Mapped[str] = mapped_column(String, default='green')  # green / orange / red
+    validity_reasons: Mapped[str] = mapped_column(Text, nullable=True)  # JSON-массив причин
     exit_max_steps: Mapped[int] = mapped_column(Integer, default=0)  # 0 = без ограничения
 
 
@@ -150,6 +151,9 @@ def _migrate_add_columns(conn):
         ('settings', 'check_validity_before_grid', 'INTEGER DEFAULT 0'),
         ('settings', 'exit_max_steps', 'INTEGER DEFAULT 0'),
         ('trades', 'validity', "VARCHAR DEFAULT 'green'"),
+        ('trades', 'exit_max_steps', 'INTEGER DEFAULT 0'),
+        ('trades', 'validity', "VARCHAR DEFAULT 'green'"),
+        ('trades', 'validity_reasons', 'TEXT'),
         ('trades', 'exit_max_steps', 'INTEGER DEFAULT 0'),
     ]
     for table, column, ddl in additions:

@@ -618,7 +618,7 @@ async function loadStats() {
 async function loadTrades() {
   const d = await (await fetch('/api/trades?limit=100')).json();
   const tb = document.getElementById('trades');
-  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="13" class="empty">Нет сделок</td></tr>'; return; }
+  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="14" class="empty">Нет сделок</td></tr>'; return; }
   
   tb.innerHTML = d.items.map(t => {
     const position_size = (t.total_qty * t.current_price).toFixed(2);
@@ -626,9 +626,23 @@ async function loadTrades() {
     const changeClass = t.change_pct > 0 ? 'pump' : (t.change_pct < 0 ? 'dump' : '');
     const hasExits = t.exit_step > 0 ? '<span class="pump">Да</span>' : '<span class="muted">Нет</span>';
 
+    // --- Лампочка актуальности разворота ---
+    const validity = t.validity || 'green';
+    const validityColor = validity === 'green' ? '#22c55e'
+                       : validity === 'orange' ? '#f59e0b'
+                       : '#ef4444';
+    const validityTitle = (t.validity_reasons && t.validity_reasons.length)
+      ? t.validity_reasons.join('; ')
+      : (validity === 'green' ? 'Разворот актуален' : '—');
+
+    const validityDot = `<span title="${validityTitle.replace(/"/g, '&quot;')}"
+      style="display:inline-block;width:10px;height:10px;border-radius:50%;
+             background:${validityColor};box-shadow:0 0 8px ${validityColor};"></span>`;
+
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
       '<td class="muted">'+timeStr+'</td>'+
       '<td>'+t.symbol+'</td>'+
+      '<td style="text-align:center;">'+validityDot+'</td>'+
       '<td class="'+(t.side==='LONG'?'pump':'dump')+'">'+t.side+'</td>'+
       '<td>'+fmtNum(t.avg_entry_price)+'</td>'+
       '<td>'+fmtNum(t.current_price)+'</td>'+

@@ -354,6 +354,7 @@ class TradingBot:
         Оценивает актуальность разворота по открытой сделке.
 
         Возвращает ValidityResult или None если данных недостаточно.
+        Побочный эффект: обновляет t.validity и t.validity_reasons (JSON).
         """
         try:
             kl_1h = await self.rest.get_kline(t.symbol, interval='60', limit=30)
@@ -365,7 +366,7 @@ class TradingBot:
             st = state.symbols.get(t.symbol)
             current_price = st.last_price if st and st.last_price > 0 else t.current_price
 
-            return evaluate_validity(
+            v = evaluate_validity(
                 symbol=t.symbol,
                 side=t.side,
                 current_price=current_price,
@@ -375,9 +376,21 @@ class TradingBot:
                 ma_1h=ma_1h,
                 ma_4h=ma_4h,
             )
+            if v:
+                t.validity = v.status
+                try:
+                    t.validity_reasons = json.dumps(list(v.reasons or []), ensure_ascii=False)
+                except Exception:
+                    t.validity_reasons = None
+                try:
+                    t._validity_ts = time.time()
+                except Exception:
+                    pass
+            return v
         except Exception as e:
             log.warning('Validity check failed for %s: %r', t.symbol, e)
             return None
+
 
     async def _close_position(self, session, t, price, reason='', close_pct=None):
         """
@@ -427,7 +440,6 @@ class TradingBot:
                 await session.commit()
             
             fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
-            # Галочка проверки актуальности перед усреднением
             check_validity = bool(getattr(gs, 'check_validity_before_grid', False))
             
             result = await session.execute(
@@ -445,18 +457,14 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
 
-                # --- 0. ВАЛИДАЦИЯ РАЗВОРОТА (обновляем лампочку регулярно) ---
+                # --- 0. ВАЛИДАЦИЯ РАЗВОРОТА ---
+                last_check = getattr(t, '_validity_ts', 0) or 0
+                need_check = check_validity or (time.time() - last_check > 60)
                 validity = None
-                should_check_validity = (
-                    check_validity  # галочка включена — проверяем перед сеткой
-                    or int(time.time()) % 120 < 5  # периодическое обновление для UI
-                )
-                if should_check_validity:
+                if need_check:
                     validity = await self._check_trade_validity(t)
-                    if validity:
-                        t.validity = validity.status
 
-                # --- 1. ЛОГИКА УСРЕДНЕНИЯ (своя прогрессия: grid_step_pct * grid_step_multiplier^n) ---
+                # --- 1. ЛОГИКА УСРЕДНЕНИЯ ---
                 if t.grid_step < t.max_steps:
                     start_pct = _pick(cfg.grid_step_pct if cfg else 0, gs.grid_step_pct if gs else 0, 5.0)
                     mult = _pick(cfg.grid_step_multiplier if cfg else 0, gs.grid_step_multiplier if gs else 0, 2.5)
@@ -469,23 +477,17 @@ class TradingBot:
                         can_grid = True
                     
                     if can_grid:
-                        # --- ПРОВЕРКА АКТУАЛЬНОСТИ РАЗВОРОТА ПЕРЕД УСРЕДНЕНИЕМ ---
                         if check_validity:
                             v = validity if validity is not None else await self._check_trade_validity(t)
-                            if v:
-                                t.validity = v.status
-                                if v.status == 'red':
-                                    # Разворот потерян — ЗАКРЫВАЕМ вместо усреднения
-                                    await self._close_position(
-                                        session, t, price,
-                                        reason='; '.join(v.reasons[:4]) or 'разворот неактуален'
-                                    )
-                                    continue
-                                # green / orange — усредняем как обычно
+                            if v and v.status == 'red':
+                                await self._close_position(
+                                    session, t, price,
+                                    reason='; '.join(v.reasons[:4]) or 'разворот неактуален'
+                                )
+                                continue
                         
                         add_pos_size = _pick(cfg.position_size_grid if cfg else 0, gs.position_size_grid if gs else 0, MIN_POS_SIZE)
                         
-                        # Применяем множитель размера для усреднений
                         size_mult = _pick(cfg.grid_size_multiplier if cfg else 0, gs.grid_size_multiplier if gs else 0, 1.0)
                         if size_mult > 1.0:
                             add_pos_size = add_pos_size * (size_mult ** t.grid_step)
@@ -504,9 +506,6 @@ class TradingBot:
                         add_commission = add_pos_size * (fee_pct / 100.0)
                         t.entry_fee += add_commission
 
-                        # --- СБРОС СЕТКИ ВЫХОДОВ ПРИ 3+ УСРЕДНЕНИИ ---
-                        # После третьего и каждого следующего усреднения обнуляем
-                        # шаг выхода: начинать ступенчатый выход заново.
                         grid_exit_reset = ''
                         if t.grid_step >= 3:
                             t.exit_step = 0
@@ -519,7 +518,7 @@ class TradingBot:
                         session.add(history)
                         await session.commit()
 
-                # --- 2. РАСЧЕТ PnL: нереализованный = чистая цена минус комиссии обеих сторон ---
+                # --- 2. РАСЧЕТ PnL ---
                 if t.side == 'LONG':
                     change_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
                 else:
@@ -527,11 +526,10 @@ class TradingBot:
 
                 gross = t.total_qty * (price - t.avg_entry_price) if t.side == 'LONG' \
                     else t.total_qty * (t.avg_entry_price - price)
-                # Комиссия входа уже уплачена (entry_fee), на выход — по текущей цене
                 open_exit_fee = t.total_qty * price * (fee_pct / 100.0)
                 t.pnl = t.realized_pnl + gross - t.entry_fee - open_exit_fee
                 
-                # --- 3. СТУПЕНЧАТЫЙ ВЫХОД (своя прогрессия: initial_exit_pct * exit_step_multiplier^n) ---
+                # --- 3. СТУПЕНЧАТЫЙ ВЫХОД ---
                 start_exit = _pick(cfg.initial_exit_pct if cfg else 0, gs.initial_exit_pct if gs else 0, 15.0)
                 exit_mult = _pick(cfg.exit_step_multiplier if cfg else 0, gs.exit_step_multiplier if gs else 0, 1.6)
                 close_pct = _pick(cfg.exit_contract_pct if cfg else 0, gs.exit_contract_pct if gs else 0, 50.0)
@@ -539,13 +537,10 @@ class TradingBot:
                 current_exit_step = t.exit_step if t.exit_step is not None else 0
                 target_exit_pct = start_exit * (exit_mult ** current_exit_step)
 
-                # Максимум шагов выхода: последний шаг обязан закрыть без остатка
                 exit_max = t.exit_max_steps if getattr(t, 'exit_max_steps', 0) else (gs.exit_max_steps if gs and gs.exit_max_steps > 0 else 0)
                 force_full_close = exit_max > 0 and (current_exit_step + 1) >= exit_max
 
                 if change_pct >= target_exit_pct:
-                    # Если остаток слишком мал (меньше 1 USDT), достигнут лимит шагов
-                    # или включён форс — закрываем всё без остатка
                     if (force_full_close
                             or t.total_qty * (close_pct / 100.0) * price < 1.0
                             or t.total_qty * (1 - close_pct / 100.0) < 0.001):
@@ -559,14 +554,9 @@ class TradingBot:
                         closed_frac = close_pct / 100.0
                         action = 'PARTIAL_CLOSE'
                         t.exit_step = current_exit_step + 1
-                        # --- СБРОС СЕТКИ УСРЕДНЕНИЙ ---
                         t.grid_step = 0
 
-                    # Доля комиссии входа, приходящаяся на закрываемую часть
                     entry_fee_part = t.entry_fee * closed_frac
-
-                    # Старая средняя ОБЯЗАТЕЛЬНО фиксируется до переприсваиваний:
-                    # PnL закрытой части считается именно от неё.
                     old_avg = t.avg_entry_price
 
                     if t.side == 'LONG':
@@ -576,7 +566,6 @@ class TradingBot:
 
                     close_commission = (closed_qty * price) * (fee_pct / 100.0)
                     t.exit_fee += close_commission
-                    # Реализуем PnL части: цена минус обе комиссии (вход и выход)
                     closed_pnl -= close_commission + entry_fee_part
                     t.realized_pnl += closed_pnl
 
@@ -584,8 +573,6 @@ class TradingBot:
                     t.total_qty -= closed_qty
                     t.total_margin -= (closed_qty * old_avg / t.leverage)
 
-                    # Фиксируем новую среднюю при частичном закрытии: остаток
-                    # позиции считаем открытым по цене закрытия части.
                     if action == 'PARTIAL_CLOSE':
                         t.avg_entry_price = price
 
@@ -596,8 +583,6 @@ class TradingBot:
                         t.total_margin = 0.0
                         t.entry_fee = 0.0
 
-                    # Плавающий PnL = реализованное + gross остатка от НОВОЙ средней
-                    # минус неучтённые комиссии (остаток входа и ожидаемая комиссия выхода).
                     if t.total_qty > 0.0001:
                         open_gross = t.total_qty * (price - t.avg_entry_price) if t.side == 'LONG' \
                             else t.total_qty * (t.avg_entry_price - price)
@@ -614,6 +599,7 @@ class TradingBot:
                     session.add(history)
                     await session.commit()
             
+            # Финальный коммит: фиксируем validity / validity_reasons / pnl / current_price
             await session.commit()
 
 trading_bot = None

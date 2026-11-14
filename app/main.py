@@ -200,24 +200,15 @@ async def api_trades(limit: int = 100):
             
             net_pnl = float(t.realized_pnl) + gross - float(t.entry_fee) - exit_fee
             
-            # Лампочка валидности
+            # --- Валидность: читаем из БД, без REST-запросов ---
             validity = getattr(t, 'validity', 'green') or 'green'
             validity_reasons = []
-            if validity in ('orange', 'red'):
+            raw_reasons = getattr(t, 'validity_reasons', None)
+            if raw_reasons:
                 try:
-                    from app.validity import evaluate_validity
-                    from app.state import moving_average
-                    kl_1h = await monitor._rest.get_kline(t.symbol, interval='60', limit=30) if monitor._rest else []
-                    kl_4h = await monitor._rest.get_kline(t.symbol, interval='240', limit=30) if monitor._rest else []
-                    ma_1h = moving_average(kl_1h, min(20, len(kl_1h) - 1)) if len(kl_1h) > 5 else None
-                    ma_4h = moving_average(kl_4h, min(20, len(kl_4h) - 1)) if len(kl_4h) > 5 else None
-                    v = evaluate_validity(
-                        symbol=t.symbol, side=t.side,
-                        current_price=curr_price, avg_entry_price=avg_price,
-                        klines_1h=kl_1h, klines_4h=kl_4h,
-                        ma_1h=ma_1h, ma_4h=ma_4h,
-                    )
-                    validity_reasons = v.reasons if v else []
+                    parsed = json.loads(raw_reasons)
+                    if isinstance(parsed, list):
+                        validity_reasons = [str(x) for x in parsed]
                 except Exception:
                     pass
 
