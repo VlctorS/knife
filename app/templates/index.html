@@ -137,12 +137,12 @@ button:hover { background:#1d4ed8; }
     
   <div id="tab-trades" class="tab-content"><div class="panel"><h2>Открытые сделки</h2>
     <table><thead><tr>
-      <th>Время (МСК)</th><th>Символ</th><th>Тип</th>
+      <th>Время (МСК)</th><th>Символ</th><th>Разворот</th><th>Тип</th>
       <th>Ср. цена</th><th>Тек. цена</th><th>Изм. %</th>
       <th>Кол-во</th><th>Размер (USDT)</th>
       <th>Сетка</th><th>Плечо</th><th>PnL (тек)</th><th>Выходы</th><th></th>
     </tr></thead>
-    <tbody id="trades"><tr><td colspan="13" class="empty">Нет сделок</td></tr></tbody></table></div></div>
+    <tbody id="trades"><tr><td colspan="14" class="empty">Нет сделок</td></tr></tbody></table></div></div>
     
   <div id="tab-closed" class="tab-content"><div class="panel">
     <h2>История всех выходов (частичных и полных)</h2>
@@ -173,6 +173,10 @@ button:hover { background:#1d4ed8; }
       <div class="form-row"><input type="number" id="min-turnover" step="0.1"></div>
       <p class="muted">Мин. макс. плечо:</p>
       <div class="form-row"><input type="number" id="min-lev" step="1"></div>
+      <p class="muted">Бумажный баланс (USDT):</p>
+      <div class="form-row"><input type="number" id="s-paper_balance" step="1" min="1"></div>
+      <p class="muted">Максимум одновременно открытых сделок:</p>
+      <div class="form-row"><input type="number" id="s-max_open_trades" step="1" min="1"></div>
       <div style="margin-top:24px">
         <button onclick="saveSettings()">Сохранить</button>
         <button onclick="clearData()" style="background:#ef4444; margin-left:8px;">Очистить базу</button>
@@ -207,6 +211,13 @@ button:hover { background:#1d4ed8; }
       <p class="muted">Всего усреднений не более, чем:</p>
       <div class="form-row"><input type="number" id="s-max_steps" step="1"></div>
 
+      <div class="form-row" style="margin-top:12px;">
+        <label style="cursor:pointer; display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="s-check_validity_before_grid" style="width:auto; cursor:pointer;">
+          <span class="muted" style="font-size: 12px;">Проверять актуальность разворота перед усреднением (закрытие вместо сетки при red)</span>
+        </label>
+      </div>
+
       <div class="grid-preview" id="grid-preview"></div>
 
       <div style="margin-top:24px">
@@ -221,6 +232,8 @@ button:hover { background:#1d4ed8; }
       <div class="form-row"><input type="number" id="s-exit_step_multiplier" step="0.1"></div>
       <p class="muted">% контрактов на выход:</p>
       <div class="form-row"><input type="number" id="s-exit_contract_pct" step="1"></div>
+      <p class="muted">Максимальное число шагов выхода (0 = без ограничения, последний шаг закрывает без остатка):</p>
+      <div class="form-row"><input type="number" id="s-exit_max_steps" step="1" min="0"></div>
       <div style="margin-top:24px">
         <button onclick="saveSettings()">Сохранить</button>
       </div>
