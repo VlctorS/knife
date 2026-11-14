@@ -188,6 +188,7 @@ async def api_trades(limit: int = 100):
             
             total_qty = float(t.total_qty) if t.total_qty else 0.0
             
+            # PnL рассчитывается только по оставшимся контрактам (без проданных)
             if t.side == 'LONG':
                 gross = total_qty * (curr_price - avg_price)
             else:
@@ -199,6 +200,27 @@ async def api_trades(limit: int = 100):
             
             net_pnl = float(t.realized_pnl) + gross - float(t.entry_fee) - exit_fee
             
+            # Лампочка валидности
+            validity = getattr(t, 'validity', 'green') or 'green'
+            validity_reasons = []
+            if validity in ('orange', 'red'):
+                try:
+                    from app.validity import evaluate_validity
+                    from app.state import moving_average
+                    kl_1h = await monitor._rest.get_kline(t.symbol, interval='60', limit=30) if monitor._rest else []
+                    kl_4h = await monitor._rest.get_kline(t.symbol, interval='240', limit=30) if monitor._rest else []
+                    ma_1h = moving_average(kl_1h, min(20, len(kl_1h) - 1)) if len(kl_1h) > 5 else None
+                    ma_4h = moving_average(kl_4h, min(20, len(kl_4h) - 1)) if len(kl_4h) > 5 else None
+                    v = evaluate_validity(
+                        symbol=t.symbol, side=t.side,
+                        current_price=curr_price, avg_entry_price=avg_price,
+                        klines_1h=kl_1h, klines_4h=kl_4h,
+                        ma_1h=ma_1h, ma_4h=ma_4h,
+                    )
+                    validity_reasons = v.reasons if v else []
+                except Exception:
+                    pass
+
             items.append({
                 'id': t.id, 'symbol': t.symbol, 'side': t.side,
                 'entry_price': float(t.entry_price) if t.entry_price else 0.0, 
@@ -215,6 +237,8 @@ async def api_trades(limit: int = 100):
                 'tf': t.tf or '60',
                 'opened_at': t.opened_at.isoformat() if t.opened_at else None,
                 'closed_at': t.closed_at.isoformat() if t.closed_at else None,
+                'validity': validity,
+                'validity_reasons': validity_reasons,
             })
         return {'items': items}
 
@@ -250,6 +274,53 @@ async def api_trade_by_symbol(symbol: str):
             'leverage': float(t.leverage) if t.leverage else 10.0,
             'entry_details': entry_details
         }
+
+@app.get('/api/validity/{symbol}')
+async def api_validity(symbol: str):
+    """Возвращает текущую валидность разворота для символа."""
+    from app.validity import evaluate_validity
+    from app.state import moving_average
+    if not monitor._rest:
+        return {'ok': False, 'error': 'REST not ready'}
+    try:
+        kl_1h = await monitor._rest.get_kline(symbol, interval='60', limit=30)
+        kl_4h = await monitor._rest.get_kline(symbol, interval='240', limit=30)
+        ma_1h = moving_average(kl_1h, min(20, len(kl_1h) - 1)) if len(kl_1h) > 5 else None
+        ma_4h = moving_average(kl_4h, min(20, len(kl_4h) - 1)) if len(kl_4h) > 5 else None
+
+        async with SessionLocal() as session:
+            r = await session.execute(
+                select(Trade).where(Trade.symbol == symbol).where(Trade.status.in_(['OPEN', 'PARTIAL'])).order_by(Trade.opened_at.desc())
+            )
+            t = r.scalars().first()
+            if t:
+                curr_price = float(t.current_price) if t.current_price else 0.0
+                avg_price = float(t.avg_entry_price) if t.avg_entry_price else 0.0
+                side = t.side
+            else:
+                st = state.symbols.get(symbol)
+                if st and st.last_price > 0:
+                    curr_price = st.last_price
+                    avg_price = curr_price
+                    side = 'LONG'
+                else:
+                    return {'ok': False, 'error': 'No trade or price data'}
+
+        v = evaluate_validity(
+            symbol=symbol, side=side,
+            current_price=curr_price, avg_entry_price=avg_price,
+            klines_1h=kl_1h, klines_4h=kl_4h,
+            ma_1h=ma_1h, ma_4h=ma_4h,
+        )
+        return {
+            'ok': True,
+            'symbol': symbol,
+            'status': v.status,
+            'score': v.score,
+            'reasons': v.reasons,
+        }
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
 
 @app.get('/api/open_pnl')
 async def api_open_pnl():
@@ -770,6 +841,10 @@ async def api_get_settings():
             "position_size_grid": float(s.position_size_grid) if s.position_size_grid else 0.0,
             "fee_pct": float(s.fee_pct) if s.fee_pct else 0.055, 
             "min_confidence": float(s.min_confidence) if s.min_confidence else 0.4,
+            "paper_balance": float(s.paper_balance) if s.paper_balance else 100.0,
+            "max_open_trades": s.max_open_trades if s.max_open_trades else 5,
+            "check_validity_before_grid": bool(getattr(s, 'check_validity_before_grid', False)),
+            "exit_max_steps": s.exit_max_steps if s.exit_max_steps else 0,
         }
 
 @app.post("/api/settings")
@@ -782,6 +857,15 @@ async def api_post_settings(data: dict = Body(...)):
         for k in ["min_turnover", "min_leverage", "entry_pct", "grid_step_pct", "grid_step_multiplier", "grid_size_multiplier", "max_steps", "initial_exit_pct", "exit_step_multiplier", "exit_contract_pct", "position_size_entry", "position_size_grid", "fee_pct", "min_confidence"]:
             if k in data:
                 setattr(s, k, float(data[k]) if k != "max_steps" else int(data[k]))
+        # Новые настройки
+        if "paper_balance" in data:
+            s.paper_balance = float(data["paper_balance"])
+        if "max_open_trades" in data:
+            s.max_open_trades = int(data["max_open_trades"])
+        if "check_validity_before_grid" in data:
+            s.check_validity_before_grid = bool(data["check_validity_before_grid"])
+        if "exit_max_steps" in data:
+            s.exit_max_steps = int(data["exit_max_steps"])
         await session.commit()
     asyncio.create_task(monitor._refresh_symbols())
     return {"ok": True}
