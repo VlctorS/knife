@@ -1301,6 +1301,7 @@ async function openChart(symbol, defaultTf) {
   let entryPrice = null;
   let exitPrice = null;
   let gridPrice = null;
+  let tradeSide = null;
   
   try {
     const tradeRes = await fetch('/api/trade_by_symbol?symbol=' + symbol);
@@ -1308,6 +1309,8 @@ async function openChart(symbol, defaultTf) {
     
     if (tradeData.ok) {
       entryPrice = tradeData.avg_entry_price;
+      tradeSide = tradeData.side;
+      document.getElementById('chart-title').textContent = 'График: ' + symbol + ' — ' + (tradeSide === 'LONG' ? 'LONG' : 'SHORT');
       
       // Получаем точные цены для следующего выхода и усреднения
       // Нам нужен trade_id, поэтому берем его из активных сделок
@@ -1382,133 +1385,6 @@ function initChart(entryPrice = null, exitPrice = null, gridPrice = null) {
       priceScaleId: '', 
     });
     volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-
-    // BB (Розовые, пунктирные)
-    bbUpperSeries = chartInstance.addLineSeries({ 
-      color: '#ec4899', 
-      lineWidth: 1, 
-      lineStyle: LightweightCharts.LineStyle.Dashed,
-      priceScaleId: 'right' 
-    });
-    bbLowerSeries = chartInstance.addLineSeries({ 
-      color: '#ec4899', 
-      lineWidth: 1, 
-      lineStyle: LightweightCharts.LineStyle.Dashed,
-      priceScaleId: 'right' 
-    });
-
-    // MA (Желтая)
-    maSeries = chartInstance.addLineSeries({
-      color: '#facc15',
-      lineWidth: 2,
-      priceScaleId: 'right'
-    });
-
-    // === УРОВНИ (priceLine) ===
-    // 1. Средняя цена входа (Голубой)
-    if (entryPrice) {
-      priceLineEntry = candleSeries.createPriceLine({
-        price: entryPrice,
-        color: '#00bfff',
-        lineWidth: 2,
-        lineStyle: LightweightCharts.LineStyle.Solid,
-        axisLabelVisible: true,
-        title: 'Вход',
-      });
-    }
-
-    // 2. Ближайший выход (Салатовый)
-    if (exitPrice) {
-      priceLineExit = candleSeries.createPriceLine({
-        price: exitPrice,
-        color: '#32cd32',
-        lineWidth: 2,
-        lineStyle: LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: 'Выход',
-      });
-    }
-
-    // 3. Ближайшее усреднение (Оранжевый)
-    if (gridPrice) {
-      priceLineGrid = candleSeries.createPriceLine({
-        price: gridPrice,
-        color: '#f59e0b',
-        lineWidth: 2,
-        lineStyle: LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: 'Усреднение',
-      });
-    }
-    // =======================
-
-    new ResizeObserver(entries => {
-      if (entries.length === 0 || !entries[0].contentRect) return;
-      const { width, height } = entries[0].contentRect;
-      chartInstance.applyOptions({ width, height });
-      chartInstance.timeScale().applyOptions({ rightOffset: Math.floor(width / 20) });
-    }).observe(container);
-
-    if (chartTimer) clearInterval(chartTimer);
-    fetchChartData();
-    chartTimer = setInterval(fetchChartData, 5000);
-
-  } catch (e) {
-    container.innerHTML = '<div style="color:#ef4444; padding:20px;">Ошибка инициализации: ' + e.message + '</div>';
-  }
-}
-
-function initChart(entryPrice = null, exitPrice = null, gridPrice = null) {
-  const container = document.getElementById('chart-container');
-  
-  if (typeof LightweightCharts === 'undefined') {
-    container.innerHTML = '<div style="color:#ef4444; padding:20px; text-align:center;">Ошибка: Библиотека графиков не загрузилась.</div>';
-    return;
-  }
-
-  container.innerHTML = ''; 
-  
-  try {
-    chartInstance = LightweightCharts.createChart(container, {
-      layout: { background: { color: '#171b23' }, textColor: '#8a93a6' },
-      grid: { vertLines: { color: '#252b36' }, horzLines: { color: '#252b36' } },
-      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-      timeScale: { 
-        borderColor: '#252b36',
-        rightOffset: Math.floor(container.clientWidth / 20)
-      },
-      rightPriceScale: { 
-        borderColor: '#252b36',
-        visible: true,
-        scaleMargins: { top: 0.1, bottom: 0.2 }
-      },
-    });
-
-    candleSeries = chartInstance.addCandlestickSeries({
-      upColor: '#22c55e', downColor: '#ef4444', borderVisible: false,
-      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-      priceScaleId: 'right',
-    });
-
-    volumeSeries = chartInstance.addHistogramSeries({
-      priceFormat: { type: 'volume' },
-      priceScaleId: '', 
-    });
-    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-
-    // BB (Розовые, пунктирные)
-    bbUpperSeries = chartInstance.addLineSeries({ 
-      color: '#ec4899', 
-      lineWidth: 1, 
-      lineStyle: LightweightCharts.LineStyle.Dashed,
-      priceScaleId: 'right' 
-    });
-    bbLowerSeries = chartInstance.addLineSeries({ 
-      color: '#ec4899', 
-      lineWidth: 1, 
-      lineStyle: LightweightCharts.LineStyle.Dashed,
-      priceScaleId: 'right' 
-    });
 
     // MA (Желтая)
     maSeries = chartInstance.addLineSeries({
@@ -1633,27 +1509,6 @@ async function fetchChartData() {
 
     candleSeries.setData(candles);
     volumeSeries.setData(volumes);
-
-    const period = 20;
-    const mult = 2;
-    const bbUpper = [];
-    const bbLower = [];
-
-    for (let i = period - 1; i < closes.length; i++) {
-      let sum = 0;
-      for (let j = 0; j < period; j++) sum += closes[i - j];
-      const sma = sum / period;
-
-      let varianceSum = 0;
-      for (let j = 0; j < period; j++) varianceSum += Math.pow(closes[i - j] - sma, 2);
-      const stdDev = Math.sqrt(varianceSum / period);
-
-      bbUpper.push({ time: candles[i].time, value: sma + mult * stdDev });
-      bbLower.push({ time: candles[i].time, value: sma - mult * stdDev });
-    }
-
-    bbUpperSeries.setData(bbUpper);
-    bbLowerSeries.setData(bbLower);
   
     // Расчет MA (период 20)
     const maPeriod = 20;
@@ -1668,6 +1523,75 @@ async function fetchChartData() {
     
     // Устанавливаем данные для MA
     maSeries.setData(maData);
+
+    // === S/R УРОВНИ ПОДДЕРЖКИ / СОПРОТИВЛЕНИЯ ===
+    // Находим ключевые уровни по high/low последних N свечей
+    const srLookback = 100;
+    const recentCandles = candles.slice(-srLookback);
+    const srLevels = [];
+
+    if (recentCandles.length >= 20) {
+      // Собираем все high и low
+      const highs = recentCandles.map(c => c.h);
+      const lows = recentCandles.map(c => c.l);
+
+      // Кластеризуем уровни с допуском 0.3%
+      const clusterSize = 0.003;
+      const allLevels = [...highs, ...lows];
+      allLevels.sort((a, b) => a - b);
+
+      const clusters = [];
+      let clusterStart = allLevels[0];
+      let clusterCount = 1;
+
+      for (let i = 1; i < allLevels.length; i++) {
+        if (Math.abs(allLevels[i] - clusterStart) / clusterStart < clusterSize) {
+          clusterCount++;
+        } else {
+          clusters.push({ price: clusterStart, count: clusterCount });
+          clusterStart = allLevels[i];
+          clusterCount = 1;
+        }
+      }
+      clusters.push({ price: clusterStart, count: clusterCount });
+
+      // Берём топ-5 наиболее частых уровней
+      clusters.sort((a, b) => b.count - a.count);
+      const topLevels = clusters.slice(0, 5).map(c => c.price);
+
+      // Разделяем на поддержку и сопротивление
+      const currentPrice = recentCandles[recentCandles.length - 1].c;
+      const supportLevels = topLevels.filter(p => p < currentPrice).sort((a, b) => b - a).slice(0, 3);
+      const resistanceLevels = topLevels.filter(p => p > currentPrice).sort((a, b) => a - b).slice(0, 3);
+
+      // Рисуем линии поддержки (зелёные)
+      supportLevels.forEach((price, i) => {
+        const color = ['#22c55e', '#4ade80', '#86efac'][i];
+        const line = candleSeries.createPriceLine({
+          price: price,
+          color: color,
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'Support ' + (i + 1),
+        });
+        srLevels.push(line);
+      });
+
+      // Рисуем линии сопротивления (красные)
+      resistanceLevels.forEach((price, i) => {
+        const color = ['#ef4444', '#f87171', '#fca5a5'][i];
+        const line = candleSeries.createPriceLine({
+          price: price,
+          color: color,
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'Resistance ' + (i + 1),
+        });
+        srLevels.push(line);
+      });
+    }
 
   } catch (e) {
     console.error('Chart fetch error:', e);
