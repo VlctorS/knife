@@ -366,6 +366,17 @@ button:hover { background:#1d4ed8; }
   </div>
 </div>
 
+<!-- МОДАЛЬНОЕ ОКНО ПРИЧИН ВАЛИДНОСТИ -->
+<div class="modal" id="validity-modal" style="z-index: 1100;">
+  <div class="modal-content" style="width: 600px;">
+    <h2 id="validity-title">Актуальность разворота</h2>
+    <div id="validity-content" style="margin-top:16px; font-size:14px; line-height:1.6;"></div>
+    <div style="margin-top:24px;">
+      <button onclick="document.getElementById('validity-modal').classList.remove('active')" style="background:#4b5563;">Закрыть</button>
+    </div>
+  </div>
+</div>
+
 <!-- МОДАЛЬНОЕ ОКНО ГРАФИКА -->
 <div class="modal" id="chart-modal" style="z-index: 1200; background: rgba(0,0,0,0.9);">
   <div class="modal-content" style="width: 95vw; max-width: 1400px; height: 85vh; padding: 16px; display: flex; flex-direction: column;">
@@ -434,9 +445,53 @@ document.addEventListener('keydown', (e) => {
     document.getElementById('history-modal').classList.remove('active');
     document.getElementById('sim-modal').classList.remove('active');
     document.getElementById('entry-details-modal').classList.remove('active');
+    document.getElementById('validity-modal').classList.remove('active');
     closeChart();
   }
 });
+
+// ---------- ПОКАЗ ПРИЧИН ВАЛИДНОСТИ РАЗВОРОТА ----------
+async function showValidityReasons(symbol) {
+  const modal = document.getElementById('validity-modal');
+  const title = document.getElementById('validity-title');
+  const content = document.getElementById('validity-content');
+  title.textContent = 'Актуальность разворота: ' + symbol;
+  content.innerHTML = '<p class="muted">Загрузка...</p>';
+  modal.classList.add('active');
+
+  try {
+    const d = await (await fetch('/api/validity/' + encodeURIComponent(symbol))).json();
+    if (!d.ok) {
+      content.innerHTML = '<p class="dump">Ошибка: ' + (d.error || 'не удалось получить данные') + '</p>';
+      return;
+    }
+
+    const statusMap = {
+      green:  { color: '#22c55e', label: 'Актуален — разворот подтверждён' },
+      orange: { color: '#f59e0b', label: 'Сомнителен — есть признаки противодавления' },
+      red:    { color: '#ef4444', label: 'ОПАСНО — ситуация перевернулась, продолжение крайне опасно' }
+    };
+    const s = statusMap[d.status] || statusMap.green;
+
+    const reasonsHtml = (d.reasons && d.reasons.length)
+      ? '<ul style="margin:8px 0; padding-left:20px;">' +
+        d.reasons.map(r => '<li style="margin-bottom:6px;">' + r + '</li>').join('') +
+        '</ul>'
+      : '<p class="muted">Причины не указаны.</p>';
+
+    content.innerHTML = `
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+        <span style="display:inline-block;width:16px;height:16px;border-radius:50%;background:${s.color};box-shadow:0 0 10px ${s.color};"></span>
+        <b style="color:${s.color};">${s.label}</b>
+      </div>
+      <div class="muted" style="margin-bottom:8px;">Оценка уверенности: <b style="color:#e6e6e6;">${d.score}</b> (0.0 — красный, 1.0 — зелёный)</div>
+      <h3 style="font-size:14px; color:#8a93a6; margin:16px 0 4px;">Детали анализа:</h3>
+      ${reasonsHtml}
+    `;
+  } catch (e) {
+    content.innerHTML = '<p class="dump">Ошибка загрузки: ' + e.message + '</p>';
+  }
+}
 
 function toggleSizeMult() {
   const use = document.getElementById('s-use_size_mult').checked;
@@ -523,14 +578,18 @@ async function loadStatus() {
 
 async function updateBalanceAndPnl() {
   try {
+    const settingsRes = await fetch('/api/settings');
+    const settings = await settingsRes.json();
+    const paperBalance = settings.paper_balance || 100.0;
+    
     const statsRes = await fetch('/api/closed_stats');
     const stats = await statsRes.json();
     const totalRealizedPnl = stats.total_pnl || 0;
-    const currentBalance = 100.00 + totalRealizedPnl;
+    const currentBalance = paperBalance + totalRealizedPnl;
     
     const balEl = document.getElementById('s-balance');
     balEl.textContent = currentBalance.toFixed(2) + ' USDT';
-    balEl.className = currentBalance >= 100 ? 'v pump' : 'v dump';
+    balEl.className = currentBalance >= paperBalance ? 'v pump' : 'v dump';
     
     const openStatsRes = await fetch('/api/open_pnl');
     const openStats = await openStatsRes.json();
@@ -631,13 +690,14 @@ async function loadTrades() {
     const validityColor = validity === 'green' ? '#22c55e'
                        : validity === 'orange' ? '#f59e0b'
                        : '#ef4444';
-    const validityTitle = (t.validity_reasons && t.validity_reasons.length)
-      ? t.validity_reasons.join('; ')
-      : (validity === 'green' ? 'Разворот актуален' : '—');
+    const validityLabel = validity === 'green' ? 'Актуален'
+                       : validity === 'orange' ? 'Сомнителен'
+                       : 'ОПАСНО: разворот перевернулся';
 
-    const validityDot = `<span title="${validityTitle.replace(/"/g, '&quot;')}"
-      style="display:inline-block;width:10px;height:10px;border-radius:50%;
-             background:${validityColor};box-shadow:0 0 8px ${validityColor};"></span>`;
+    const validityDot = `<span title="${validityLabel}"
+      style="display:inline-block;width:10px;height:10px;border-radius:50%;cursor:pointer;
+             background:${validityColor};box-shadow:0 0 8px ${validityColor};"
+      onclick="event.stopPropagation(); showValidityReasons('${t.symbol}')"></span>`;
 
     return '<tr style="cursor:pointer;" onclick="openHistory('+t.id+', \''+t.symbol+'\')">'+
       '<td class="muted">'+timeStr+'</td>'+
@@ -847,6 +907,10 @@ async function loadSettings() {
   document.getElementById('min-turnover').value = d.min_turnover;
   document.getElementById('min-lev').value = d.min_leverage;
   
+  document.getElementById('s-paper_balance').value = d.paper_balance || 100;
+  document.getElementById('s-max_open_trades').value = d.max_open_trades || 5;
+  document.getElementById('s-check_validity_before_grid').checked = !!d.check_validity_before_grid;
+  
   document.getElementById('s-entry_pct').value = d.entry_pct;
   document.getElementById('s-grid_step_pct').value = d.grid_step_pct;
   document.getElementById('s-grid_step_multiplier').value = d.grid_step_multiplier;
@@ -864,6 +928,7 @@ async function loadSettings() {
   document.getElementById('s-initial_exit_pct').value = d.initial_exit_pct;
   document.getElementById('s-exit_step_multiplier').value = d.exit_step_multiplier;
   document.getElementById('s-exit_contract_pct').value = d.exit_contract_pct;
+  document.getElementById('s-exit_max_steps').value = d.exit_max_steps || 0;
   
   updateGridPreview();
 }
@@ -876,6 +941,10 @@ async function saveSettings() {
     min_turnover: parseFloat(document.getElementById('min-turnover').value),
     min_leverage: parseFloat(document.getElementById('min-lev').value),
     
+    paper_balance: parseFloat(document.getElementById('s-paper_balance').value) || 100,
+    max_open_trades: parseInt(document.getElementById('s-max_open_trades').value) || 5,
+    check_validity_before_grid: document.getElementById('s-check_validity_before_grid').checked,
+    
     entry_pct: parseFloat(document.getElementById('s-entry_pct').value),
     grid_step_pct: parseFloat(document.getElementById('s-grid_step_pct').value),
     grid_step_multiplier: parseFloat(document.getElementById('s-grid_step_multiplier').value),
@@ -886,7 +955,8 @@ async function saveSettings() {
     
     initial_exit_pct: parseFloat(document.getElementById('s-initial_exit_pct').value),
     exit_step_multiplier: parseFloat(document.getElementById('s-exit_step_multiplier').value),
-    exit_contract_pct: parseFloat(document.getElementById('s-exit_contract_pct').value)
+    exit_contract_pct: parseFloat(document.getElementById('s-exit_contract_pct').value),
+    exit_max_steps: parseInt(document.getElementById('s-exit_max_steps').value) || 0
   };
   
   await fetch('/api/settings', {
