@@ -8,29 +8,46 @@ from sqlalchemy import String, Float, Integer, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
+# --- IS_RENDER: False для ПК, True для Render.com ---
+IS_RENDER = os.getenv('IS_RENDER', 'False').lower() == 'true'
+
 DB_URL = os.getenv('DATABASE_URL', 'sqlite+aiosqlite:///data/knife.db')
 
+# --- Настройки подключения ---
 if DB_URL.startswith('postgresql'):
+    # Supabase / PgBouncer: отключаем кэш подготовленных выражений,
+    # иначе asyncpg ловит DuplicatePreparedStatementError на пулере (порт 6543).
     connect_args = {
         'statement_cache_size': 0,
-        'prepared_statement_cache_size': 0,
         'server_settings': {'jit': 'off'},
     }
+    # Небольшой пул — на бесплатном Supabase лимит ~60 соединений.
+    # Одинаково безопасно и для Render, и для ПК.
+    engine_kwargs = {'pool_size': 5, 'max_overflow': 5}
 else:
     connect_args = {}
+    engine_kwargs = {}
 
-engine = create_async_engine(DB_URL, echo=False, pool_pre_ping=True, connect_args=connect_args)
+engine = create_async_engine(
+    DB_URL,
+    echo=False,
+    pool_pre_ping=True,
+    connect_args=connect_args,
+    **engine_kwargs,
+)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
 
 class Base(DeclarativeBase):
     pass
+
 
 class Settings(Base):
     __tablename__ = 'settings'
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     min_turnover: Mapped[float] = mapped_column(Float, default=5.0)
     min_leverage: Mapped[float] = mapped_column(Float, default=10.0)
-    
+
     entry_pct: Mapped[float] = mapped_column(Float, default=0.0)
     grid_step_pct: Mapped[float] = mapped_column(Float, default=5.0)
     grid_step_multiplier: Mapped[float] = mapped_column(Float, default=2.5)
@@ -43,12 +60,13 @@ class Settings(Base):
     exit_contract_pct: Mapped[float] = mapped_column(Float, default=50.0)
     min_confidence: Mapped[float] = mapped_column(Float, default=0.4)
     fee_pct: Mapped[float] = mapped_column(Float, default=0.055)
-    
+
     # --- Новые настройки ---
     paper_balance: Mapped[float] = mapped_column(Float, default=100.0)
     max_open_trades: Mapped[int] = mapped_column(Integer, default=5)
     check_validity_before_grid: Mapped[bool] = mapped_column(default=False)
     exit_max_steps: Mapped[int] = mapped_column(Integer, default=0)  # 0 = без ограничения
+
 
 class SymbolStat(Base):
     __tablename__ = 'symbol_stats'
@@ -61,10 +79,11 @@ class SymbolStat(Base):
     entry_short_pct: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
 
+
 class SymbolConfig(Base):
     __tablename__ = 'symbol_configs'
     symbol: Mapped[str] = mapped_column(String, primary_key=True)
-    entry_pct: Mapped[float] = mapped_column(Float, default=0.0) 
+    entry_pct: Mapped[float] = mapped_column(Float, default=0.0)
     grid_step_pct: Mapped[float] = mapped_column(Float, default=0.0)
     grid_step_multiplier: Mapped[float] = mapped_column(Float, default=0.0)
     grid_size_multiplier: Mapped[float] = mapped_column(Float, default=0.0)
@@ -76,6 +95,7 @@ class SymbolConfig(Base):
     exit_contract_pct: Mapped[float] = mapped_column(Float, default=0.0)
     min_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
+
 
 class Trade(Base):
     __tablename__ = 'trades'
@@ -100,11 +120,11 @@ class Trade(Base):
     opened_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
     closed_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=True)
     tf: Mapped[str] = mapped_column(String, default='60')
-    
+
     # --- Новые поля ---
-    validity: Mapped[str] = mapped_column(String, default='green')  # green / orange / red
-    validity_reasons: Mapped[str] = mapped_column(Text, nullable=True)  # JSON-массив причин
-    exit_max_steps: Mapped[int] = mapped_column(Integer, default=0)  # 0 = без ограничения
+    validity: Mapped[str] = mapped_column(String, default='green')          # green / orange / red
+    validity_reasons: Mapped[str] = mapped_column(Text, nullable=True)      # JSON-массив причин
+    exit_max_steps: Mapped[int] = mapped_column(Integer, default=0)         # 0 = без ограничения
 
 
 class TradeHistory(Base):
@@ -118,13 +138,21 @@ class TradeHistory(Base):
     margin: Mapped[float] = mapped_column(Float)
     pnl: Mapped[float] = mapped_column(Float, default=0.0)
     notes: Mapped[str] = mapped_column(String, default='')
-    details: Mapped[str] = mapped_column(Text, nullable=True) # НОВОЕ ПОЛЕ
+    details: Mapped[str] = mapped_column(Text, nullable=True)
+
 
 async def init_db():
-    os.makedirs('data', exist_ok=True)
+    # Папка нужна только для SQLite-файла (локальный режим)
+    if DB_URL.startswith('sqlite'):
+        os.makedirs('data', exist_ok=True)
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_add_columns)
+
+    mode = 'Render' if IS_RENDER else 'Локальный ПК'
+    backend = 'PostgreSQL (Supabase)' if DB_URL.startswith('postgresql') else 'SQLite'
+    print(f'[db] init_db завершена. Режим: {mode}, БД: {backend}')
 
 
 def _migrate_add_columns(conn):
@@ -144,14 +172,12 @@ def _migrate_add_columns(conn):
         ('trades', 'exit_fee', 'FLOAT DEFAULT 0'),
         ('trades', 'realized_pnl', 'FLOAT DEFAULT 0'),
         ('trades', 'tf', "VARCHAR DEFAULT '60'"),
-        ('trade_history', 'details', 'TEXT'), # НОВОЕ ПОЛЕ
+        ('trade_history', 'details', 'TEXT'),
         # --- Миграция новых полей ---
         ('settings', 'paper_balance', 'FLOAT DEFAULT 100'),
         ('settings', 'max_open_trades', 'INTEGER DEFAULT 5'),
         ('settings', 'check_validity_before_grid', 'INTEGER DEFAULT 0'),
         ('settings', 'exit_max_steps', 'INTEGER DEFAULT 0'),
-        ('trades', 'validity', "VARCHAR DEFAULT 'green'"),
-        ('trades', 'exit_max_steps', 'INTEGER DEFAULT 0'),
         ('trades', 'validity', "VARCHAR DEFAULT 'green'"),
         ('trades', 'validity_reasons', 'TEXT'),
         ('trades', 'exit_max_steps', 'INTEGER DEFAULT 0'),
@@ -159,17 +185,16 @@ def _migrate_add_columns(conn):
     for table, column, ddl in additions:
         if table not in insp.get_table_names():
             continue
-        
+
         # Проверяем существование колонки
         existing = {c['name'] for c in insp.get_columns(table)}
         if column in existing:
             continue
-        
+
         # Пытаемся добавить, но ловим ошибку, если колонка уже есть (кэш asyncpg)
         try:
             conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}'))
         except Exception as e:
-            # Если ошибка "already exists" — просто игнорируем
             if 'already exists' in str(e).lower() or 'duplicate column' in str(e).lower():
                 pass
             else:

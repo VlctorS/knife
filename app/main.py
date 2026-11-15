@@ -23,6 +23,9 @@ log = logging.getLogger('app')
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, 'templates'))
 
+# --- IS_RENDER: False для запуска с ПК, True для Render.com ---
+IS_RENDER = os.getenv('IS_RENDER', 'False').lower() == 'true'
+
 trading_bot = None
 
 async def run_history_bg():
@@ -36,6 +39,13 @@ async def run_history_bg():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global trading_bot
+
+    # --- IS_RENDER: логируем режим, проверяем PORT на Render ---
+    if IS_RENDER and not os.getenv('PORT'):
+        log.warning('IS_RENDER=True, но PORT не задан — Render обычно прокидывает его автоматически')
+    else:
+        log.info('Запуск в режиме: %s', 'Render' if IS_RENDER else 'Локальный ПК')
+
     await init_db()
     await monitor.start()
     trading_bot = TradingBot(monitor._rest)
@@ -44,6 +54,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await monitor.stop()
+        log.info('Бот остановлен')
 
 app = FastAPI(lifespan=lifespan, title='Bybit Trading Bot')
 
@@ -70,6 +81,7 @@ async def api_status():
         'min_turnover': db_min_turnover,
         'alerts_count': len(state.alerts),
         'server_time': time.time(),
+        'is_render': IS_RENDER,
     }
 
 @app.get('/api/alerts')
@@ -877,7 +889,7 @@ async def favicon():
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True}
+    return {"ok": True, "mode": "render" if IS_RENDER else "local"}
 
 @app.get("/api/klines")
 async def api_klines(symbol: str, interval: str, limit: int = 200):
