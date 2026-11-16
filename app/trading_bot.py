@@ -4,7 +4,7 @@ import logging
 import time
 import json
 
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -304,10 +304,11 @@ class TradingBot:
 
     async def _open_trade(self, session, sym, side, price, max_lev, cfg, gs, change_pct=None, fee_pct=0.055, details=None, tf='60'):
 
+        # СТРОГАЯ ЛОГИКА: если в конфиге 0 - берем глобальное, иначе - конфиг
         if cfg and cfg.position_size_entry > 0:
             pos_size = cfg.position_size_entry
         else:
-            pos_size = gs.position_size_entry if gs else MIN_POS_SIZE
+            pos_size = gs.position_size_entry if (gs and gs.position_size_entry > 0) else MIN_POS_SIZE
         
         pos_size = max(MIN_POS_SIZE, pos_size)
         margin = pos_size / max_lev
@@ -318,7 +319,7 @@ class TradingBot:
         if cfg and cfg.max_steps > 0:
             max_steps = cfg.max_steps
         else:
-            max_steps = gs.max_steps if gs else 10
+            max_steps = gs.max_steps if (gs and gs.max_steps > 0) else 10
 
         # Максимум шагов выхода (0 = без ограничения)
         exit_max_steps = gs.exit_max_steps if gs and gs.exit_max_steps > 0 else 0
@@ -427,6 +428,10 @@ class TradingBot:
             margin=0.0, pnl=realized_part, notes=notes,
         )
         session.add(history)
+        
+        # Сброс индивидуальных настроек монеты при закрытии
+        await session.execute(delete(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
+        
         await session.commit()
         log.info('VALIDITY EXIT %s %s @ %.6f | PnL: %.4f | reason: %s',
                  t.side, t.symbol, price, realized_part, reason)
@@ -486,7 +491,11 @@ class TradingBot:
                                 )
                                 continue
                         
-                        add_pos_size = _pick(cfg.position_size_grid if cfg else 0, gs.position_size_grid if gs else 0, MIN_POS_SIZE)
+                        # СТРОГАЯ ЛОГИКА: если в конфиге 0 - берем глобальное, иначе - конфиг
+                        if cfg and cfg.position_size_grid > 0:
+                            add_pos_size = cfg.position_size_grid
+                        else:
+                            add_pos_size = gs.position_size_grid if (gs and gs.position_size_grid > 0) else MIN_POS_SIZE
                         
                         size_mult = _pick(cfg.grid_size_multiplier if cfg else 0, gs.grid_size_multiplier if gs else 0, 1.0)
                         if size_mult > 1.0:
@@ -582,6 +591,9 @@ class TradingBot:
                         t.total_qty = 0.0
                         t.total_margin = 0.0
                         t.entry_fee = 0.0
+                        
+                        # Сброс индивидуальных настроек при полном закрытии
+                        await session.execute(delete(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
 
                     if t.total_qty > 0.0001:
                         open_gross = t.total_qty * (price - t.avg_entry_price) if t.side == 'LONG' \

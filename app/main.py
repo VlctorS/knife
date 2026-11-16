@@ -573,6 +573,10 @@ async def api_close_trade(request: Request):
             margin=t.total_margin, pnl=realized_part, notes=f'manual close, out fee {exit_commission:.4f}, in fee {closed_entry_fee:.4f}'
         )
         session.add(history)
+
+        # НОВОЕ: удаляем индивидуальные настройки монеты
+        await session.execute(delete(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
+
         await session.commit()
         log.info('MANUAL CLOSE %s %s @ %.6f PnL: %.2f USDT', t.side, t.symbol, price, closed_pnl)
     return {'ok': True}
@@ -599,10 +603,11 @@ async def api_trade_history(trade_id: int):
         cfg = cfg_res.scalars().first()
         gs = await session.get(Settings, 1)
         
-        start_pct = cfg.grid_step_pct if cfg and cfg.grid_step_pct > 0 else (gs.grid_step_pct if gs else 5.0)
-        mult = cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs else 2.5)
-        size_mult = cfg.grid_size_multiplier if cfg and cfg.grid_size_multiplier > 0 else (gs.grid_size_multiplier if gs else 1.0)
-        base_size = cfg.position_size_grid if cfg and cfg.position_size_grid > 0 else (gs.position_size_grid if gs else 6.0)
+        # ФОЛЛБЭКИ: если 0 - берем дефолт (5%, 2.5, 1.0, 6.0)
+        start_pct = cfg.grid_step_pct if cfg and cfg.grid_step_pct > 0 else (gs.grid_step_pct if gs and gs.grid_step_pct > 0 else 5.0)
+        mult = cfg.grid_step_multiplier if cfg and cfg.grid_step_multiplier > 0 else (gs.grid_step_multiplier if gs and gs.grid_step_multiplier > 0 else 2.5)
+        size_mult = cfg.grid_size_multiplier if cfg and cfg.grid_size_multiplier > 0 else (gs.grid_size_multiplier if gs and gs.grid_size_multiplier > 0 else 1.0)
+        base_size = cfg.position_size_grid if cfg and cfg.position_size_grid > 0 else (gs.position_size_grid if gs and gs.position_size_grid > 0 else 6.0)
         
         current_grid_step = trade.grid_step
         next_step_pct = start_pct * (mult ** current_grid_step)
@@ -615,9 +620,9 @@ async def api_trade_history(trade_id: int):
         else:
             next_grid_price = trade.avg_entry_price * (1 + next_step_pct / 100)
 
-        start_exit = cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs else 15.0)
-        exit_mult = cfg.exit_step_multiplier if cfg and cfg.exit_step_multiplier > 0 else (gs.exit_step_multiplier if gs else 1.6)
-        close_pct = cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs else 50.0)
+        start_exit = cfg.initial_exit_pct if cfg and cfg.initial_exit_pct > 0 else (gs.initial_exit_pct if gs and gs.initial_exit_pct > 0 else 15.0)
+        exit_mult = cfg.exit_step_multiplier if cfg and cfg.exit_step_multiplier > 0 else (gs.exit_step_multiplier if gs and gs.exit_step_multiplier > 0 else 1.6)
+        close_pct = cfg.exit_contract_pct if cfg and cfg.exit_contract_pct > 0 else (gs.exit_contract_pct if gs and gs.exit_contract_pct > 0 else 50.0)
         
         current_exit_step = trade.exit_step if trade.exit_step is not None else 0
         next_exit_pct = start_exit * (exit_mult ** current_exit_step)
@@ -857,40 +862,119 @@ async def api_simulate(request: Request):
         'profit_steps': profit_steps
     }
 
-@app.get("/api/configs")
-async def api_get_configs():
-    async with SessionLocal() as session:
-        r = await session.execute(select(SymbolConfig).order_by(SymbolConfig.symbol))
-        return {
-            'items': [
-                {
-                    'symbol': c.symbol, 'entry_pct': float(c.entry_pct) if c.entry_pct else 0.0,
-                    'grid_step_pct': float(c.grid_step_pct) if c.grid_step_pct else 0.0, 
-                    'grid_step_multiplier': float(c.grid_step_multiplier) if c.grid_step_multiplier else 0.0,
-                    'grid_size_multiplier': float(c.grid_size_multiplier) if c.grid_size_multiplier else 0.0,
-                    'max_steps': c.max_steps, 
-                    'initial_exit_pct': float(c.initial_exit_pct) if c.initial_exit_pct else 0.0,
-                    'exit_step_multiplier': float(c.exit_step_multiplier) if c.exit_step_multiplier else 0.0,
-                    'exit_contract_pct': float(c.exit_contract_pct) if c.exit_contract_pct else 0.0,
-                    'position_size_entry': float(c.position_size_entry) if c.position_size_entry else 0.0, 
-                    'position_size_grid': float(c.position_size_grid) if c.position_size_grid else 0.0,
-                }
-                for c in r.scalars().all()
-            ]
-        }
-
 @app.post("/api/configs")
 async def api_post_configs(request: Request):
     data = await request.json()
+    log.info(f"[CONFIG SAVE] symbol={data.get('symbol')}, data={data}")
+    
     async with SessionLocal() as session:
         cfg = await session.get(SymbolConfig, data["symbol"])
         if not cfg:
             cfg = SymbolConfig(symbol=data["symbol"])
             session.add(cfg)
-        for k in ["entry_pct", "grid_step_pct", "grid_step_multiplier", "grid_size_multiplier", "max_steps", "initial_exit_pct", "exit_step_multiplier", "exit_contract_pct", "position_size_entry", "position_size_grid", "min_confidence"]:
+            log.info(f"[CONFIG SAVE] Создан новый конфиг для {data['symbol']}")
+        
+        float_fields = [
+            "entry_pct", "grid_step_pct", "grid_step_multiplier", 
+            "grid_size_multiplier", "initial_exit_pct", "exit_step_multiplier", 
+            "exit_contract_pct", "position_size_entry", "position_size_grid", 
+            "min_confidence"
+        ]
+        for k in float_fields:
             if k in data:
-                setattr(cfg, k, float(data[k]) if k != "max_steps" else int(data[k]))
+                try:
+                    val = float(data[k])
+                    setattr(cfg, k, val)
+                    log.info(f"[CONFIG SAVE] {k} = {val}")
+                except (ValueError, TypeError) as e:
+                    log.error(f"[CONFIG SAVE] Ошибка в поле {k}: {e}, значение {data.get(k)}")
+                    setattr(cfg, k, 0.0)
+                    
+        if "max_steps" in data:
+            try:
+                cfg.max_steps = int(data["max_steps"])
+                log.info(f"[CONFIG SAVE] max_steps = {cfg.max_steps}")
+            except (ValueError, TypeError):
+                cfg.max_steps = 0
+
         await session.commit()
+        await session.refresh(cfg)
+        
+        log.info(f"[CONFIG SAVE] СОХРАНЕНО: {cfg.symbol} | entry={cfg.entry_pct}, grid_step={cfg.grid_step_pct}, grid_mult={cfg.grid_step_multiplier}, size_entry={cfg.position_size_entry}, size_grid={cfg.position_size_grid}, exit={cfg.initial_exit_pct}")
+        
+    return {"ok": True}
+
+@app.get("/api/configs")
+async def api_get_configs():
+    async with SessionLocal() as session:
+        r = await session.execute(select(SymbolConfig).order_by(SymbolConfig.symbol))
+        items = []
+        for c in r.scalars().all():
+            items.append({
+                'symbol': c.symbol, 
+                'entry_pct': float(c.entry_pct) if c.entry_pct else 0.0,
+                'grid_step_pct': float(c.grid_step_pct) if c.grid_step_pct else 0.0, 
+                'grid_step_multiplier': float(c.grid_step_multiplier) if c.grid_step_multiplier else 0.0,
+                'grid_size_multiplier': float(c.grid_size_multiplier) if c.grid_size_multiplier else 0.0,
+                'max_steps': c.max_steps or 0, 
+                'initial_exit_pct': float(c.initial_exit_pct) if c.initial_exit_pct else 0.0,
+                'exit_step_multiplier': float(c.exit_step_multiplier) if c.exit_step_multiplier else 0.0,
+                'exit_contract_pct': float(c.exit_contract_pct) if c.exit_contract_pct else 0.0,
+                'position_size_entry': float(c.position_size_entry) if c.position_size_entry else 0.0, 
+                'position_size_grid': float(c.position_size_grid) if c.position_size_grid else 0.0,
+                'min_confidence': float(c.min_confidence) if c.min_confidence else 0.0,
+            })
+        log.info(f"[CONFIG GET] Запрошено {len(items)} конфигов")
+        return {'items': items}
+
+@app.post("/api/settings")
+async def api_post_settings(data: dict = Body(...)):
+    log.info(f"[SETTINGS SAVE] Получено: {data}")
+    
+    async with SessionLocal() as session:
+        s = await session.get(Settings, 1)
+        if not s:
+            s = Settings(id=1)
+            session.add(s)
+            log.info("[SETTINGS SAVE] Создан новый объект Settings")
+        
+        float_fields = [
+            "min_turnover", "min_leverage", "entry_pct", "grid_step_pct", 
+            "grid_step_multiplier", "grid_size_multiplier", "initial_exit_pct", 
+            "exit_step_multiplier", "exit_contract_pct", "position_size_entry", 
+            "position_size_grid", "fee_pct", "min_confidence"
+        ]
+        int_fields = ["max_steps", "paper_balance", "max_open_trades", "exit_max_steps"]
+        
+        for k in float_fields:
+            if k in data:
+                try:
+                    val = float(data[k])
+                    setattr(s, k, val)
+                    log.info(f"[SETTINGS SAVE] {k} = {val}")
+                except (ValueError, TypeError):
+                    log.warning(f"[SETTINGS SAVE] Ошибка парсинга float для {k}: {data[k]}")
+                    
+        for k in int_fields:
+            if k in data:
+                try:
+                    val = int(float(data[k]))  # float на случай "10.0"
+                    setattr(s, k, val)
+                    log.info(f"[SETTINGS SAVE] {k} = {val}")
+                except (ValueError, TypeError):
+                    log.warning(f"[SETTINGS SAVE] Ошибка парсинга int для {k}: {data[k]}")
+        
+        # Чекбоксы
+        if "check_validity_before_grid" in data:
+            s.check_validity_before_grid = bool(data["check_validity_before_grid"])
+            log.info(f"[SETTINGS SAVE] check_validity_before_grid = {s.check_validity_before_grid}")
+        
+        await session.commit()
+        await session.refresh(s)
+        
+        log.info(f"[SETTINGS SAVE] СОХРАНЕНО: min_turnover={s.min_turnover}, paper_balance={s.paper_balance}, entry={s.entry_pct}, grid_step={s.grid_step_pct}, pos_entry={s.position_size_entry}, exit={s.initial_exit_pct}")
+        
+    asyncio.create_task(monitor._refresh_symbols())
     return {"ok": True}
 
 @app.get("/api/settings")
@@ -901,6 +985,7 @@ async def api_get_settings():
             s = Settings(id=1)
             session.add(s)
             await session.commit()
+        log.info(f"[SETTINGS GET] max_open_trades={s.max_open_trades}, paper_balance={s.paper_balance}")
         return {
             "min_turnover": float(s.min_turnover) if s.min_turnover else 0.0, 
             "min_leverage": float(s.min_leverage) if s.min_leverage else 0.0,
@@ -921,29 +1006,6 @@ async def api_get_settings():
             "check_validity_before_grid": bool(getattr(s, 'check_validity_before_grid', False)),
             "exit_max_steps": s.exit_max_steps if s.exit_max_steps else 0,
         }
-
-@app.post("/api/settings")
-async def api_post_settings(data: dict = Body(...)):
-    async with SessionLocal() as session:
-        s = await session.get(Settings, 1)
-        if not s:
-            s = Settings(id=1)
-            session.add(s)
-        for k in ["min_turnover", "min_leverage", "entry_pct", "grid_step_pct", "grid_step_multiplier", "grid_size_multiplier", "max_steps", "initial_exit_pct", "exit_step_multiplier", "exit_contract_pct", "position_size_entry", "position_size_grid", "fee_pct", "min_confidence"]:
-            if k in data:
-                setattr(s, k, float(data[k]) if k != "max_steps" else int(data[k]))
-        # Новые настройки
-        if "paper_balance" in data:
-            s.paper_balance = float(data["paper_balance"])
-        if "max_open_trades" in data:
-            s.max_open_trades = int(data["max_open_trades"])
-        if "check_validity_before_grid" in data:
-            s.check_validity_before_grid = bool(data["check_validity_before_grid"])
-        if "exit_max_steps" in data:
-            s.exit_max_steps = int(data["exit_max_steps"])
-        await session.commit()
-    asyncio.create_task(monitor._refresh_symbols())
-    return {"ok": True}
 
 @app.post("/api/clear_data")
 async def api_clear_data():
