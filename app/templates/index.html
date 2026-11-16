@@ -85,7 +85,19 @@ button:hover { background:#1d4ed8; }
 .pnl-card { background: linear-gradient(135deg, #1e293b, #0f172a); border: 1px solid #22c55e; }
 .pnl-card .k { color: #86efac; }
 .pnl-card .v { color: #dcfce7; }
-
+.balance-delta {
+  font-size: 14px;      /* чуть крупнее, чем было */
+  font-weight: 600;
+  margin-left: 6px;
+  display: inline-block;
+  vertical-align: middle;
+}
+.live-balance-card { 
+  background: linear-gradient(135deg, #2e1065, #0f172a); 
+  border: 1px solid #8b5cf6; 
+}
+.live-balance-card .k { color: #c4b5fd; }
+.live-balance-card .v { color: #ede9fe; }
 .sim-modal-content { width: 800px; max-width: 95vw; }
 .sim-table th, .sim-table td { padding: 8px 12px; font-size: 12px; }
 .sim-table .step-col { width: 50px; text-align: center; }
@@ -110,9 +122,16 @@ button:hover { background:#1d4ed8; }
     <div class="stat"><div class="k"><span class="status-dot"></span>Время в сети</div><div class="v" id="s-uptime">—</div></div>
     
     <div class="stat balance-card">
-      <div class="k">Бумажный баланс</div>
+      <div class="k">Бумажный баланс <span class="balance-delta" id="s-balance-delta"></span></div>
       <div class="v" id="s-balance">100.00 USDT</div>
     </div>
+    
+    <!-- НОВАЯ КАРТОЧКА -->
+    <div class="stat live-balance-card">
+      <div class="k">Живой баланс <span class="balance-delta" id="s-live-balance-delta"></span></div>
+      <div class="v" id="s-live-balance">100.00 USDT</div>
+    </div>
+
     <div class="stat pnl-card" id="pnl-card">
       <div class="k">Живой PnL (с комиссиями)</div>
       <div class="v" id="s-live-pnl">0.00 USDT</div>
@@ -578,23 +597,66 @@ async function loadStatus() {
 
 async function updateBalanceAndPnl() {
   try {
+    // Получаем историю балансов с бэкенда
+    const histRes = await fetch('/api/balance_history');
+    const histData = await histRes.json();
+    
     const settingsRes = await fetch('/api/settings');
     const settings = await settingsRes.json();
-    const paperBalance = settings.paper_balance || 100.0;
+    const paperBalanceBase = settings.paper_balance || 100.0;
     
     const statsRes = await fetch('/api/closed_stats');
     const stats = await statsRes.json();
     const totalRealizedPnl = stats.total_pnl || 0;
-    const currentBalance = paperBalance + totalRealizedPnl;
     
-    const balEl = document.getElementById('s-balance');
-    balEl.textContent = currentBalance.toFixed(2) + ' USDT';
-    balEl.className = currentBalance >= paperBalance ? 'v pump' : 'v dump';
+    // Текущий реализованный баланс
+    const currentRealizedBalance = paperBalanceBase + totalRealizedPnl;
     
     const openStatsRes = await fetch('/api/open_pnl');
     const openStats = await openStatsRes.json();
     const livePnl = openStats.total_pnl || 0;
     
+    // Текущий живой баланс
+    const currentLiveBalance = currentRealizedBalance + livePnl;
+
+    // Берем значения минуту назад (первое значение из массива истории)
+    let prevRealized = currentRealizedBalance;
+    let prevLive = currentLiveBalance;
+
+    if (histData.ok && histData.items && histData.items.length > 0) {
+      prevRealized = histData.items[0].realized_balance;
+      prevLive = histData.items[0].live_balance;
+    }
+
+    // Вычисляем дельту
+    const deltaRealized = currentRealizedBalance - prevRealized;
+    const deltaLive = currentLiveBalance - prevLive;
+
+    // Вспомогательная функция для форматирования дельты
+    const fmtDelta = (val) => {
+      if (Math.abs(val) < 0.0001) return ''; // Если изменений нет, не показываем
+      const sign = val > 0 ? '+' : '';
+      const cls = val > 0 ? 'pump' : 'dump';
+      return `<span class="${cls}">${sign}${val.toFixed(4)}</span>`;
+    };
+
+    // Обновляем Бумажный баланс
+    const balEl = document.getElementById('s-balance');
+    balEl.textContent = currentRealizedBalance.toFixed(2) + ' USDT';
+    balEl.className = currentRealizedBalance >= paperBalanceBase ? 'v pump' : 'v dump';
+
+    const balDeltaEl = document.getElementById('s-balance-delta');
+    balDeltaEl.innerHTML = fmtDelta(deltaRealized);
+
+    // Обновляем Живой баланс
+    const liveBalEl = document.getElementById('s-live-balance');
+    liveBalEl.textContent = currentLiveBalance.toFixed(2) + ' USDT';
+    liveBalEl.className = currentLiveBalance >= paperBalanceBase ? 'v pump' : 'v dump';
+
+    const liveBalDeltaEl = document.getElementById('s-live-balance-delta');
+    liveBalDeltaEl.innerHTML = fmtDelta(deltaLive);
+
+    // Обновляем Живой PnL
     const pnlEl = document.getElementById('s-live-pnl');
     pnlEl.textContent = (livePnl >= 0 ? '+' : '') + livePnl.toFixed(2) + ' USDT';
     pnlEl.className = 'v ' + (livePnl >= 0 ? 'pump' : 'dump');
@@ -1288,9 +1350,13 @@ let candleSeries = null;
 let volumeSeries = null;
 let bbUpperSeries = null;
 let bbLowerSeries = null;
+let bbMidSeries = null;
 let chartSymbol = null;
 let chartInterval = '60';
 let chartTimer = null;
+
+// Массив для хранения активных S/R линий и их текущих цен
+let srLinesData = []; 
 
 async function openChart(symbol, defaultTf) {
   chartSymbol = symbol;
@@ -1357,6 +1423,7 @@ function initChart(entryPrice = null, exitPrice = null, gridPrice = null) {
   }
 
   container.innerHTML = ''; 
+  srLinesData = []; // Сбрасываем старые линии при смене ТФ
   
   try {
     chartInstance = LightweightCharts.createChart(container, {
@@ -1390,7 +1457,36 @@ function initChart(entryPrice = null, exitPrice = null, gridPrice = null) {
     maSeries = chartInstance.addLineSeries({
       color: '#facc15',
       lineWidth: 2,
-      priceScaleId: 'right'
+      priceScaleId: 'right',
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+
+    // === Bollinger Bands (фиолетово-розовые), БЕЗ горизонтальных пунктиров ===
+    bbUpperSeries = chartInstance.addLineSeries({
+      color: 'rgba(217,70,239,0.9)',      // фуксия
+      lineWidth: 1,
+      priceScaleId: 'right',
+      lastValueVisible: false,
+      priceLineVisible: false,            
+      crosshairMarkerVisible: false,
+    });
+    bbMidSeries = chartInstance.addLineSeries({
+      color: 'rgba(192,132,252,0.7)',     // светло-фиолетовый
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dotted,
+      priceScaleId: 'right',
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    bbLowerSeries = chartInstance.addLineSeries({
+      color: 'rgba(217,70,239,0.9)',      // такой же цвет, как у верхней
+      lineWidth: 1,
+      priceScaleId: 'right',
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: false,
     });
 
     // === УРОВНИ (priceLine) ===
@@ -1464,7 +1560,6 @@ async function fetchChartData() {
   try {
     const res = await fetch(`/api/klines?symbol=${chartSymbol}&interval=${chartInterval}&limit=200`);
     
-    // Если сервер вернул не JSON (например, 500 ошибку)
     if (!res.ok) {
         container.insertAdjacentHTML('beforeend', `<div style="position:absolute; top:10px; left:10px; color:#ef4444; background:rgba(0,0,0,0.8); padding:10px; border-radius:4px; z-index:10;">Ошибка сервера: HTTP ${res.status}</div>`);
         return;
@@ -1521,76 +1616,142 @@ async function fetchChartData() {
       maData.push({ time: candles[i].time, value: sum / maPeriod });
     }
     
-    // Устанавливаем данные для MA
     maSeries.setData(maData);
 
-    // === S/R УРОВНИ ПОДДЕРЖКИ / СОПРОТИВЛЕНИЯ ===
-    // Находим ключевые уровни по high/low последних N свечей
-    const srLookback = 100;
+    // === Bollinger Bands (период 20, 2 сигмы) ===
+    const bbPeriod = 20;
+    const bbMult = 2;
+    const bbUpper = [];
+    const bbMid = [];
+    const bbLower = [];
+
+    for (let i = bbPeriod - 1; i < closes.length; i++) {
+      let sum = 0;
+      for (let j = 0; j < bbPeriod; j++) sum += closes[i - j];
+      const sma = sum / bbPeriod;
+
+      let variance = 0;
+      for (let j = 0; j < bbPeriod; j++) {
+        const diff = closes[i - j] - sma;
+        variance += diff * diff;
+      }
+      const std = Math.sqrt(variance / bbPeriod);
+
+      const t = candles[i].time;
+      bbMid.push({ time: t, value: sma });
+      bbUpper.push({ time: t, value: sma + bbMult * std });
+      bbLower.push({ time: t, value: sma - bbMult * std });
+    }
+
+    bbUpperSeries.setData(bbUpper);
+    bbMidSeries.setData(bbMid);
+    bbLowerSeries.setData(bbLower);
+
+    // === БЛИЖАЙШИЕ СИЛЬНЫЕ УРОВНИ (серым) ===
+    const srLookback = 150;
     const recentCandles = candles.slice(-srLookback);
-    const srLevels = [];
+    const currentPrice = recentCandles[recentCandles.length - 1].close;
+    const newLevels = [];
 
-    if (recentCandles.length >= 20) {
-      // Собираем все high и low
-      const highs = recentCandles.map(c => c.h);
-      const lows = recentCandles.map(c => c.l);
+    if (recentCandles.length >= 30) {
+      const pivotLeftRight = 2;
+      const pivots = [];
 
-      // Кластеризуем уровни с допуском 0.3%
-      const clusterSize = 0.003;
-      const allLevels = [...highs, ...lows];
-      allLevels.sort((a, b) => a - b);
+      for (let i = pivotLeftRight; i < recentCandles.length - pivotLeftRight; i++) {
+        const c = recentCandles[i];
+        let isHigh = true, isLow = true;
+        for (let k = 1; k <= pivotLeftRight; k++) {
+          if (recentCandles[i - k].high >= c.high || recentCandles[i + k].high >= c.high) isHigh = false;
+          if (recentCandles[i - k].low  <= c.low  || recentCandles[i + k].low  <= c.low)  isLow  = false;
+        }
+        if (isHigh) pivots.push({ price: c.high, kind: 'high' });
+        if (isLow)  pivots.push({ price: c.low,  kind: 'low'  });
+      }
 
+      const clusterTol = 0.004;
+      pivots.sort((a, b) => a.price - b.price);
       const clusters = [];
-      let clusterStart = allLevels[0];
-      let clusterCount = 1;
-
-      for (let i = 1; i < allLevels.length; i++) {
-        if (Math.abs(allLevels[i] - clusterStart) / clusterStart < clusterSize) {
-          clusterCount++;
+      
+      for (const p of pivots) {
+        const last = clusters[clusters.length - 1];
+        if (last && Math.abs(p.price - last.price) / last.price < clusterTol) {
+          last.count++;
+          last.price = (last.price * (last.count - 1) + p.price) / last.count;
         } else {
-          clusters.push({ price: clusterStart, count: clusterCount });
-          clusterStart = allLevels[i];
-          clusterCount = 1;
+          clusters.push({ price: p.price, count: 1 });
         }
       }
-      clusters.push({ price: clusterStart, count: clusterCount });
 
-      // Берём топ-5 наиболее частых уровней
-      clusters.sort((a, b) => b.count - a.count);
-      const topLevels = clusters.slice(0, 5).map(c => c.price);
+      const strong = clusters.filter(c => c.count >= 2);
+      
+      const supports = strong
+        .filter(c => c.price < currentPrice)
+        .sort((a, b) => b.price - a.price)
+        .slice(0, 2);
+      const resistances = strong
+        .filter(c => c.price > currentPrice)
+        .sort((a, b) => a.price - b.price)
+        .slice(0, 2);
 
-      // Разделяем на поддержку и сопротивление
-      const currentPrice = recentCandles[recentCandles.length - 1].c;
-      const supportLevels = topLevels.filter(p => p < currentPrice).sort((a, b) => b - a).slice(0, 3);
-      const resistanceLevels = topLevels.filter(p => p > currentPrice).sort((a, b) => a - b).slice(0, 3);
-
-      // Рисуем линии поддержки (зелёные)
-      supportLevels.forEach((price, i) => {
-        const color = ['#22c55e', '#4ade80', '#86efac'][i];
-        const line = candleSeries.createPriceLine({
-          price: price,
-          color: color,
-          lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: 'Support ' + (i + 1),
+      supports.forEach((c) => {
+        newLevels.push({
+          price: c.price,
+          type: 'Support',
+          touches: c.count,
+          title: `S: ${c.price.toFixed(4)} | Касаний: ${c.count}`
         });
-        srLevels.push(line);
       });
-
-      // Рисуем линии сопротивления (красные)
-      resistanceLevels.forEach((price, i) => {
-        const color = ['#ef4444', '#f87171', '#fca5a5'][i];
-        const line = candleSeries.createPriceLine({
-          price: price,
-          color: color,
-          lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: 'Resistance ' + (i + 1),
+      
+      resistances.forEach((c) => {
+        newLevels.push({
+          price: c.price,
+          type: 'Resistance',
+          touches: c.count,
+          title: `R: ${c.price.toFixed(4)} | Касаний: ${c.count}`
         });
-        srLevels.push(line);
       });
+    }
+
+    // === ОБНОВЛЕНИЕ ЛИНИЙ БЕЗ МИГАНИЯ ===
+    // Проходимся по новым уровням и пытаемся найти существующие линии, чтобы обновить их цену.
+    // Если линии нет - создаем новую.
+    newLevels.forEach(nl => {
+      // Ищем линию, которая была на этом же уровне (с допуском 0.1%)
+      const existing = srLinesData.find(s => Math.abs(s.price - nl.price) / nl.price < 0.001);
+      
+      if (existing) {
+        // Обновляем цену и заголовок (без удаления линии)
+        existing.line.applyOptions({
+          price: nl.price,
+          title: nl.title
+        });
+        existing.price = nl.price;
+      } else {
+        // Создаем новую линию, если её не было
+        const line = candleSeries.createPriceLine({
+          price: nl.price,
+          color: 'rgba(148, 163, 184, 0.4)', // 60% прозрачности (40% альфа)
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Solid,
+          axisLabelVisible: false,
+          title: nl.title,
+        });
+        srLinesData.push({ price: nl.price, line: line });
+      }
+    });
+
+    // Удаляем только те линии, которые больше не актуальны
+    for (let i = srLinesData.length - 1; i >= 0; i--) {
+      const sl = srLinesData[i];
+      // Если для этой линии в новом наборе не нашлось пары - значит она устарела
+      const stillExists = newLevels.some(nl => Math.abs(sl.price - nl.price) / nl.price < 0.001);
+      
+      if (!stillExists) {
+        try {
+          candleSeries.removePriceLine(sl.line);
+        } catch (e) {}
+        srLinesData.splice(i, 1);
+      }
     }
 
   } catch (e) {

@@ -5,6 +5,8 @@ import time
 import datetime
 import json
 from contextlib import asynccontextmanager
+import collections
+from datetime import timedelta
 
 from fastapi import FastAPI, Request, Body
 from fastapi.responses import HTMLResponse, Response
@@ -28,6 +30,45 @@ IS_RENDER = os.getenv('IS_RENDER', 'False').lower() == 'true'
 
 trading_bot = None
 
+# Хранилище истории балансов (храним ~20 минут при записи каждые 10 сек)
+balance_history = collections.deque(maxlen=120)
+
+async def record_balance_loop():
+    """Фоновая задача для записи снимков балансов каждые 10 секунд."""
+    await asyncio.sleep(5)  # Даем боту время на инициализацию
+    while True:
+        try:
+            async with SessionLocal() as session:
+                gs = await session.get(Settings, 1)
+                paper_base = float(gs.paper_balance) if gs and gs.paper_balance else 100.0
+                
+                # Реализованный PnL (только закрытые сделки/выходы)
+                hist_res = await session.execute(
+                    select(func.sum(TradeHistory.pnl))
+                    .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+                )
+                realized_pnl = hist_res.scalar() or 0.0
+                
+                # Нереализованный PnL (только открытые сделки)
+                open_res = await session.execute(
+                    select(func.sum(Trade.pnl))
+                    .where(Trade.status.in_(['OPEN', 'PARTIAL']))
+                )
+                open_pnl = open_res.scalar() or 0.0
+                
+                realized_bal = paper_base + realized_pnl
+                live_bal = realized_bal + open_pnl
+                
+                balance_history.append({
+                    'ts': datetime.datetime.utcnow(),
+                    'realized_balance': round(realized_bal, 4),
+                    'live_balance': round(live_bal, 4),
+                })
+        except Exception as e:
+            log.error(f"Balance record error: {e}")
+        
+        await asyncio.sleep(10)
+
 async def run_history_bg():
     await asyncio.sleep(60)
     if trading_bot:
@@ -50,6 +91,10 @@ async def lifespan(app: FastAPI):
     await monitor.start()
     trading_bot = TradingBot(monitor._rest)
     asyncio.create_task(run_history_bg())
+    
+    # НОВАЯ СТРОКА: запускаем сборщик балансов
+    asyncio.create_task(record_balance_loop())
+    
     try:
         yield
     finally:
@@ -334,6 +379,33 @@ async def api_open_pnl():
         )
         total_open_pnl = r.scalar() or 0.0
         return {'total_pnl': round(float(total_open_pnl), 4)}
+
+@app.get('/api/balance_history')
+async def api_balance_history():
+    """Возвращает снимок балансов минуту назад (для расчета дельты)."""
+    now = datetime.datetime.utcnow()
+    one_min_ago = now - timedelta(seconds=60)
+    
+    if not balance_history:
+        return {'ok': True, 'items': []}
+    
+    # Ищем самую свежую запись, которая старше 60 секунд
+    past = [x for x in balance_history if x['ts'] <= one_min_ago]
+    
+    if past:
+        rec = past[-1]
+    else:
+        # Бот работает меньше минуты — берём самую старую запись
+        rec = balance_history[0]
+    
+    return {
+        'ok': True,
+        'items': [{
+            'realized_balance': rec['realized_balance'],
+            'live_balance': rec['live_balance'],
+            'ts': rec['ts'].isoformat(),
+        }]
+    }
 
 @app.get('/api/closed_trades')
 async def api_closed_trades(limit: int = 100):
@@ -903,4 +975,4 @@ async def api_klines(symbol: str, interval: str, limit: int = 200):
         kl = await monitor._rest.get_kline(symbol, interval=interval, limit=limit)
         return {"ok": True, "items": kl}
     except Exception as e:
-        return {"ok": False, "error": str(e)}    
+        return {"ok": False, "error": str(e)}
