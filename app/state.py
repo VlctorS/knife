@@ -211,6 +211,7 @@ def classify_event(
     current_price: float,
     ma_knife: Optional[float],
     ma_anchor: Optional[float],
+    volume_ratio: Optional[float] = None,
 ) -> dict:
     """
     Разделяем всплеск-нож и продолжение тренда.
@@ -219,6 +220,13 @@ def classify_event(
     дальше по направлению ножа. Если на 1d стоит сильный тренд в ту же
     сторону, что и нож — это продолжение, и ловить его нельзя (летящий
     нож). Значит нужен либо флэт на старшем ТФ, либо нож против его тренда.
+
+    Дополнительные фильтры (все согласованы с логикой ножа):
+      - volume_ratio >= min_knife_volume_ratio: движение подтверждено объёмом;
+      - цена отошла от экстремума ножа не менее чем на min_bounce_pct:
+        отскок начался, мы не лезем под падающий нож;
+      - цена не выкупилась выше max_retrace_to_open_pct движения: иначе
+        львиная доля «ножевого» движения уже съедена и матожидание входа плохое.
 
     knife_tf / anchor_tf — списки kline (в хронологическом порядке,
     последний элемент — ещё не закрытая свеча, поэтому берём [-2]).
@@ -238,6 +246,15 @@ def classify_event(
         )
         return out
 
+    # Объёмный всплеск: без подтверждения объёмом считаем движение «тонким»
+    if volume_ratio is not None and volume_ratio < settings.min_knife_volume_ratio:
+        out['reason'] = f'thin move, volume {volume_ratio:.2f}x avg (need >= {settings.min_knife_volume_ratio:.2f}x)'
+        return out
+
+    o, h, l, c = ohlc(knife_tf[-2])
+    rng = h - l
+    knife_mid = (o + c) / 2.0 if rng > 0 else 0.0
+
     anchor_dir, anchor_strength = ('flat', 0.0)
     if anchor_tf and len(anchor_tf) >= 4:
         anchor_dir, anchor_strength = trend_context(anchor_tf[:-1])
@@ -247,15 +264,15 @@ def classify_event(
         if anchor_dir == 'down' and anchor_strength >= settings.max_anchor_trend:
             out['reason'] = f'trend continuation: {anchor_strength:.2f} downtrend on anchor TF'
             return out
-        # Поддержка: цена должна быть уже не «на лету», а выше экстремума ножа
         knife_low = _to_float(knife_tf[-2][K_LOW])
-        if current_price <= knife_low * 1.001:
-            out['reason'] = 'price still at knife low (falling knife)'
+        bounce_pct = (current_price - knife_low) / knife_low * 100.0
+        if current_price <= knife_low * 1.001 or bounce_pct < settings.min_bounce_pct:
+            out['reason'] = f'price still at knife low (falling knife), bounce {bounce_pct:.2f}% < {settings.min_bounce_pct:.2f}%'
             return out
         out['is_spike'] = True
         out['direction'] = 'long'
-        out['confidence'] = _confidence(an, anchor_dir, anchor_strength)
-        out['reason'] = f'knife down, anchor={anchor_dir}/{anchor_strength:.2f}'
+        out['confidence'] = _confidence(an, anchor_dir, anchor_strength, bounce_pct)
+        out['reason'] = f'knife down, anchor={anchor_dir}/{anchor_strength:.2f}, bounce={bounce_pct:.2f}%'
         return out
 
     # Нож вверх -> хотим SHORT. Противник: восходящий тренд на старшем ТФ.
@@ -264,28 +281,39 @@ def classify_event(
             out['reason'] = f'trend continuation: {anchor_strength:.2f} uptrend on anchor TF'
             return out
         knife_high = _to_float(knife_tf[-2][K_HIGH])
-        if current_price >= knife_high * 0.999:
-            out['reason'] = 'price still at knife high (rising blow-off)'
+        bounce_pct = (knife_high - current_price) / knife_high * 100.0
+        if current_price >= knife_high * 0.999 or bounce_pct < settings.min_bounce_pct:
+            out['reason'] = f'price still at knife high (rising blow-off), bounce {bounce_pct:.2f}% < {settings.min_bounce_pct:.2f}%'
             return out
         out['is_spike'] = True
         out['direction'] = 'short'
-        out['confidence'] = _confidence(an, anchor_dir, anchor_strength)
-        out['reason'] = f'knife up, anchor={anchor_dir}/{anchor_strength:.2f}'
+        out['confidence'] = _confidence(an, anchor_dir, anchor_strength, bounce_pct)
+        out['reason'] = f'knife up, anchor={anchor_dir}/{anchor_strength:.2f}, bounce={bounce_pct:.2f}%'
         return out
 
     out['reason'] = 'unknown rejection direction'
     return out
 
 
-def _confidence(an: CandleAnalysis, anchor_dir: str, anchor_strength: float) -> float:
-    """Чем длиннее тень и чем слабее встречный тренд — тем увереннее сигнал."""
+def _confidence(an: CandleAnalysis, anchor_dir: str, anchor_strength: float,
+                bounce_pct: float = 0.0) -> float:
+    """Чем длиннее тень, чем слабее встречный тренд и чем увереннее отскок — тем сильнее сигнал."""
     shadow = max(an.lower_shadow, an.upper_shadow)
-    score = min((shadow - settings.rejection_shadow_pct) / 30.0, 1.0) * 0.5
-    score += (1.0 - min(anchor_strength, 1.0)) * 0.3
+    score = min((shadow - settings.rejection_shadow_pct) / 30.0, 1.0) * 0.45
+    score += (1.0 - min(anchor_strength, 1.0)) * 0.25
     if anchor_dir == 'flat':
-        score += 0.2
+        score += 0.15
     else:
         score -= anchor_strength * 0.2
+    # Отскок: лучший вход там, где цена отошла от экстремума, но не улетела далеко.
+    # Оптимум ~1.5%..6%, свыше штраф за поздний вход.
+    if bounce_pct >= settings.min_bounce_pct:
+        if bounce_pct <= 6.0:
+            score += 0.15
+        elif bounce_pct <= 10.0:
+            score += 0.08
+        else:
+            score -= 0.1
     return max(0.0, min(score, 1.0))
 
 

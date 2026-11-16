@@ -190,18 +190,24 @@ class TradingBot:
                         knife_tf = kline_cache.get(tf) or kl
                         anchor_tf = kline_cache.get('D') if tf != 'D' else None
                         if tf == 'D':
-                            # Для дневного ножа якорем служит недельный контекст из 4h-окна
+                            # Для дневного ножа якорем служит контекст 4h-окна
                             anchor_tf = kline_cache.get('240')
 
                         ma_knife = moving_average(knife_tf, min(settings.ma_period, 20))
                         ma_anchor = moving_average(anchor_tf, min(settings.ma_period, 20)) if anchor_tf else None
 
-                        ev = classify_event(knife_tf, anchor_tf, current_price, ma_knife, ma_anchor)
+                        volume_ratio = volume / avg_vol if avg_vol > 0 else None
+                        ev = classify_event(knife_tf, anchor_tf, current_price, ma_knife, ma_anchor,
+                                            volume_ratio=volume_ratio)
                         min_conf = _pick(cfg.min_confidence if cfg else 0, gs.min_confidence if gs else 0, 0.4)
                         tf_label = {'60': '1h', '240': '4h', 'D': '1d'}.get(tf, tf)
                         
-                        # Вспомогательная функция для определения направления для алерта
-                        side_guess = 'LONG' if (ev.get('direction') == 'long' or 'down' in ev.get('reason', '')) else 'SHORT'
+                        # Направление для алерта берём из анализа свечи: direction есть
+                        # только при подтверждённом спайке, поэтому используем trend_direction
+                        # ножа (down -> ищем LONG на отскоке, up -> SHORT).
+                        an_obj = ev.get('analysis')
+                        is_long_guess = bool(an_obj and an_obj.trend_direction == 'down')
+                        side_guess = 'LONG' if is_long_guess else 'SHORT'
                         kind_guess = 'DUMP' if side_guess == 'LONG' else 'PUMP'
 
                         if not ev['is_spike']:
@@ -215,10 +221,12 @@ class TradingBot:
                                 reason_ru = reason_ru.replace('not a rejection candle', 'Не нож (нет длинной тени)')
                             elif 'trend continuation' in reason_ru:
                                 reason_ru = reason_ru.replace('trend continuation:', 'Продолжение тренда на старшем ТФ. Сила:')
+                            elif 'thin move, volume' in reason_ru:
+                                reason_ru = reason_ru.replace('thin move, volume', 'Тонкое движение без объёма:')
                             elif 'price still at knife low' in reason_ru:
-                                reason_ru = 'Цена все еще на минимуме ножа (падающий нож)'
+                                reason_ru = 'Цена все еще на минимуме ножа (падающий нож, слабого отскока недостаточно)'
                             elif 'price still at knife high' in reason_ru:
-                                reason_ru = 'Цена все еще на максимуме ножа (летящий нож)'
+                                reason_ru = 'Цена все еще на максимуме ножа (летящий нож, слабого отката недостаточно)'
                             elif 'unknown rejection direction' in reason_ru:
                                 reason_ru = 'Неизвестное направление ножа'
 
@@ -268,6 +276,7 @@ class TradingBot:
                             'change_pct': round(change_pct, 2),
                             'volume': volume,
                             'avg_volume': avg_vol,
+                            'volume_ratio': round(volume_ratio, 2) if volume_ratio else None,
                             'open_price': open_price,
                             'close_price': close_price_candle,
                             'high_price': float(last_closed[2]),
