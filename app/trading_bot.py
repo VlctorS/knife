@@ -305,8 +305,8 @@ class TradingBot:
     async def _get_market_snapshot(self, t):
         """Собирает подробный снимок текущего состояния для истории."""
         try:
-            kl_1h = await self.rest.get_kline(t.symbol, interval='60', limit=10)
-            kl_4h = await self.rest.get_kline(t.symbol, interval='240', limit=10)
+            kl_1h = await self.rest.get_kline(t.symbol, interval='60', limit=30)
+            kl_4h = await self.rest.get_kline(t.symbol, interval='240', limit=30)
             st = state.symbols.get(t.symbol)
             
             curr_price = st.last_price if st else t.current_price
@@ -316,31 +316,65 @@ class TradingBot:
             # Текущая и прошлая свеча на 1ч
             c_curr = kl_1h[-1] if kl_1h else [0]*6
             c_prev = kl_1h[-2] if len(kl_1h) > 1 else [0]*6
-            
+
+            age_hours = None
+            ref_time = getattr(t, 'last_action_at', None) or t.opened_at
+            if ref_time:
+                age_hours = (datetime.datetime.utcnow() - ref_time).total_seconds() / 3600.0
+
             # Получаем актуальность разворота
             v = evaluate_validity(
                 symbol=t.symbol, side=t.side,
                 current_price=curr_price, avg_entry_price=t.avg_entry_price,
                 klines_1h=kl_1h, klines_4h=kl_4h,
-                ma_1h=ma_1h, ma_4h=ma_4h
+                ma_1h=ma_1h, ma_4h=ma_4h,
+                age_hours=age_hours,
             )
-            
-            return {
+
+            snapshot = {
                 "current_price": curr_price,
                 "avg_price": t.avg_entry_price,
                 "pnl": t.pnl,
+                "realized_pnl": t.realized_pnl,
                 "position_size_usdt": t.total_qty * curr_price,
                 "total_qty": t.total_qty,
                 "grid_step": t.grid_step,
                 "exit_step": t.exit_step,
+                "max_steps": t.max_steps,
+                "exit_max_steps": getattr(t, 'exit_max_steps', 0),
+                "trade_age_hours": round(age_hours, 2) if age_hours is not None else None,
                 "validity_status": v.status,
                 "validity_score": v.score,
-                "validity_reasons": v.reasons,
+                "validity_reasons": list(v.reasons or []),
+                "validity_metrics": v.metrics,
+                "validity_verdict": v.verdict,
                 "ma_1h": ma_1h,
                 "ma_4h": ma_4h,
                 "curr_candle": {"open": float(c_curr[1]), "high": float(c_curr[2]), "low": float(c_curr[3]), "close": float(c_curr[4]), "vol": float(c_curr[5])},
                 "prev_candle": {"open": float(c_prev[1]), "high": float(c_prev[2]), "low": float(c_prev[3]), "close": float(c_prev[4]), "vol": float(c_prev[5])}
             }
+
+            # Баланс на момент события (бумажный + реализованный + нереализованный)
+            try:
+                async with SessionLocal() as s_sess:
+                    gs_row = await s_sess.get(Settings, 1)
+                    paper_base = float(gs_row.paper_balance) if gs_row and gs_row.paper_balance else 100.0
+                    realized_res = await s_sess.execute(
+                        select(sa_func.sum(TradeHistory.pnl))
+                        .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+                    )
+                    realized_total = realized_res.scalar() or 0.0
+                    open_res = await s_sess.execute(
+                        select(sa_func.sum(Trade.pnl))
+                        .where(Trade.status.in_(['OPEN', 'PARTIAL']))
+                    )
+                    open_total = open_res.scalar() or 0.0
+                    snapshot["balance_realized"] = round(paper_base + realized_total, 4)
+                    snapshot["balance_live"] = round(paper_base + realized_total + open_total, 4)
+            except Exception as bal_err:
+                log.debug('Balance in snapshot failed for %s: %r', t.symbol, bal_err)
+
+            return snapshot
         except Exception as e:
             log.warning(f"Failed to get snapshot for {t.symbol}: {e}")
             return {}
@@ -399,6 +433,7 @@ class TradingBot:
 
         Возвращает ValidityResult или None если данных недостаточно.
         Побочный эффект: обновляет t.validity и t.validity_reasons (JSON).
+        Красный цвет разрешён только после cooldown-периода с момента входа/усреднения.
         """
         try:
             kl_1h = await self.rest.get_kline(t.symbol, interval='60', limit=30)
@@ -410,6 +445,12 @@ class TradingBot:
             st = state.symbols.get(t.symbol)
             current_price = st.last_price if st and st.last_price > 0 else t.current_price
 
+            # Возраст сделки в часах — для cooldown индикатора разворота
+            age_hours = None
+            ref_time = getattr(t, 'last_action_at', None) or t.opened_at
+            if ref_time:
+                age_hours = (datetime.datetime.utcnow() - ref_time).total_seconds() / 3600.0
+
             v = evaluate_validity(
                 symbol=t.symbol,
                 side=t.side,
@@ -419,6 +460,7 @@ class TradingBot:
                 klines_4h=kl_4h,
                 ma_1h=ma_1h,
                 ma_4h=ma_4h,
+                age_hours=age_hours,
             )
             if v:
                 t.validity = v.status
@@ -507,16 +549,7 @@ class TradingBot:
 
                 # --- 0. ВАЛИДАЦИЯ РАЗВОРОТА И ЛОГИРОВАНИЕ СМЕНЫ ЦВЕТА ---
                 # Проверяем не чаще раза в 60 секунд (используя время из БД)
-                hist_res = await session.execute(
-                    select(TradeHistory.ts)
-                    .where(TradeHistory.trade_id == t.id)
-                    .order_by(TradeHistory.ts.desc())
-                    .limit(1)
-                )
-                last_hist_ts = hist_res.scalar()
-                
                 need_check = True
-                # Если с момента последней записи в истории прошло < 60 секунд, и это была не VALIDITY_CHANGE
                 hist_res = await session.execute(
                     select(TradeHistory.ts, TradeHistory.action)
                     .where(TradeHistory.trade_id == t.id)
@@ -527,13 +560,13 @@ class TradingBot:
                 if last_hist:
                     last_hist_ts, last_action = last_hist
                     delta = (datetime.datetime.utcnow() - last_hist_ts).total_seconds()
-                    # Если последняя запись была VALIDITY_CHANGE или прошло > 60 сек, проверяем
+                    # После VALIDITY_CHANGE — cooldown 60 сек
                     if last_action == 'VALIDITY_CHANGE' and delta < 60:
                         need_check = False
+                    # После любого другого события (открытие/усреднение/выход) — cooldown 15 сек
                     elif last_action != 'VALIDITY_CHANGE' and delta < 15:
-                        # Если недавно было событие (открытие/усреднение), ждем 15 сек
                         need_check = False
-                
+
                 validity = None
 
                 if need_check:
@@ -549,6 +582,9 @@ class TradingBot:
                         except Exception:
                             t.validity_reasons = ""
                         
+                        # Обновляем last_action_at — для cooldown индикатора
+                        t.last_action_at = datetime.datetime.utcnow()
+                        
                         # Принудительно сохраняем статус в БД, чтобы он не сбросился
                         await session.commit()
                         
@@ -556,15 +592,27 @@ class TradingBot:
                             # Собираем снимок индикаторов
                             snapshot = await self._get_market_snapshot(t)
                             
+                            # Формируем подробное обоснование смены цвета
+                            verdict_text = ''
+                            if v.verdict:
+                                verdict_text = v.verdict.get('explanation', '')
+                                verdict_note = v.verdict.get('note', '')
+                                if verdict_note:
+                                    verdict_text = verdict_note + '. ' + verdict_text if verdict_text else verdict_note
+                            
+                            hist_notes = f"Смена статуса разворота: {old_status} -> {v.status}. Оценка: {v.score:.2f}"
+                            if verdict_text:
+                                hist_notes += f"\nОбоснование: {verdict_text}"
+
                             history = TradeHistory(
                                 trade_id=t.id, action='VALIDITY_CHANGE', price=price, qty=t.total_qty,
                                 margin=t.total_margin, pnl=t.pnl, 
-                                notes=f"Смена статуса разворота: {old_status} -> {v.status}. Оценка: {v.score:.2f}",
+                                notes=hist_notes,
                                 details=json.dumps(snapshot)
                             )
                             session.add(history)
                             await session.commit()
-                            log.info(f"VALIDITY CHANGE {t.symbol}: {old_status} -> {v.status}")
+                            log.info(f"VALIDITY CHANGE {t.symbol}: {old_status} -> {v.status}. {verdict_text}")
 
 
                 # --- 1. ЛОГИКА УСРЕДНЕНИЯ ---

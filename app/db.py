@@ -124,7 +124,8 @@ class Trade(Base):
     # --- Новые поля ---
     validity: Mapped[str] = mapped_column(String, default='green')          # green / orange / red
     validity_reasons: Mapped[Optional[str]] = mapped_column(Text, nullable=True)      # JSON-массив причин
-    exit_max_steps: Mapped[int] = mapped_column(Integer, default=0)         # 0 = без ограничения
+    exit_max_steps: Mapped[int] = mapped_column(Integer, default=0)  # 0 = без ограничения
+    last_action_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, nullable=True)  # для cooldown индикатора
 
 
 class TradeHistory(Base):
@@ -181,6 +182,7 @@ def _migrate_add_columns(conn):
         ('trades', 'validity', "VARCHAR DEFAULT 'green'"),
         ('trades', 'validity_reasons', 'TEXT'),
         ('trades', 'exit_max_steps', 'INTEGER DEFAULT 0'),
+        ('trades', 'last_action_at', 'TIMESTAMP'),
     ]
     for table, column, ddl in additions:
         if table not in insp.get_table_names():

@@ -1062,21 +1062,41 @@ async function openHistory(tradeId, symbol) {
           ['Цена сейчас', fmtNum(dt.current_price)],
           ['Средняя цена', fmtNum(dt.avg_price)],
           ['PnL (текущий)', fmtNum(dt.pnl, 4) + ' USDT'],
+          ['Реализовано', fmtNum(dt.realized_pnl, 4) + ' USDT'],
           ['Размер позиции', fmtNum(dt.position_size_usdt, 2) + ' USDT'],
           ['Контрактов', fmtNum(dt.total_qty, 4)],
-          ['Шаг сетки', dt.grid_step ?? '—'],
-          ['Шаг выхода', dt.exit_step ?? '—'],
+          ['Шаг сетки', `${dt.grid_step ?? '—'} / ${dt.max_steps ?? '—'}`],
+          ['Шаг выхода', `${dt.exit_step ?? '—'}${dt.exit_max_steps ? ' / ' + dt.exit_max_steps : ''}`],
+          ['Баланс (реализ.)', dt.balance_realized != null ? fmtNum(dt.balance_realized, 4) + ' USDT' : '—'],
+          ['Баланс (живой)', dt.balance_live != null ? fmtNum(dt.balance_live, 4) + ' USDT' : '—'],
           ['MA 1ч', fmtNum(dt.ma_1h)],
           ['MA 4ч', fmtNum(dt.ma_4h)],
-          ['Статус разворота', `<span style="color:${validColor}; font-weight:600;">${dt.validity_status}</span> (score: ${dt.validity_score ?? '—'})`],
+          ['Статус разворота', `<span style="color:${validColor}; font-weight:600;">${dt.validity_status}</span> (score: ${dt.validity_score ?? '—'}${dt.trade_age_hours != null ? ', возраст: ' + dt.trade_age_hours + ' ч' : ''})`],
           ['Причины', (dt.validity_reasons || []).join('; ') || '—'],
           ['Свеча 1ч (тек)', `O: ${fmtNum(dt.curr_candle?.open)} H: ${fmtNum(dt.curr_candle?.high)} L: ${fmtNum(dt.curr_candle?.low)} C: ${fmtNum(dt.curr_candle?.close)} V: ${fmtNum(dt.curr_candle?.vol, 0)}`],
           ['Свеча 1ч (прошлая)', `O: ${fmtNum(dt.prev_candle?.open)} H: ${fmtNum(dt.prev_candle?.high)} L: ${fmtNum(dt.prev_candle?.low)} C: ${fmtNum(dt.prev_candle?.close)} V: ${fmtNum(dt.prev_candle?.vol, 0)}`],
         ];
+
+        // Подробное обоснование решения о цвете индикатора разворота
+        let verdictHtml = '';
+        if (dt.validity_verdict) {
+          const v = dt.validity_verdict;
+          const checksHtml = (v.checks || []).map(c =>
+            `<div style="margin-left:12px;">${c.passed ? '✅' : '❌'} <b>${c.name}</b>: ${c.detail}</div>`
+          ).join('');
+          verdictHtml = `
+            <div style="margin-top:8px; padding:8px; background:#141820; border-left:3px solid ${validColor}; border-radius:4px;">
+              <div><span class="muted">Решение:</span> <b style="color:${validColor};">${v.decision || '—'}</b>${v.in_cooldown ? ' <span style="color:#f59e0b;">(cooldown после входа)</span>' : ''}</div>
+              <div><span class="muted">Обоснование:</span> ${v.note || '—'}</div>
+              ${checksHtml ? `<div style="margin-top:4px;"><span class="muted">Структурные проверки:</span>${checksHtml}</div>` : ''}
+            </div>
+          `;
+        }
         
         detailsHtml = `
           <div class="history-details" style="margin-top:10px; padding:10px; background:#0e1117; border-radius:6px; font-family:monospace; font-size:12px; line-height:1.6;">
             ${rows.map(([k, v]) => `<div><span class="muted">${k}:</span> <b>${v}</b></div>`).join('')}
+            ${verdictHtml}
           </div>
         `;
       } else if (hasDetails) {
@@ -1171,14 +1191,26 @@ function copyFullHistory(symbolName = 'Trade') {
       text += `  Цена сейчас: ${fmtNum(dt.current_price)}\n`;
       text += `  Средняя цена: ${fmtNum(dt.avg_price)}\n`;
       text += `  PnL: ${fmtNum(dt.pnl, 4)} USDT\n`;
+      text += `  Реализовано: ${fmtNum(dt.realized_pnl, 4)} USDT\n`;
       text += `  Размер позиции: ${fmtNum(dt.position_size_usdt, 2)} USDT\n`;
       text += `  Контрактов: ${fmtNum(dt.total_qty, 4)}\n`;
-      text += `  Шаг сетки: ${dt.grid_step ?? '—'}\n`;
-      text += `  Шаг выхода: ${dt.exit_step ?? '—'}\n`;
+      text += `  Шаг сетки: ${dt.grid_step ?? '—'} / ${dt.max_steps ?? '—'}\n`;
+      text += `  Шаг выхода: ${dt.exit_step ?? '—'}${dt.exit_max_steps ? ' / ' + dt.exit_max_steps : ''}\n`;
+      if (dt.balance_realized != null) text += `  Баланс (реализ.): ${fmtNum(dt.balance_realized, 4)} USDT\n`;
+      if (dt.balance_live != null) text += `  Баланс (живой): ${fmtNum(dt.balance_live, 4)} USDT\n`;
       text += `  MA 1ч: ${fmtNum(dt.ma_1h)}\n`;
       text += `  MA 4ч: ${fmtNum(dt.ma_4h)}\n`;
-      text += `  Статус разворота: ${dt.validity_status} (score: ${dt.validity_score ?? '—'})\n`;
+      text += `  Статус разворота: ${dt.validity_status} (score: ${dt.validity_score ?? '—'}${dt.trade_age_hours != null ? ', возраст: ' + dt.trade_age_hours + ' ч' : ''})\n`;
       text += `  Причины: ${(dt.validity_reasons || []).join('; ') || '—'}\n`;
+      if (dt.validity_verdict) {
+        const v = dt.validity_verdict;
+        text += `  --- Обоснование смены цвета ---\n`;
+        text += `  Решение: ${v.decision || '—'}${v.in_cooldown ? ' (cooldown после входа)' : ''}\n`;
+        text += `  Примечание: ${v.note || '—'}\n`;
+        (v.checks || []).forEach(c => {
+          text += `    ${c.passed ? '[ДА]' : '[НЕТ]'} ${c.name}: ${c.detail}\n`;
+        });
+      }
       if (dt.curr_candle) {
         text += `  Свеча 1ч (тек): O=${fmtNum(dt.curr_candle.open)} H=${fmtNum(dt.curr_candle.high)} L=${fmtNum(dt.curr_candle.low)} C=${fmtNum(dt.curr_candle.close)} V=${fmtNum(dt.curr_candle.vol, 0)}\n`;
       }
