@@ -81,7 +81,6 @@ async def run_history_bg():
 async def lifespan(app: FastAPI):
     global trading_bot
 
-    # --- IS_RENDER: логируем режим, проверяем PORT на Render ---
     if IS_RENDER and not os.getenv('PORT'):
         log.warning('IS_RENDER=True, но PORT не задан — Render обычно прокидывает его автоматически')
     else:
@@ -90,14 +89,25 @@ async def lifespan(app: FastAPI):
     await init_db()
     await monitor.start()
     trading_bot = TradingBot(monitor._rest)
-    asyncio.create_task(run_history_bg())
     
-    # НОВАЯ СТРОКА: запускаем сборщик балансов
-    asyncio.create_task(record_balance_loop())
+    # Сохраняем задачи, чтобы потом корректно их завершить
+    task_history = asyncio.create_task(run_history_bg())
+    task_balance = asyncio.create_task(record_balance_loop())
     
     try:
         yield
     finally:
+        task_history.cancel()
+        task_balance.cancel()
+        try:
+            await task_history
+        except asyncio.CancelledError:
+            pass
+        try:
+            await task_balance
+        except asyncio.CancelledError:
+            pass
+            
         await monitor.stop()
         log.info('Бот остановлен')
 
@@ -635,6 +645,14 @@ async def api_trade_history(trade_id: int):
         exit_qty = trade.total_qty * (close_pct / 100.0)
         est_profit = exit_qty * abs(next_exit_price - trade.avg_entry_price)
         
+        # --- АКТУАЛЬНЫЙ MAX_STEPS ДЛЯ ОТОБРАЖЕНИЯ ---
+        # Берем из индивидуального конфига, иначе из глобального, иначе из сделки
+        actual_max_steps = trade.max_steps
+        if cfg and cfg.max_steps > 0:
+            actual_max_steps = cfg.max_steps
+        elif gs and gs.max_steps > 0:
+            actual_max_steps = gs.max_steps
+
         r = await session.execute(
             select(TradeHistory).where(TradeHistory.trade_id == trade_id).order_by(TradeHistory.ts)
         )
@@ -643,10 +661,24 @@ async def api_trade_history(trade_id: int):
         for h in r.scalars().all():
             pnl_to_show = float(h.pnl) if h.action in ('PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE') and h.pnl else 0.0
             
+            # Парсим JSON со снимком
+            details = {}
+            if h.details:
+                try:
+                    if h.details.strip() and h.details.strip() != 'null':
+                        details = json.loads(h.details)
+                except Exception:
+                    pass
+
             items.append({
-                'ts': h.ts.isoformat(), 'action': h.action, 'price': float(h.price) if h.price else 0.0,
-                'qty': float(h.qty) if h.qty else 0.0, 'margin': float(h.margin) if h.margin else 0.0, 
-                'pnl': pnl_to_show, 'notes': h.notes,
+                'ts': h.ts.isoformat(), 
+                'action': h.action, 
+                'price': float(h.price) if h.price else 0.0,
+                'qty': float(h.qty) if h.qty else 0.0, 
+                'margin': float(h.margin) if h.margin else 0.0, 
+                'pnl': pnl_to_show, 
+                'notes': h.notes,
+                'details': details
             })
             
         return {
@@ -655,7 +687,7 @@ async def api_trade_history(trade_id: int):
             'next_grid_price': round(float(next_grid_price), 6),
             'next_grid_size': round(float(next_grid_size), 2),
             'current_grid_step': current_grid_step,
-            'max_steps': trade.max_steps,
+            'max_steps': actual_max_steps, # <-- ПЕРЕДАЕМ АКТУАЛЬНОЕ ЗНАЧЕНИЕ
             'next_exit_pct': round(next_exit_pct, 2),
             'next_exit_price': round(float(next_exit_price), 6),
             'exit_close_pct': close_pct,

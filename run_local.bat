@@ -30,5 +30,5 @@ if not exist .env (
 
 REM --- Запуск (--reload удобен при разработке; для стабильности уберите его) ---
 echo Starting Knife Bot locally (IS_RENDER=%IS_RENDER%)...
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn app.main:app --host 127.0.0.1 --port 8000
 pause

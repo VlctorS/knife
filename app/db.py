@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-
+from typing import Optional
 from sqlalchemy import String, Float, Integer, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
@@ -123,7 +123,7 @@ class Trade(Base):
 
     # --- Новые поля ---
     validity: Mapped[str] = mapped_column(String, default='green')          # green / orange / red
-    validity_reasons: Mapped[str] = mapped_column(Text, nullable=True)      # JSON-массив причин
+    validity_reasons: Mapped[Optional[str]] = mapped_column(Text, nullable=True)      # JSON-массив причин
     exit_max_steps: Mapped[int] = mapped_column(Integer, default=0)         # 0 = без ограничения
 
 

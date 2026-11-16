@@ -892,6 +892,12 @@ async function loadClosedTrades() {
     if (h.action === 'FULL_CLOSE') actionName = 'Полное закрытие';
     if (h.action === 'MANUAL_CLOSE') actionName = 'Ручное закрытие';
 
+    const hasDetails = h.details && Object.keys(h.details).length > 0;
+    const detailsIcon = hasDetails 
+      ? `<span title="Показать детали" style="cursor:pointer; color:#2563eb;" onclick='showSnapshot(${JSON.stringify(h.details)})'>ℹ️</span>` 
+      : '';
+
+
     return '<tr>'+
       '<td class="muted">'+timeStr+'</td>'+
       '<td>'+h.symbol+'</td>'+
@@ -900,9 +906,35 @@ async function loadClosedTrades() {
       '<td>'+fmtNum(h.price)+'</td>'+
       '<td>'+fmtNum(h.qty, 2)+'</td>'+
       '<td class="'+pnlClass+'">'+fmtNum(h.pnl, 4)+'</td>'+
-      '<td><button style="padding:4px 8px; font-size:12px;" onclick="openHistory('+h.trade_id+', \''+h.symbol+'\')">📋</button></td>'+
+      '<td style="display:flex; gap:8px;">'+
+        '<button style="padding:4px 8px; font-size:12px;" onclick="openHistory('+h.trade_id+', \''+h.symbol+'\')">📋</button>'+
+        (hasDetails 
+          ? '<button style="padding:4px 8px; font-size:12px; background:#2563eb;" onclick=\'showSnapshot(' + JSON.stringify(h.details).replace(/'/g, "&#39;") + ')\'>ℹ️</button>' 
+          : '')+
+      '</td>'+
     '</tr>';
   }).join('');
+}
+
+function showSnapshot(data) {
+  if (!data) return;
+  const m = document.getElementById('entry-details-modal');
+  document.getElementById('details-title').textContent = 'Снимок индикаторов';
+  
+  let html = '<table style="width:100%; font-size:13px;">';
+  for (const [k, v] of Object.entries(data)) {
+    let val = v;
+    if (typeof v === 'object' && v !== null) {
+      val = JSON.stringify(v);
+    } else if (typeof v === 'number') {
+      val = v.toFixed(5);
+    }
+    html += `<tr><td class="muted">${k}</td><td><b>${val}</b></td></tr>`;
+  }
+  html += '</table>';
+  
+  document.getElementById('details-content').innerHTML = html;
+  m.classList.add('active');
 }
 
 async function deleteClosedTrade(tradeId) {
@@ -953,80 +985,240 @@ async function openHistory(tradeId, symbol) {
   document.getElementById('history-content').innerHTML = '<p class="muted">Загрузка...</p>';
   document.getElementById('history-modal').classList.add('active');
   
-  const d = await (await fetch('/api/trade_history?trade_id=' + tradeId)).json();
-  if (!d.items.length) {
-    document.getElementById('history-content').innerHTML = '<p class="muted">Нет операций</p>';
+  try {
+    const res = await fetch('/api/trade_history?trade_id=' + tradeId);
+    
+    // Если сервер вернул ошибку
+    if (!res.ok) {
+      document.getElementById('history-content').innerHTML = `<p class="dump">Ошибка сервера: HTTP ${res.status}</p>`;
+      return;
+    }
+    
+    const d = await res.json();
+    
+    // Если история пуста
+    if (!d.items || !d.items.length) {
+      document.getElementById('history-content').innerHTML = '<p class="muted">Нет операций</p>';
+      return;
+    }
+    
+    // Сохраняем данные в глобал для кнопки копирования
+    window._currentTradeHistory = d;
+    
+    // Сортируем по времени (на всякий случай)
+    const items = [...d.items].sort((a, b) => new Date(a.ts) - new Date(b.ts));
+    
+    // Итог по PnL
+    let totalRealizedPnl = 0;
+    items.forEach(h => { if (h.action.includes('CLOSE')) totalRealizedPnl += (h.pnl || 0); });
+    
+    // Шапка с информацией о следующих шагах
+    const gridLine = `Следующее уср. (${d.next_grid_pct}%) по цене ${d.next_grid_price} на ${d.next_grid_size} USDT (шаг ${d.current_grid_step} из ${d.max_steps})`;
+    const exitLine = `Ближайший выход (${d.next_exit_pct}%) по цене ${d.next_exit_price} ${d.exit_close_pct}% контрактов [${d.exit_qty} ${symbol}] = ${d.est_profit} USDT`;
+
+    const titleHtml = `
+      <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+        <div>
+          <div style="font-size:16px; font-weight:600; margin-bottom:4px;">История: ${symbol}</div>
+          <div style="font-size:13px; color:#8a93a6; line-height:1.6;">
+            <div>${gridLine}</div>
+            <div>${exitLine}</div>
+          </div>
+        </div>
+        <button onclick="copyFullHistory('${symbol}')" style="background:#10b981; padding:6px 12px; font-size:12px; white-space:nowrap; border:none; border-radius:6px; cursor:pointer;">📋 Копировать всю историю</button>
+      </div>
+    `;
+    document.getElementById('history-title').innerHTML = titleHtml;
+
+    // ---- Рендер списка логов ----
+    const html = items.map((h, idx) => {
+      const timeStr = new Date(h.ts + 'Z').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+      
+      let actionName = h.action;
+      let actionClass = '';
+      if (h.action === 'OPEN') actionName = '🟢 Открытие';
+      if (h.action === 'GRID_ADD') actionName = '🟡 Усреднение';
+      if (h.action === 'PARTIAL_CLOSE') { actionName = '🟢 Частичный выход'; actionClass = 'pump'; }
+      if (h.action === 'FULL_CLOSE') { actionName = '🟢 Полное закрытие'; actionClass = 'pump'; }
+      if (h.action === 'MANUAL_CLOSE') { actionName = '🟢 Ручное закрытие'; actionClass = 'pump'; }
+      if (h.action === 'VALIDITY_CHANGE') { actionName = '🟠 Смена разворота'; actionClass = 'reason-radar'; }
+      if (h.action === 'SNAPSHOT') actionName = '📸 Снимок состояния';
+
+      const pnlStr = h.pnl !== 0 
+        ? `<span class="${h.pnl > 0 ? 'pump' : 'dump'}">${h.pnl > 0 ? '+' : ''}${fmtNum(h.pnl, 4)} USDT</span>` 
+        : '<span class="muted">—</span>';
+
+      const hasDetails = h.details && Object.keys(h.details).length > 0;
+      
+      // Формируем строку деталей (если есть)
+      let detailsHtml = '';
+      if (hasDetails && h.details.validity_status) {
+        const dt = h.details;
+        const validColor = dt.validity_status === 'green' ? '#22c55e' 
+                         : dt.validity_status === 'orange' ? '#f59e0b' 
+                         : '#ef4444';
+        
+        const rows = [
+          ['Цена сейчас', fmtNum(dt.current_price)],
+          ['Средняя цена', fmtNum(dt.avg_price)],
+          ['PnL (текущий)', fmtNum(dt.pnl, 4) + ' USDT'],
+          ['Размер позиции', fmtNum(dt.position_size_usdt, 2) + ' USDT'],
+          ['Контрактов', fmtNum(dt.total_qty, 4)],
+          ['Шаг сетки', dt.grid_step ?? '—'],
+          ['Шаг выхода', dt.exit_step ?? '—'],
+          ['MA 1ч', fmtNum(dt.ma_1h)],
+          ['MA 4ч', fmtNum(dt.ma_4h)],
+          ['Статус разворота', `<span style="color:${validColor}; font-weight:600;">${dt.validity_status}</span> (score: ${dt.validity_score ?? '—'})`],
+          ['Причины', (dt.validity_reasons || []).join('; ') || '—'],
+          ['Свеча 1ч (тек)', `O: ${fmtNum(dt.curr_candle?.open)} H: ${fmtNum(dt.curr_candle?.high)} L: ${fmtNum(dt.curr_candle?.low)} C: ${fmtNum(dt.curr_candle?.close)} V: ${fmtNum(dt.curr_candle?.vol, 0)}`],
+          ['Свеча 1ч (прошлая)', `O: ${fmtNum(dt.prev_candle?.open)} H: ${fmtNum(dt.prev_candle?.high)} L: ${fmtNum(dt.prev_candle?.low)} C: ${fmtNum(dt.prev_candle?.close)} V: ${fmtNum(dt.prev_candle?.vol, 0)}`],
+        ];
+        
+        detailsHtml = `
+          <div class="history-details" style="margin-top:10px; padding:10px; background:#0e1117; border-radius:6px; font-family:monospace; font-size:12px; line-height:1.6;">
+            ${rows.map(([k, v]) => `<div><span class="muted">${k}:</span> <b>${v}</b></div>`).join('')}
+          </div>
+        `;
+      } else if (hasDetails) {
+        detailsHtml = `<div class="muted" style="font-size:12px; margin-top:6px;">(детальный снимок недоступен — запись создана до обновления)</div>`;
+      }
+
+      return `
+        <div class="history-log-item" style="border-bottom:1px solid #252b36; padding:12px 0;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div style="flex:1;">
+              <div style="font-size:13px; margin-bottom:4px;">
+                <span class="muted">${timeStr}</span>
+                &nbsp;|&nbsp; <span class="${actionClass}" style="font-weight:600;">${actionName}</span>
+                ${h.price ? ` &nbsp;|&nbsp; <span>Цена: <b>${fmtNum(h.price)}</b></span>` : ''}
+                ${h.qty ? ` &nbsp;|&nbsp; <span>Кол-во: <b>${fmtNum(h.qty, 2)}</b></span>` : ''}
+                &nbsp;|&nbsp; PnL: ${pnlStr}
+              </div>
+              ${h.notes ? `<div class="muted" style="font-size:12px; margin-top:2px;">${h.notes}</div>` : ''}
+              ${detailsHtml}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    const totalHtml = items.some(h => h.action.includes('CLOSE')) ? `
+      <div style="margin-top:16px; padding:12px; background:#141820; border-radius:6px; border:1px solid #252b36; text-align:right;">
+        <b>Итого реализовано по сделке:</b> 
+        <span class="${totalRealizedPnl > 0 ? 'pump' : (totalRealizedPnl < 0 ? 'dump' : '')}">
+          ${totalRealizedPnl > 0 ? '+' : ''}${fmtNum(totalRealizedPnl, 4)} USDT
+        </span>
+      </div>
+    ` : '';
+
+    document.getElementById('history-content').innerHTML = html + totalHtml;
+
+  } catch (e) {
+    console.error('History error:', e);
+    document.getElementById('history-content').innerHTML = `<p class="dump">Ошибка JS: ${e.message}</p>`;
+  }
+}
+
+function copyFullHistory(symbolName = 'Trade') {
+  const d = window._currentTradeHistory;
+
+  if (!d || !d.items || !d.items.length) {
+    alert('История пуста');
     return;
   }
+
+  const fmtNum = (n, d=6) => n==null ? "—" : Number(n).toLocaleString(undefined,{maximumFractionDigits:d});
   
-  const openRecord = d.items.find(h => h.action === 'OPEN');
-  let openChange = null;
-  if (openRecord && openRecord.notes) {
-    const match = openRecord.notes.match(/change: ([\-\d\.]+)%/);
-    if (match) openChange = parseFloat(match[1]);
+  // Надежно достаем символ из OPEN-записи
+  const openRec = d.items.find(h => h.action === 'OPEN');
+  const symMatch = openRec?.notes?.match(/^(?:LONG|SHORT)\s+(\w+)/);
+  const symbolFromNotes = symMatch ? symMatch[1] : 'Trade';
+
+  let text = `=== История сделки: ${symbolName} ===\n`;
+
+  text += `Сгенерировано: ${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })} МСК\n`;
+  text += `Следующее уср.: ${d.next_grid_pct}% по ${d.next_grid_price} на ${d.next_grid_size} USDT (шаг ${d.current_grid_step}/${d.max_steps})\n`;
+  text += `Ближайший выход: ${d.next_exit_pct}% по ${d.next_exit_price} ${d.exit_close_pct}% контрактов = ${d.est_profit} USDT\n`;
+  text += '='.repeat(80) + '\n\n';
+
+  // Сортируем по времени
+  const items = [...d.items].sort((a, b) => new Date(a.ts) - new Date(b.ts));
+
+  let totalPnl = 0;
+  items.forEach(h => { if (h.action.includes('CLOSE')) totalPnl += (h.pnl || 0); });
+
+  for (const h of items) {
+    const timeStr = new Date(h.ts + 'Z').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+
+    let actionName = h.action;
+    if (h.action === 'OPEN') actionName = 'ОТКРЫТИЕ';
+    if (h.action === 'GRID_ADD') actionName = 'УСРЕДНЕНИЕ';
+    if (h.action === 'PARTIAL_CLOSE') actionName = 'ЧАСТИЧНЫЙ ВЫХОД';
+    if (h.action === 'FULL_CLOSE') actionName = 'ПОЛНОЕ ЗАКРЫТИЕ';
+    if (h.action === 'MANUAL_CLOSE') actionName = 'РУЧНОЕ ЗАКРЫТИЕ';
+    if (h.action === 'VALIDITY_CHANGE') actionName = 'СМЕНА РАЗВОРОТА';
+    if (h.action === 'SNAPSHOT') actionName = 'СНИМОК';
+
+    text += `[${timeStr}] ${actionName}\n`;
+    if (h.price) text += `  Цена: ${fmtNum(h.price)}\n`;
+    if (h.qty) text += `  Кол-во: ${fmtNum(h.qty, 2)}\n`;
+    if (h.pnl) text += `  PnL: ${h.pnl > 0 ? '+' : ''}${fmtNum(h.pnl, 4)} USDT\n`;
+    if (h.notes) text += `  Примечание: ${h.notes}\n`;
+
+    if (h.details && h.details.validity_status) {
+      const dt = h.details;
+      text += `  --- Снимок индикаторов ---\n`;
+      text += `  Цена сейчас: ${fmtNum(dt.current_price)}\n`;
+      text += `  Средняя цена: ${fmtNum(dt.avg_price)}\n`;
+      text += `  PnL: ${fmtNum(dt.pnl, 4)} USDT\n`;
+      text += `  Размер позиции: ${fmtNum(dt.position_size_usdt, 2)} USDT\n`;
+      text += `  Контрактов: ${fmtNum(dt.total_qty, 4)}\n`;
+      text += `  Шаг сетки: ${dt.grid_step ?? '—'}\n`;
+      text += `  Шаг выхода: ${dt.exit_step ?? '—'}\n`;
+      text += `  MA 1ч: ${fmtNum(dt.ma_1h)}\n`;
+      text += `  MA 4ч: ${fmtNum(dt.ma_4h)}\n`;
+      text += `  Статус разворота: ${dt.validity_status} (score: ${dt.validity_score ?? '—'})\n`;
+      text += `  Причины: ${(dt.validity_reasons || []).join('; ') || '—'}\n`;
+      if (dt.curr_candle) {
+        text += `  Свеча 1ч (тек): O=${fmtNum(dt.curr_candle.open)} H=${fmtNum(dt.curr_candle.high)} L=${fmtNum(dt.curr_candle.low)} C=${fmtNum(dt.curr_candle.close)} V=${fmtNum(dt.curr_candle.vol, 0)}\n`;
+      }
+      if (dt.prev_candle) {
+        text += `  Свеча 1ч (прош): O=${fmtNum(dt.prev_candle.open)} H=${fmtNum(dt.prev_candle.high)} L=${fmtNum(dt.prev_candle.low)} C=${fmtNum(dt.prev_candle.close)} V=${fmtNum(dt.prev_candle.vol, 0)}\n`;
+      }
+    } else if (h.details && Object.keys(h.details).length > 0) {
+      text += `  (снимок индикаторов не был сохранён — запись создана до обновления)\n`;
+    }
+    text += '\n';
   }
-  
-  let title = `История: ${symbol}`;
-  if (openChange !== null) title += ` (вход при ${openChange.toFixed(2)}%)`;
-  
-  const gridLine = `Следующее уср. (${d.next_grid_pct}%) по цене ${d.next_grid_price} на ${d.next_grid_size} USDT (шаг ${d.current_grid_step} из ${d.max_steps})`;
-  const exitLine = `Ближайший выход (${d.next_exit_pct}%) по цене ${d.next_exit_price} ${d.exit_close_pct}% контрактов [${d.exit_qty} ${symbol}] = ${d.est_profit} USDT`;
 
-  document.getElementById('history-title').innerHTML = title +
-    `<div style="font-size:13px; color:#8a93a6; font-weight:400; margin-top:8px; line-height:1.6;">
-       <div>${gridLine}</div>
-       <div>${exitLine}</div>
-     </div>`;
-  
-  let totalRealizedPnl = 0;
-  
-  document.getElementById('history-content').innerHTML = `
-    <table style="width:100%">
-      <thead><tr>
-        <th>Время (МСК)</th>
-        <th>Действие</th>
-        <th>Цена</th>
-        <th>Кол-во</th>
-        <th>Профит (USDT)</th>
-      </tr></thead>
-      <tbody>
-        ${d.items.map(h => {
-          const timeStr = new Date(h.ts + 'Z').toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
-          
-          if (h.action.includes('CLOSE')) {
-              totalRealizedPnl += (h.pnl || 0);
-          }
+  text += '='.repeat(80) + '\n';
+  text += `ИТОГО PnL по сделке: ${totalPnl > 0 ? '+' : ''}${fmtNum(totalPnl, 4)} USDT\n`;
 
-          const pnlClass = h.pnl > 0 ? 'pump' : (h.pnl < 0 ? 'dump' : 'muted');
-          
-          let actionName = h.action;
-          if (h.action === 'OPEN') actionName = 'Открытие';
-          if (h.action === 'GRID_ADD') actionName = 'Усреднение';
-          if (h.action === 'PARTIAL_CLOSE') actionName = '<span class="pump">Частичный вывод</span>';
-          if (h.action === 'FULL_CLOSE') actionName = '<span class="pump">Полное закрытие</span>';
-          if (h.action === 'MANUAL_CLOSE') actionName = '<span class="pump">Ручное закрытие</span>';
-
-          return `
-            <tr>
-              <td class="muted">${timeStr}</td>
-              <td>${actionName}</td>
-              <td>${fmtNum(h.price)}</td>
-              <td>${fmtNum(h.qty, 2)}</td>
-              <td class="${pnlClass}" style="font-weight:600;">
-                ${h.pnl !== 0 ? (h.pnl > 0 ? '+' : '') + fmtNum(h.pnl, 4) : '<span class="muted">—</span>'}
-              </td>
-            </tr>
-          `;
-        }).join('')}
-        ${d.items.some(h => h.action.includes('CLOSE')) ? `
-          <tr style="font-weight:bold; border-top: 2px solid #252b36;">
-            <td colspan="4" style="text-align:right;">Итого выведено по сделке:</td>
-            <td class="${totalRealizedPnl > 0 ? 'pump' : (totalRealizedPnl < 0 ? 'dump' : '')}">${fmtNum(totalRealizedPnl, 4)}</td>
-          </tr>
-        ` : ''}
-      </tbody>
-    </table>
-  `;
+  // Копирование
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, 99999);
+  
+  try {
+    const ok = document.execCommand('copy');
+    if (ok) {
+      const btn = event.target;
+      const orig = btn.textContent;
+      btn.textContent = '✅ Скопировано!';
+      btn.style.background = '#22c55e';
+      setTimeout(() => { btn.textContent = orig; btn.style.background = '#10b981'; }, 2000);
+    } else {
+      alert('Не удалось скопировать. Выделите текст вручную.');
+    }
+  } catch (e) {
+    alert('Ошибка копирования: ' + e.message);
+  } finally {
+    document.body.removeChild(textarea);
+  }
 }
 
 function closeHistory() {
@@ -1489,16 +1681,17 @@ let bbMidSeries = null;
 let chartSymbol = null;
 let chartInterval = '60';
 let chartTimer = null;
+let currentChartTradeId = null;
 
 // Массив для хранения активных S/R линий и их текущих цен
 let srLinesData = []; 
 
 async function openChart(symbol, defaultTf) {
   chartSymbol = symbol;
+  currentChartTradeId = null;
   document.getElementById('chart-title').textContent = 'График: ' + symbol;
   document.getElementById('chart-modal').classList.add('active');
   
-  // Запрашиваем данные текущей сделки, чтобы получить цены уровней
   let entryPrice = null;
   let exitPrice = null;
   let gridPrice = null;
@@ -1513,24 +1706,26 @@ async function openChart(symbol, defaultTf) {
       tradeSide = tradeData.side;
       document.getElementById('chart-title').textContent = 'График: ' + symbol + ' — ' + (tradeSide === 'LONG' ? 'LONG' : 'SHORT');
       
-      // Получаем точные цены для следующего выхода и усреднения
-      // Нам нужен trade_id, поэтому берем его из активных сделок
       const tradesRes = await fetch('/api/trades?limit=100');
       const tradesList = await tradesRes.json();
       const activeTrade = tradesList.items.find(t => t.symbol === symbol);
       
       if (activeTrade) {
+        currentChartTradeId = activeTrade.id;
         const histRes = await fetch('/api/trade_history?trade_id=' + activeTrade.id);
         const histData = await histRes.json();
-        exitPrice = histData.next_exit_price;
-        gridPrice = histData.next_grid_price;
+        if (histData) {
+          // Берем цену входа напрямую из истории, чтобы точно была актуальной
+          if (histData.avg_entry_price) entryPrice = histData.avg_entry_price;
+          exitPrice = histData.next_exit_price;
+          gridPrice = histData.next_grid_price;
+        }
       }
     }
   } catch (e) {
     console.error("Не удалось загрузить уровни сделки:", e);
   }
 
-  // Инициализируем график, передавая уровни
   const initialTf = defaultTf || '60';
   setChartTF(initialTf, entryPrice, exitPrice, gridPrice);
 }
@@ -1559,6 +1754,11 @@ function initChart(entryPrice = null, exitPrice = null, gridPrice = null) {
 
   container.innerHTML = ''; 
   srLinesData = []; // Сбрасываем старые линии при смене ТФ
+  
+  // Обнуляем ссылки на линии, чтобы потом корректно их пересоздать
+  priceLineEntry = null;
+  priceLineExit = null;
+  priceLineGrid = null;
   
   try {
     chartInstance = LightweightCharts.createChart(container, {
@@ -1693,6 +1893,56 @@ async function fetchChartData() {
   const container = document.getElementById('chart-container');
   
   try {
+    // --- 1. ОБНОВЛЯЕМ УРОВНИ СДЕЛКИ (ВХОД/ВЫХОД/УСРЕДНЕНИЕ) ---
+    // Это нужно, чтобы после усреднения или частичного выхода линии сдвигались на новые цены
+    if (currentChartTradeId && candleSeries) {
+      try {
+        const histRes = await fetch('/api/trade_history?trade_id=' + currentChartTradeId);
+        if (histRes.ok) {
+          const hist = await histRes.json();
+          
+          // Обновляем цену входа (среднюю) - только если там есть данные > 0
+          if (hist.avg_entry_price > 0) {
+            if (priceLineEntry) {
+              priceLineEntry.applyOptions({ price: hist.avg_entry_price });
+            } else {
+              priceLineEntry = candleSeries.createPriceLine({
+                price: hist.avg_entry_price, color: '#00bfff', lineWidth: 2,
+                lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'Вход',
+              });
+            }
+          }
+          
+          // Обновляем ближайший выход
+          if (hist.next_exit_price > 0) {
+            if (priceLineExit) {
+              priceLineExit.applyOptions({ price: hist.next_exit_price });
+            } else {
+              priceLineExit = candleSeries.createPriceLine({
+                price: hist.next_exit_price, color: '#32cd32', lineWidth: 2,
+                lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'Выход',
+              });
+            }
+          }
+
+          // Обновляем ближайшее усреднение
+          if (hist.next_grid_price > 0) {
+            if (priceLineGrid) {
+              priceLineGrid.applyOptions({ price: hist.next_grid_price });
+            } else {
+              priceLineGrid = candleSeries.createPriceLine({
+                price: hist.next_grid_price, color: '#f59e0b', lineWidth: 2,
+                lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'Усреднение',
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Не удалось обновить уровни сделки:', e);
+      }
+    }
+
+    // --- 2. ЗАПРАШИВАЕМ СВЕЧИ И ИНДИКАТОРЫ ---
     const res = await fetch(`/api/klines?symbol=${chartSymbol}&interval=${chartInterval}&limit=200`);
     
     if (!res.ok) {
@@ -1740,7 +1990,7 @@ async function fetchChartData() {
     candleSeries.setData(candles);
     volumeSeries.setData(volumes);
   
-    // Расчет MA (период 20)
+    // --- 3. MA ---
     const maPeriod = 20;
     const maData = [];
     for (let i = maPeriod - 1; i < closes.length; i++) {
@@ -1750,10 +2000,9 @@ async function fetchChartData() {
       }
       maData.push({ time: candles[i].time, value: sum / maPeriod });
     }
-    
     maSeries.setData(maData);
 
-    // === Bollinger Bands (период 20, 2 сигмы) ===
+    // --- 4. BOLLINGER BANDS ---
     const bbPeriod = 20;
     const bbMult = 2;
     const bbUpper = [];
@@ -1782,7 +2031,7 @@ async function fetchChartData() {
     bbMidSeries.setData(bbMid);
     bbLowerSeries.setData(bbLower);
 
-    // === БЛИЖАЙШИЕ СИЛЬНЫЕ УРОВНИ (серым) ===
+    // --- 5. S/R УРОВНИ ---
     const srLookback = 150;
     const recentCandles = candles.slice(-srLookback);
     const currentPrice = recentCandles[recentCandles.length - 1].close;
@@ -1830,42 +2079,28 @@ async function fetchChartData() {
 
       supports.forEach((c) => {
         newLevels.push({
-          price: c.price,
-          type: 'Support',
-          touches: c.count,
-          title: `S: ${c.price.toFixed(4)} | Касаний: ${c.count}`
+          price: c.price, title: `S: ${c.price.toFixed(4)} | Касаний: ${c.count}`
         });
       });
       
       resistances.forEach((c) => {
         newLevels.push({
-          price: c.price,
-          type: 'Resistance',
-          touches: c.count,
-          title: `R: ${c.price.toFixed(4)} | Касаний: ${c.count}`
+          price: c.price, title: `R: ${c.price.toFixed(4)} | Касаний: ${c.count}`
         });
       });
     }
 
-    // === ОБНОВЛЕНИЕ ЛИНИЙ БЕЗ МИГАНИЯ ===
-    // Проходимся по новым уровням и пытаемся найти существующие линии, чтобы обновить их цену.
-    // Если линии нет - создаем новую.
+    // Обновление S/R линий без мигания
     newLevels.forEach(nl => {
-      // Ищем линию, которая была на этом же уровне (с допуском 0.1%)
       const existing = srLinesData.find(s => Math.abs(s.price - nl.price) / nl.price < 0.001);
       
       if (existing) {
-        // Обновляем цену и заголовок (без удаления линии)
-        existing.line.applyOptions({
-          price: nl.price,
-          title: nl.title
-        });
+        existing.line.applyOptions({ price: nl.price, title: nl.title });
         existing.price = nl.price;
       } else {
-        // Создаем новую линию, если её не было
         const line = candleSeries.createPriceLine({
           price: nl.price,
-          color: 'rgba(148, 163, 184, 0.4)', // 60% прозрачности (40% альфа)
+          color: 'rgba(148, 163, 184, 0.4)',
           lineWidth: 1,
           lineStyle: LightweightCharts.LineStyle.Solid,
           axisLabelVisible: false,
@@ -1875,10 +2110,9 @@ async function fetchChartData() {
       }
     });
 
-    // Удаляем только те линии, которые больше не актуальны
+    // Удаляем устаревшие S/R
     for (let i = srLinesData.length - 1; i >= 0; i--) {
       const sl = srLinesData[i];
-      // Если для этой линии в новом наборе не нашлось пары - значит она устарела
       const stillExists = newLevels.some(nl => Math.abs(sl.price - nl.price) / nl.price < 0.001);
       
       if (!stillExists) {

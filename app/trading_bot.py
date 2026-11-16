@@ -302,6 +302,49 @@ class TradingBot:
                     log.warning(f'Check entries failed for {sym}: {e}')
             await session.commit()
 
+    async def _get_market_snapshot(self, t):
+        """Собирает подробный снимок текущего состояния для истории."""
+        try:
+            kl_1h = await self.rest.get_kline(t.symbol, interval='60', limit=10)
+            kl_4h = await self.rest.get_kline(t.symbol, interval='240', limit=10)
+            st = state.symbols.get(t.symbol)
+            
+            curr_price = st.last_price if st else t.current_price
+            ma_1h = moving_average(kl_1h, min(20, len(kl_1h) - 1)) if len(kl_1h) > 5 else None
+            ma_4h = moving_average(kl_4h, min(20, len(kl_4h) - 1)) if len(kl_4h) > 5 else None
+            
+            # Текущая и прошлая свеча на 1ч
+            c_curr = kl_1h[-1] if kl_1h else [0]*6
+            c_prev = kl_1h[-2] if len(kl_1h) > 1 else [0]*6
+            
+            # Получаем актуальность разворота
+            v = evaluate_validity(
+                symbol=t.symbol, side=t.side,
+                current_price=curr_price, avg_entry_price=t.avg_entry_price,
+                klines_1h=kl_1h, klines_4h=kl_4h,
+                ma_1h=ma_1h, ma_4h=ma_4h
+            )
+            
+            return {
+                "current_price": curr_price,
+                "avg_price": t.avg_entry_price,
+                "pnl": t.pnl,
+                "position_size_usdt": t.total_qty * curr_price,
+                "total_qty": t.total_qty,
+                "grid_step": t.grid_step,
+                "exit_step": t.exit_step,
+                "validity_status": v.status,
+                "validity_score": v.score,
+                "validity_reasons": v.reasons,
+                "ma_1h": ma_1h,
+                "ma_4h": ma_4h,
+                "curr_candle": {"open": float(c_curr[1]), "high": float(c_curr[2]), "low": float(c_curr[3]), "close": float(c_curr[4]), "vol": float(c_curr[5])},
+                "prev_candle": {"open": float(c_prev[1]), "high": float(c_prev[2]), "low": float(c_prev[3]), "close": float(c_prev[4]), "vol": float(c_prev[5])}
+            }
+        except Exception as e:
+            log.warning(f"Failed to get snapshot for {t.symbol}: {e}")
+            return {}
+
     async def _open_trade(self, session, sym, side, price, max_lev, cfg, gs, change_pct=None, fee_pct=0.055, details=None, tf='60'):
 
         # СТРОГАЯ ЛОГИКА: если в конфиге 0 - берем глобальное, иначе - конфиг
@@ -420,18 +463,18 @@ class TradingBot:
         t.total_margin = 0.0
         t.entry_fee = 0.0
 
+        # СОБИРАЕМ СНИМОК
+        snapshot = await self._get_market_snapshot(t)
+
         notes = f'VALIDITY EXIT: {reason} (qty: {closed_qty:.2f}, pnl: {realized_part:.4f})' if reason \
             else f'FULL CLOSE at validity exit (qty: {closed_qty:.2f}, pnl: {realized_part:.4f})'
 
         history = TradeHistory(
             trade_id=t.id, action='FULL_CLOSE', price=price, qty=closed_qty,
             margin=0.0, pnl=realized_part, notes=notes,
+            details=json.dumps(snapshot)
         )
         session.add(history)
-        
-        # Сброс индивидуальных настроек монеты при закрытии
-        await session.execute(delete(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
-        
         await session.commit()
         log.info('VALIDITY EXIT %s %s @ %.6f | PnL: %.4f | reason: %s',
                  t.side, t.symbol, price, realized_part, reason)
@@ -462,12 +505,67 @@ class TradingBot:
                 cfg_res = await session.execute(select(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
                 cfg = cfg_res.scalars().first()
 
-                # --- 0. ВАЛИДАЦИЯ РАЗВОРОТА ---
-                last_check = getattr(t, '_validity_ts', 0) or 0
-                need_check = check_validity or (time.time() - last_check > 60)
+                # --- 0. ВАЛИДАЦИЯ РАЗВОРОТА И ЛОГИРОВАНИЕ СМЕНЫ ЦВЕТА ---
+                # Проверяем не чаще раза в 60 секунд (используя время из БД)
+                hist_res = await session.execute(
+                    select(TradeHistory.ts)
+                    .where(TradeHistory.trade_id == t.id)
+                    .order_by(TradeHistory.ts.desc())
+                    .limit(1)
+                )
+                last_hist_ts = hist_res.scalar()
+                
+                need_check = True
+                # Если с момента последней записи в истории прошло < 60 секунд, и это была не VALIDITY_CHANGE
+                hist_res = await session.execute(
+                    select(TradeHistory.ts, TradeHistory.action)
+                    .where(TradeHistory.trade_id == t.id)
+                    .order_by(TradeHistory.ts.desc())
+                    .limit(1)
+                )
+                last_hist = hist_res.first()
+                if last_hist:
+                    last_hist_ts, last_action = last_hist
+                    delta = (datetime.datetime.utcnow() - last_hist_ts).total_seconds()
+                    # Если последняя запись была VALIDITY_CHANGE или прошло > 60 сек, проверяем
+                    if last_action == 'VALIDITY_CHANGE' and delta < 60:
+                        need_check = False
+                    elif last_action != 'VALIDITY_CHANGE' and delta < 15:
+                        # Если недавно было событие (открытие/усреднение), ждем 15 сек
+                        need_check = False
+                
                 validity = None
+
                 if need_check:
-                    validity = await self._check_trade_validity(t)
+                    v = await self._check_trade_validity(t)
+                    if v:
+                        validity = v
+                        old_status = t.validity or 'green'
+                        
+                        # Всегда обновляем статус в БД
+                        t.validity = v.status
+                        try:
+                            t.validity_reasons = json.dumps(list(v.reasons or []), ensure_ascii=False)
+                        except Exception:
+                            t.validity_reasons = ""
+                        
+                        # Принудительно сохраняем статус в БД, чтобы он не сбросился
+                        await session.commit()
+                        
+                        if old_status != v.status:
+                            # Собираем снимок индикаторов
+                            snapshot = await self._get_market_snapshot(t)
+                            
+                            history = TradeHistory(
+                                trade_id=t.id, action='VALIDITY_CHANGE', price=price, qty=t.total_qty,
+                                margin=t.total_margin, pnl=t.pnl, 
+                                notes=f"Смена статуса разворота: {old_status} -> {v.status}. Оценка: {v.score:.2f}",
+                                details=json.dumps(snapshot)
+                            )
+                            session.add(history)
+                            await session.commit()
+                            log.info(f"VALIDITY CHANGE {t.symbol}: {old_status} -> {v.status}")
+
 
                 # --- 1. ЛОГИКА УСРЕДНЕНИЯ ---
                 if t.grid_step < t.max_steps:
@@ -491,11 +589,7 @@ class TradingBot:
                                 )
                                 continue
                         
-                        # СТРОГАЯ ЛОГИКА: если в конфиге 0 - берем глобальное, иначе - конфиг
-                        if cfg and cfg.position_size_grid > 0:
-                            add_pos_size = cfg.position_size_grid
-                        else:
-                            add_pos_size = gs.position_size_grid if (gs and gs.position_size_grid > 0) else MIN_POS_SIZE
+                        add_pos_size = _pick(cfg.position_size_grid if cfg else 0, gs.position_size_grid if gs else 0, MIN_POS_SIZE)
                         
                         size_mult = _pick(cfg.grid_size_multiplier if cfg else 0, gs.grid_size_multiplier if gs else 0, 1.0)
                         if size_mult > 1.0:
@@ -520,9 +614,14 @@ class TradingBot:
                             t.exit_step = 0
                             grid_exit_reset = ', exits reset'
 
+                        # СОБИРАЕМ СНИМОК ПРИ УСРЕДНЕНИИ
+                        snapshot = await self._get_market_snapshot(t)
+
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
-                            margin=add_margin, pnl=-add_commission, notes=f'BUY {add_qty:.2f} (step {t.grid_step}, left: {t.total_qty:.2f}, fee {add_commission:.4f}{grid_exit_reset})'
+                            margin=add_margin, pnl=-add_commission, 
+                            notes=f'Усреднение {t.grid_step} (left: {t.total_qty:.2f}, fee {add_commission:.4f}{grid_exit_reset})',
+                            details=json.dumps(snapshot)
                         )
                         session.add(history)
                         await session.commit()
@@ -591,9 +690,6 @@ class TradingBot:
                         t.total_qty = 0.0
                         t.total_margin = 0.0
                         t.entry_fee = 0.0
-                        
-                        # Сброс индивидуальных настроек при полном закрытии
-                        await session.execute(delete(SymbolConfig).where(SymbolConfig.symbol == t.symbol))
 
                     if t.total_qty > 0.0001:
                         open_gross = t.total_qty * (price - t.avg_entry_price) if t.side == 'LONG' \
@@ -603,15 +699,19 @@ class TradingBot:
                     else:
                         t.pnl = t.realized_pnl
 
+                    # СОБИРАЕМ СНИМОК ПРИ ВЫХОДЕ
+                    snapshot = await self._get_market_snapshot(t)
+
                     history = TradeHistory(
                         trade_id=t.id, action=action, price=price, qty=closed_qty,
                         margin=t.total_margin, pnl=closed_pnl, 
-                        notes=f'SELL {close_pct}% (qty: {closed_qty:.2f}, left: {t.total_qty:.2f}, target {target_exit_pct:.1f}%, actual {change_pct:.2f}%, out fee {close_commission:.4f}, in fee {entry_fee_part:.4f})'
+                        notes=f'Выход {t.exit_step} ({close_pct}%): закрыто {closed_qty:.2f}, осталось {t.total_qty:.2f}. Цель: {target_exit_pct:.1f}%, факт: {change_pct:.2f}%',
+                        details=json.dumps(snapshot)
                     )
                     session.add(history)
                     await session.commit()
             
-            # Финальный коммит: фиксируем validity / validity_reasons / pnl / current_price
+            # Финальный коммит для сохранения t.validity и t.pnl / current_price
             await session.commit()
 
 trading_bot = None
