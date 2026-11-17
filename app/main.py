@@ -1070,3 +1070,121 @@ async def api_klines(symbol: str, interval: str, limit: int = 200):
         return {"ok": True, "items": kl}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _compute_sr_levels(kl, current_price: float, max_levels: int = 8):
+    """Кластеризуем pivot-точки по свечам в полные S/R уровни с метаданными.
+
+    Возвращает список словарей: price, kind (S/R), touches, strength, last_touch_ts,
+    distance_pct, volume_at, high_low_range.
+    """
+    if not kl or len(kl) < 20:
+        return []
+
+    candles = []
+    for k in kl:
+        try:
+            ts = int(float(k[0]))
+            o = float(k[1]); h = float(k[2]); l = float(k[3]); c = float(k[4]); v = float(k[5])
+            if h <= 0 or l <= 0 or o <= 0:
+                continue
+            candles.append({'ts': ts, 'o': o, 'h': h, 'l': l, 'c': c, 'v': v})
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    if len(candles) < 15:
+        return []
+
+    # Pivot-поиск: локальный экстремум с left/right окном
+    left_right = 3
+    pivots = []
+    for i in range(left_right, len(candles) - left_right):
+        cur = candles[i]
+        is_high = all(cur['h'] >= candles[j]['h'] for j in range(i - left_right, i + left_right + 1) if j != i)
+        is_low = all(cur['l'] <= candles[j]['l'] for j in range(i - left_right, i + left_right + 1) if j != i)
+        if is_high:
+            pivots.append({'price': cur['h'], 'kind': 'R', 'ts': cur['ts'], 'vol': cur['v']})
+        if is_low:
+            pivots.append({'price': cur['l'], 'kind': 'S', 'ts': cur['ts'], 'vol': cur['v']})
+
+    if not pivots:
+        return []
+
+    # Кластеризация: склеиваем pivot-ы в пределах tolerance от цены
+    tol_pct = 0.005
+    pivots.sort(key=lambda x: x['price'])
+    clusters = []
+    for p in pivots:
+        last = clusters[-1] if clusters else None
+        if last and abs(p['price'] - last['price']) / last['price'] < tol_pct:
+            last['prices'].append(p['price'])
+            last['kinds'].append(p['kind'])
+            last['timestamps'].append(p['ts'])
+            last['volumes'].append(p['vol'])
+        else:
+            clusters.append({
+                'prices': [p['price']],
+                'kinds': [p['kind']],
+                'timestamps': [p['ts']],
+                'volumes': [p['vol']],
+            })
+
+    levels = []
+    now_ts = candles[-1]['ts']
+    avg_vol = sum(cd['v'] for cd in candles) / len(candles) if candles else 0
+    for cl in clusters:
+        n = len(cl['prices'])
+        if n < 2:
+            continue
+        price = sum(cl['prices']) / n
+        # Тип уровня — мажоритарный в кластере
+        r_count = sum(1 for k in cl['kinds'] if k == 'R')
+        s_count = n - r_count
+        kind = 'R' if r_count > s_count else 'S'
+        # Сила = касания (до 5) * объёмный вес (0..1.5) * свежесть (0..1)
+        vol_at = sum(cl['volumes']) / n
+        vol_factor = min(vol_at / avg_vol, 2.0) / 2.0 if avg_vol > 0 else 0.5
+        last_ts = max(cl['timestamps'])
+        age_candles = sum(1 for cd in candles if cd['ts'] > last_ts)
+        freshness = max(0.0, 1.0 - age_candles / max(len(candles), 1))
+        strength = round(min(n / 5.0, 1.0) * 0.55 + vol_factor * 0.25 + freshness * 0.20, 3)
+        distance_pct = (price - current_price) / current_price * 100 if current_price > 0 else 0
+        levels.append({
+            'price': round(price, 8),
+            'kind': kind,
+            'touches': n,
+            'strength': strength,
+            'last_touch_ts': last_ts,
+            'distance_pct': round(distance_pct, 2),
+            'volume_at': round(vol_at, 2),
+        })
+
+    # Берём максимум 2 сильнейших Support ниже цены и 2 Resistance выше
+    supports = [lv for lv in levels if lv['price'] < current_price]
+    resistances = [lv for lv in levels if lv['price'] > current_price]
+    supports.sort(key=lambda x: (-x['strength'], -x['price']))  # сначала сильные близкие
+    resistances.sort(key=lambda x: (-x['strength'], x['price']))
+    top = supports[:max_levels // 2] + resistances[:max_levels // 2]
+    return top
+
+
+@app.get("/api/sr_levels")
+async def api_sr_levels(symbol: str, interval: str = '60', lookback: int = 200):
+    """Возвращает расчитанные S/R уровни с полной информацией."""
+    if not monitor._rest:
+        return {'ok': False, 'error': 'REST not ready'}
+    try:
+        kl = await monitor._rest.get_kline(symbol, interval=interval, limit=lookback)
+        st = state.symbols.get(symbol)
+        current_price = st.last_price if st and st.last_price > 0 else (float(kl[-1][4]) if kl else 0)
+        levels = _compute_sr_levels(kl, current_price)
+        return {
+            'ok': True,
+            'symbol': symbol,
+            'interval': interval,
+            'current_price': current_price,
+            'levels': levels,
+        }
+    except Exception as e:
+        log.exception('sr_levels failed for %s %s', symbol, interval)
+        return {'ok': False, 'error': str(e)}

@@ -2063,96 +2063,34 @@ async function fetchChartData() {
     bbMidSeries.setData(bbMid);
     bbLowerSeries.setData(bbLower);
 
-    // --- 5. S/R УРОВНИ ---
-    const srLookback = 150;
-    const recentCandles = candles.slice(-srLookback);
-    const currentPrice = recentCandles[recentCandles.length - 1].close;
-    const newLevels = [];
-
-    if (recentCandles.length >= 30) {
-      const pivotLeftRight = 2;
-      const pivots = [];
-
-      for (let i = pivotLeftRight; i < recentCandles.length - pivotLeftRight; i++) {
-        const c = recentCandles[i];
-        let isHigh = true, isLow = true;
-        for (let k = 1; k <= pivotLeftRight; k++) {
-          if (recentCandles[i - k].high >= c.high || recentCandles[i + k].high >= c.high) isHigh = false;
-          if (recentCandles[i - k].low  <= c.low  || recentCandles[i + k].low  <= c.low)  isLow  = false;
-        }
-        if (isHigh) pivots.push({ price: c.high, kind: 'high' });
-        if (isLow)  pivots.push({ price: c.low,  kind: 'low'  });
-      }
-
-      const clusterTol = 0.004;
-      pivots.sort((a, b) => a.price - b.price);
-      const clusters = [];
-      
-      for (const p of pivots) {
-        const last = clusters[clusters.length - 1];
-        if (last && Math.abs(p.price - last.price) / last.price < clusterTol) {
-          last.count++;
-          last.price = (last.price * (last.count - 1) + p.price) / last.count;
-        } else {
-          clusters.push({ price: p.price, count: 1 });
+    // --- 5. S/R УРОВНИ (бэкенд-расчёт, стабильные и информативные) ---
+    try {
+      const srRes = await fetch(`/api/sr_levels?symbol=${encodeURIComponent(chartSymbol)}&interval=${chartInterval}&lookback=200`);
+      if (srRes.ok) {
+        const srData = await srRes.json();
+        if (srData.ok && Array.isArray(srData.levels)) {
+          srData.levels.forEach((lv) => {
+            const distAbs = Math.abs(lv.distance_pct || 0);
+            const isSupport = lv.kind === 'S';
+            const color = isSupport
+              ? 'rgba(34, 197, 94, 0.55)'
+              : 'rgba(239, 68, 68, 0.55)';
+            const baseTitle = `${lv.kind} ${lv.price.toFixed(6)}`;
+            const info = ` | Касаний: ${lv.touches} | Сила: ${(lv.strength * 100).toFixed(0)}% | Δ ${lv.distance_pct > 0 ? '+' : ''}${lv.distance_pct}%`;
+            const line = candleSeries.createPriceLine({
+              price: lv.price,
+              color: color,
+              lineWidth: lv.touches >= 3 ? 2 : 1,
+              lineStyle: LightweightCharts.LineStyle.Solid,
+              axisLabelVisible: true,
+              title: baseTitle + info,
+            });
+            srLinesData.push({ price: lv.price, line: line, kind: lv.kind, touches: lv.touches, strength: lv.strength, distance_pct: lv.distance_pct });
+          });
         }
       }
-
-      const strong = clusters.filter(c => c.count >= 2);
-      
-      const supports = strong
-        .filter(c => c.price < currentPrice)
-        .sort((a, b) => b.price - a.price)
-        .slice(0, 2);
-      const resistances = strong
-        .filter(c => c.price > currentPrice)
-        .sort((a, b) => a.price - b.price)
-        .slice(0, 2);
-
-      supports.forEach((c) => {
-        newLevels.push({
-          price: c.price, title: `S: ${c.price.toFixed(4)} | Касаний: ${c.count}`
-        });
-      });
-      
-      resistances.forEach((c) => {
-        newLevels.push({
-          price: c.price, title: `R: ${c.price.toFixed(4)} | Касаний: ${c.count}`
-        });
-      });
-    }
-
-    // Обновление S/R линий без мигания
-    newLevels.forEach(nl => {
-      const existing = srLinesData.find(s => Math.abs(s.price - nl.price) / nl.price < 0.001);
-      
-      if (existing) {
-        existing.line.applyOptions({ price: nl.price, title: nl.title });
-        existing.price = nl.price;
-      } else {
-        const line = candleSeries.createPriceLine({
-          price: nl.price,
-          color: 'rgba(148, 163, 184, 0.4)',
-          lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Solid,
-          axisLabelVisible: false,
-          title: nl.title,
-        });
-        srLinesData.push({ price: nl.price, line: line });
-      }
-    });
-
-    // Удаляем устаревшие S/R
-    for (let i = srLinesData.length - 1; i >= 0; i--) {
-      const sl = srLinesData[i];
-      const stillExists = newLevels.some(nl => Math.abs(sl.price - nl.price) / nl.price < 0.001);
-      
-      if (!stillExists) {
-        try {
-          candleSeries.removePriceLine(sl.line);
-        } catch (e) {}
-        srLinesData.splice(i, 1);
-      }
+    } catch (e) {
+      console.warn('S/R levels fetch failed:', e);
     }
 
   } catch (e) {
