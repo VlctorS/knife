@@ -4,7 +4,7 @@ import logging
 import time
 import json
 
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func as sa_func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -45,10 +45,22 @@ def _pick(cfg_val, global_val, fallback):
 
 
 class TradingBot:
+    # Кеш kline по (symbol, interval): защищает от штормов REST и от зависания
+    # сделки при недоступности Bybit (возвращаем прошлый кеш).
+    KLINE_TTL_SEC = 25
+    REST_TIMEOUT_SEC = 8
+    # Если открытая сделка не обновлялась столько секунд, а тик свежий —
+    # считаем её «зависшей» и пишем SNAPSHOT-восстановление.
+    STALE_TRADE_SEC = 180
+    # Храним seen-свечи 48 часов (хватает для 4h/D интервалов с запасом).
+    SEEN_RETENTION_MS = 48 * 3600 * 1000
+
     def __init__(self, rest):
         self.rest = rest
         self._last_scan_ts = 0
         self._seen_candles = set()
+        self._kline_cache = {}
+        self._last_prune_ts = 0
 
     async def run_history_scan(self):
         log.info('Starting history scan for %d symbols...', len(state.symbols))
@@ -162,7 +174,9 @@ class TradingBot:
                     # нож подтверждён, а якорный ТФ не продолжает движение.
                     kline_cache = {}
                     for tf in intervals:
-                        kl = await self.rest.get_kline(sym, interval=tf, limit=22)
+                        kl = await self._fetch_klines_safe(sym, tf, 22)
+                        if not kl:
+                            continue
                         kline_cache[tf] = kl
                         if len(kl) < VOLUME_LOOKBACK + 2:
                             continue
@@ -176,13 +190,11 @@ class TradingBot:
                             continue
 
                         avg_vol = _calc_avg_volume(kl, VOLUME_LOOKBACK)
-                        if avg_vol <= 0 or volume < avg_vol:
-                            continue
-
                         change_pct = (close_price_candle - open_price) / open_price * 100
                         if abs(change_pct) < threshold:
                             continue
 
+                        # Объёмный фильтр — в classify_event, чтобы единая причина отказа
                         candle_id = f"{sym}_{tf}_{last_closed[0]}"
                         if candle_id in self._seen_candles:
                             continue
@@ -311,11 +323,124 @@ class TradingBot:
                     log.warning(f'Check entries failed for {sym}: {e}')
             await session.commit()
 
-    async def _get_market_snapshot(self, t):
+    def _calc_grid_exit_plan(self, t, cfg, gs):
+        """Полный план сетки усреднений и ступенчатых выходов (для истории/снимков)."""
+        plan = {}
+        try:
+            start_pct = _pick(cfg.grid_step_pct if cfg else 0, gs.grid_step_pct if gs else 0, 5.0)
+            mult = _pick(cfg.grid_step_multiplier if cfg else 0, gs.grid_step_multiplier if gs else 0, 2.5)
+            size_mult = _pick(cfg.grid_size_multiplier if cfg else 0, gs.grid_size_multiplier if gs else 0, 1.0)
+            base_size = _pick(cfg.position_size_grid if cfg else 0, gs.position_size_grid if gs else 0, MIN_POS_SIZE)
+
+            step_pct = start_pct * (mult ** t.grid_step)
+            grid_size = max(MIN_POS_SIZE, base_size * ((size_mult ** t.grid_step) if size_mult > 1.0 else 1.0))
+            if t.side == 'LONG':
+                grid_price = t.avg_entry_price * (1 - step_pct / 100)
+            else:
+                grid_price = t.avg_entry_price * (1 + step_pct / 100)
+            plan['next_grid'] = {
+                'step': t.grid_step + 1,
+                'pct': round(step_pct, 2),
+                'price': round(grid_price, 8),
+                'size_usdt': round(grid_size, 2),
+                'remaining_steps': max(0, t.max_steps - t.grid_step),
+            }
+
+            start_exit = _pick(cfg.initial_exit_pct if cfg else 0, gs.initial_exit_pct if gs else 0, 15.0)
+            exit_mult = _pick(cfg.exit_step_multiplier if cfg else 0, gs.exit_step_multiplier if gs else 0, 1.6)
+            close_pct = _pick(cfg.exit_contract_pct if cfg else 0, gs.exit_contract_pct if gs else 0, 50.0)
+            exit_step = t.exit_step or 0
+            exit_pct = start_exit * (exit_mult ** exit_step)
+            if t.side == 'LONG':
+                exit_price = t.avg_entry_price * (1 + exit_pct / 100)
+            else:
+                exit_price = t.avg_entry_price * (1 - exit_pct / 100)
+            exit_qty = t.total_qty * (close_pct / 100.0)
+            plan['next_exit'] = {
+                'step': exit_step + 1,
+                'pct': round(exit_pct, 2),
+                'price': round(exit_price, 8),
+                'close_pct': close_pct,
+                'qty': round(exit_qty, 6),
+            }
+        except Exception as e:
+            log.debug('Grid/exit plan failed for %s: %r', getattr(t, 'symbol', '?'), e)
+        return plan
+
+    async def _fetch_klines_safe(self, symbol, interval, limit):
+        """Kline c кешем по границе свечи. При сбое REST возвращаем прошлый кеш —
+        это защищает от зависания сделки при недоступности Bybit."""
+        now = time.time()
+        key = (symbol, interval)
+        entry = self._kline_cache.get(key)
+        if entry and now - entry[0] < self.KLINE_TTL_SEC:
+            return entry[1]
+        try:
+            kl = await asyncio.wait_for(
+                self.rest.get_kline(symbol, interval=interval, limit=limit),
+                timeout=self.REST_TIMEOUT_SEC
+            )
+        except Exception as e:
+            log.warning('get_kline %s %s failed: %r%s', symbol, interval, e,
+                        ' (using cached)' if entry else '')
+            return entry[1] if entry else None
+        self._kline_cache[key] = (now, kl)
+        return kl
+
+    def _prune_caches(self):
+        """Очищаем кеш свечей и seen-свечей, чтобы не расти бесконечно."""
+        now_ms = int(time.time() * 1000)
+        cutoff = now_ms - self.SEEN_RETENTION_MS
+        self._seen_candles = {cid for cid in self._seen_candles
+                              if int(cid.rsplit('_', 1)[1]) >= cutoff}
+
+    async def _recover_stale_trades(self, session, open_trades, stale_sec=None):
+        """Лечит «зависшие» сделки: если в потоке тиков есть свежая цена, а сделка
+        не обновлялась дольше STALE_TRADE_SEC — форсируем update_open_trades для неё.
+
+        Возвращает True, если была обработана хотя бы одна зависшая запись.
+        """
+        if stale_sec is None:
+            stale_sec = self.STALE_TRADE_SEC
+        recovered = False
+        now = time.time()
+        for t in open_trades:
+            st = state.symbols.get(t.symbol)
+            if not st or st.last_price <= 0:
+                continue
+            # last_tick_ts сравнима с UTC; приводим оба к unix-sec
+            tick_age = abs(now - st.last_price_ts)
+            # Если тик свежее самой записи в истории больше чем на stale_sec — лечим
+            hist_res = await session.execute(
+                select(TradeHistory.ts).where(TradeHistory.trade_id == t.id)
+                .order_by(TradeHistory.ts.desc()).limit(1)
+            )
+            last_hist_ts = hist_res.scalar()
+            if not last_hist_ts:
+                continue
+            db_age = (datetime.datetime.utcnow() - last_hist_ts).total_seconds()
+            if db_age > stale_sec and tick_age < stale_sec:
+                log.warning('RECOVER stale trade %s #%s: history=%.0fs ago, tick=%.0fs ago -> forcing update',
+                            t.symbol, t.id, db_age, tick_age)
+                # Помечаем в логе и сбрасываем timestamp, чтобы следующий цикл пересчитал PnL
+                snapshot = await self._get_market_snapshot(t, session=session)
+                session.add(TradeHistory(
+                    trade_id=t.id, action='SNAPSHOT', price=st.last_price, qty=t.total_qty,
+                    margin=t.total_margin, pnl=t.pnl,
+                    notes=f'Авто-восстановление после зависания ({db_age:.0f}s)',
+                    details=json.dumps(snapshot)
+                ))
+                await session.commit()
+                recovered = True
+        return recovered
+
+    async def _get_market_snapshot(self, t, session=None):
         """Собирает подробный снимок текущего состояния для истории."""
         try:
-            kl_1h = await self.rest.get_kline(t.symbol, interval='60', limit=30)
-            kl_4h = await self.rest.get_kline(t.symbol, interval='240', limit=30)
+            kl_1h = await self._fetch_klines_safe(t.symbol, '60', 30)
+            kl_4h = await self._fetch_klines_safe(t.symbol, '240', 30)
+            if not kl_1h or not kl_4h:
+                return {}
             st = state.symbols.get(t.symbol)
             
             curr_price = st.last_price if st else t.current_price
@@ -364,24 +489,54 @@ class TradingBot:
             }
 
             # Баланс на момент события (бумажный + реализованный + нереализованный)
+            # и план сетки/выходов. Используем переданную сессию, если есть —
+            # иначе открываем свою (вложенная сессия в SQLite может блокироваться).
             try:
-                async with SessionLocal() as s_sess:
-                    gs_row = await s_sess.get(Settings, 1)
+                if session is not None:
+                    gs_row = await session.get(Settings, 1)
                     paper_base = float(gs_row.paper_balance) if gs_row and gs_row.paper_balance else 100.0
-                    realized_res = await s_sess.execute(
+                    realized_res = await session.execute(
                         select(sa_func.sum(TradeHistory.pnl))
                         .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
                     )
                     realized_total = realized_res.scalar() or 0.0
-                    open_res = await s_sess.execute(
+                    open_res = await session.execute(
                         select(sa_func.sum(Trade.pnl))
                         .where(Trade.status.in_(['OPEN', 'PARTIAL']))
                     )
                     open_total = open_res.scalar() or 0.0
-                    snapshot["balance_realized"] = round(paper_base + realized_total, 4)
-                    snapshot["balance_live"] = round(paper_base + realized_total + open_total, 4)
+                else:
+                    async with SessionLocal() as s_sess:
+                        gs_row = await s_sess.get(Settings, 1)
+                        paper_base = float(gs_row.paper_balance) if gs_row and gs_row.paper_balance else 100.0
+                        realized_res = await s_sess.execute(
+                            select(sa_func.sum(TradeHistory.pnl))
+                            .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+                        )
+                        realized_total = realized_res.scalar() or 0.0
+                        open_res = await s_sess.execute(
+                            select(sa_func.sum(Trade.pnl))
+                            .where(Trade.status.in_(['OPEN', 'PARTIAL']))
+                        )
+                        open_total = open_res.scalar() or 0.0
+                snapshot["balance_realized"] = round(paper_base + realized_total, 4)
+                snapshot["balance_live"] = round(paper_base + realized_total + open_total, 4)
             except Exception as bal_err:
                 log.debug('Balance in snapshot failed for %s: %r', t.symbol, bal_err)
+
+            # План сетки/выходов (следующий шаг) — если есть cfg/gs в контексте
+            try:
+                if session is not None:
+                    cfg_res = await session.execute(
+                        select(SymbolConfig).where(SymbolConfig.symbol == t.symbol)
+                    )
+                    snap_cfg = cfg_res.scalars().first()
+                    snap_gs = await session.get(Settings, 1)
+                    plan = self._calc_grid_exit_plan(t, snap_cfg, snap_gs)
+                    if plan:
+                        snapshot.update(plan)
+            except Exception as plan_err:
+                log.debug('Plan in snapshot failed for %s: %r', t.symbol, plan_err)
 
             return snapshot
         except Exception as e:
@@ -445,8 +600,10 @@ class TradingBot:
         Красный цвет разрешён только после cooldown-периода с момента входа/усреднения.
         """
         try:
-            kl_1h = await self.rest.get_kline(t.symbol, interval='60', limit=30)
-            kl_4h = await self.rest.get_kline(t.symbol, interval='240', limit=30)
+            kl_1h = await self._fetch_klines_safe(t.symbol, '60', 30)
+            kl_4h = await self._fetch_klines_safe(t.symbol, '240', 30)
+            if not kl_1h or not kl_4h:
+                return None
 
             ma_1h = moving_average(kl_1h, min(20, len(kl_1h) - 1)) if len(kl_1h) > 5 else None
             ma_4h = moving_average(kl_4h, min(20, len(kl_4h) - 1)) if len(kl_4h) > 5 else None
@@ -514,8 +671,8 @@ class TradingBot:
         t.total_margin = 0.0
         t.entry_fee = 0.0
 
-        # СОБИРАЕМ СНИМОК
-        snapshot = await self._get_market_snapshot(t)
+        # СОБИРАЕМ СНИМОК (отдельная сессия — _close_position свой коммит уже сделал)
+        snapshot = await self._get_market_snapshot(t, session=session)
 
         notes = f'VALIDITY EXIT: {reason} (qty: {closed_qty:.2f}, pnl: {realized_part:.4f})' if reason \
             else f'FULL CLOSE at validity exit (qty: {closed_qty:.2f}, pnl: {realized_part:.4f})'
@@ -531,6 +688,12 @@ class TradingBot:
                  t.side, t.symbol, price, realized_part, reason)
 
     async def update_open_trades(self):
+        # Периодическая очистка кеша seen-свечей (раз в час)
+        now_ts = time.time()
+        if now_ts - self._last_prune_ts > 3600:
+            self._prune_caches()
+            self._last_prune_ts = now_ts
+
         async with SessionLocal() as session:
             gs = await session.get(Settings, 1)
             if not gs:
@@ -544,9 +707,18 @@ class TradingBot:
             result = await session.execute(
                 select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL'])).where(Trade.total_qty > 0.0001)
             )
-            for t in result.scalars().all():
+            open_trades = list(result.scalars().all())
+
+            # --- ЛЕЧЕНИЕ «ЗАВИСШИХ» СДЕЛОК ---
+            # Если история не обновлялась дольше STALE_TRADE_SEC, но тик свежий — пишем SNAPSHOT
+            try:
+                await self._recover_stale_trades(session, open_trades)
+            except Exception as e:
+                log.warning('Recovery of stale trades failed: %r', e)
+            
+            for t in open_trades:
                 st = state.symbols.get(t.symbol)
-                if not st or st.last_price <= 0 or st.ma is None: 
+                if not st or st.last_price <= 0:
                     continue
                 
                 price = st.last_price
@@ -557,7 +729,6 @@ class TradingBot:
                 cfg = cfg_res.scalars().first()
 
                 # --- 0. ВАЛИДАЦИЯ РАЗВОРОТА И ЛОГИРОВАНИЕ СМЕНЫ ЦВЕТА ---
-                # Проверяем не чаще раза в 60 секунд (используя время из БД)
                 need_check = True
                 hist_res = await session.execute(
                     select(TradeHistory.ts, TradeHistory.action)
@@ -569,11 +740,11 @@ class TradingBot:
                 if last_hist:
                     last_hist_ts, last_action = last_hist
                     delta = (datetime.datetime.utcnow() - last_hist_ts).total_seconds()
-                    # После VALIDITY_CHANGE — cooldown 60 сек
-                    if last_action == 'VALIDITY_CHANGE' and delta < 60:
+                    # После VALIDITY_CHANGE / SNAPSHOT — cooldown 60 сек
+                    if last_action in ('VALIDITY_CHANGE', 'SNAPSHOT') and delta < 60:
                         need_check = False
-                    # После любого другого события (открытие/усреднение/выход) — cooldown 15 сек
-                    elif last_action != 'VALIDITY_CHANGE' and delta < 15:
+                    elif last_action not in ('VALIDITY_CHANGE', 'SNAPSHOT') and delta < 15:
+                        # После открытия/усреднения/выхода ждём 15 сек перед проверкой
                         need_check = False
 
                 validity = None
@@ -613,9 +784,11 @@ class TradingBot:
                             if verdict_text:
                                 hist_notes += f"\nОбоснование: {verdict_text}"
 
+                            snapshot = await self._get_market_snapshot(t, session=session)
+
                             history = TradeHistory(
                                 trade_id=t.id, action='VALIDITY_CHANGE', price=price, qty=t.total_qty,
-                                margin=t.total_margin, pnl=t.pnl, 
+                                margin=t.total_margin, pnl=t.pnl,
                                 notes=hist_notes,
                                 details=json.dumps(snapshot)
                             )
@@ -672,7 +845,7 @@ class TradingBot:
                             grid_exit_reset = ', exits reset'
 
                         # СОБИРАЕМ СНИМОК ПРИ УСРЕДНЕНИИ
-                        snapshot = await self._get_market_snapshot(t)
+                        snapshot = await self._get_market_snapshot(t, session=session)
 
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
@@ -757,7 +930,7 @@ class TradingBot:
                         t.pnl = t.realized_pnl
 
                     # СОБИРАЕМ СНИМОК ПРИ ВЫХОДЕ
-                    snapshot = await self._get_market_snapshot(t)
+                    snapshot = await self._get_market_snapshot(t, session=session)
 
                     history = TradeHistory(
                         trade_id=t.id, action=action, price=price, qty=closed_qty,
