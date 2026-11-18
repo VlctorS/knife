@@ -4,6 +4,8 @@ import logging
 import time
 import json
 
+from typing import Optional
+
 from sqlalchemy import select, delete, func as sa_func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -36,12 +38,25 @@ def _calc_avg_volume(candles, lookback=20):
 
 
 def _pick(cfg_val, global_val, fallback):
-    """Приоритет настройки: конфиг символа -> общие настройки -> дефолт."""
+    """Приорет настройки: конфиг символа -> общие настройки -> дефолт."""
     if cfg_val and cfg_val > 0:
         return cfg_val
     if global_val and global_val > 0:
         return global_val
     return fallback
+
+
+def _trade_age_hours(t) -> Optional[float]:
+    """Возраст сделки (часы) от момента входа (opened_at).
+
+    Cooldown красного цвета должен считаться от входа, а не от
+    last_action_at: усреднения и смена цвета обнуляли бы его, и сделка
+    на сетке никогда не получила бы red.
+    """
+    ref = getattr(t, 'opened_at', None)
+    if not ref:
+        return None
+    return (datetime.datetime.utcnow() - ref).total_seconds() / 3600.0
 
 
 class TradingBot:
@@ -451,10 +466,7 @@ class TradingBot:
             c_curr = kl_1h[-1] if kl_1h else [0]*6
             c_prev = kl_1h[-2] if len(kl_1h) > 1 else [0]*6
 
-            age_hours = None
-            ref_time = getattr(t, 'last_action_at', None) or t.opened_at
-            if ref_time:
-                age_hours = (datetime.datetime.utcnow() - ref_time).total_seconds() / 3600.0
+            age_hours = _trade_age_hours(t)
 
             # Получаем актуальность разворота
             v = evaluate_validity(
@@ -611,11 +623,8 @@ class TradingBot:
             st = state.symbols.get(t.symbol)
             current_price = st.last_price if st and st.last_price > 0 else t.current_price
 
-            # Возраст сделки в часах — для cooldown индикатора разворота
-            age_hours = None
-            ref_time = getattr(t, 'last_action_at', None) or t.opened_at
-            if ref_time:
-                age_hours = (datetime.datetime.utcnow() - ref_time).total_seconds() / 3600.0
+            # Возраст сделки в часах — от входа (не от последнего действия)
+            age_hours = _trade_age_hours(t)
 
             v = evaluate_validity(
                 symbol=t.symbol,
@@ -761,10 +770,7 @@ class TradingBot:
                             t.validity_reasons = json.dumps(list(v.reasons or []), ensure_ascii=False)
                         except Exception:
                             t.validity_reasons = ""
-                        
-                        # Обновляем last_action_at — для cooldown индикатора
-                        t.last_action_at = datetime.datetime.utcnow()
-                        
+
                         # Принудительно сохраняем статус в БД, чтобы он не сбросился
                         await session.commit()
                         
