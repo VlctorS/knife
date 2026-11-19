@@ -188,7 +188,7 @@ button:hover { background:#1d4ed8; }
       <th>Время (МСК)</th><th>Символ</th><th>Разворот</th><th>Тип</th>
       <th>Ср. цена</th><th>Тек. цена</th><th>Изм. %</th>
       <th>Кол-во</th><th>Размер (USDT)</th>
-      <th>Сетка</th><th>Плечо</th><th>PnL (тек)</th><th>Выходы</th><th></th>
+      '<th>Сетка</th><th>Плечо</th><th>PnL (тек)</th><th>Выходы</th><th>Режим</th><th></th>
     </tr></thead>
     <tbody id="trades"><tr><td colspan="14" class="empty">Нет сделок</td></tr></tbody></table></div></div>
     
@@ -217,6 +217,12 @@ button:hover { background:#1d4ed8; }
     </div>
 
     <div id="subtab-main" class="sub-tab-content active">
+      <p class="muted">Режим торговли (применяется к новым сигналам; открытые сделки доживают в своём режиме):</p>
+      <div class="form-row"><select id="s-trade_mode" style="width:100%" onchange="updateModeInfo(this.value)"></select></div>
+      <p class="muted" id="mode-info" style="font-size:12px;margin:-6px 0 14px 2px;"></p>
+      <div class="form-row" style="margin-bottom:16px;">
+        <button type="button" onclick="resetSignals()" style="background:#6b7280;">Сбросить сигналы и начать поиск заново</button>
+      </div>
       <p class="muted">Мин. оборот за 24ч (млн USDT):</p>
       <div class="form-row"><input type="number" id="min-turnover" step="0.1"></div>
       <p class="muted">Мин. макс. плечо:</p>
@@ -1451,7 +1457,12 @@ async function loadSettings() {
   document.getElementById('s-exit_step_multiplier').value = d.exit_step_multiplier;
   document.getElementById('s-exit_contract_pct').value = d.exit_contract_pct;
   document.getElementById('s-exit_max_steps').value = d.exit_max_steps || 0;
-  
+
+  // --- Режимы торговли ---
+  const tradeMode = d.trade_mode || 'intraday';
+  document.getElementById('s-trade_mode').value = tradeMode;
+  updateModeInfo(tradeMode);
+
   updateGridPreview();
 }
 
@@ -1473,6 +1484,7 @@ async function saveSettings() {
     paper_balance: getVal('s-paper_balance') || 100,
     max_open_trades: parseInt(document.getElementById('s-max_open_trades').value) || 5,
     check_validity_before_grid: document.getElementById('s-check_validity_before_grid').checked,
+    trade_mode: document.getElementById('s-trade_mode').value,
     
     entry_pct: getVal('s-entry_pct'),
     grid_step_pct: getVal('s-grid_step_pct'),
@@ -1511,7 +1523,55 @@ async function saveSettings() {
   }
   
   // Перезагружаем форму с сервера, чтобы убедиться, что всё сохранилось
-  setTimeout(() => { loadStatus(); loadStats(); loadSettings(); }, 1000);
+  setTimeout(() => { loadStatus(); loadStats(); loadSettings(); loadModes(); }, 1000);
+}
+
+async function loadModes() {
+  try {
+    const res = await fetch('/api/modes');
+    const data = await res.json();
+    if (!data.ok) return;
+    const sel = document.getElementById('s-trade_mode');
+    sel.innerHTML = '';
+    for (const m of data.items) {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.label;
+      opt.title = `Рабочий ТФ: ${m.work_tf} | Якорь: ${m.anchor_tf} | Мин. уверенность: ${m.min_confidence}`;
+      sel.appendChild(opt);
+    }
+    updateModeInfo(sel.value);
+  } catch (e) {
+    console.error('Не удалось загрузить режимы', e);
+  }
+}
+
+function updateModeInfo(modeId) {
+  const el = document.getElementById('mode-info');
+  if (!el) return;
+  const labels = {scalp:'Скальпинг', intraday:'Интрадэй', swing:'Долгосрок'};
+  const descs = {
+    scalp: '⚡ 5m/1H — Быстрые входы с высокой уверенностью (≥0.80), маленькие шаги сетки, быстрый exit',
+    intraday: '📊 15m/1D — Среднесрочные входы по тренду дня, умеренные шаги, выход к уровням SR',
+    swing: '📈 4H/1D — Долгосрочные позиции поWeekly-контексту, широкие шаги, удержание до 28 дней',
+  };
+  el.textContent = `${labels[modeId] || modeId}: ${descs[modeId] || ''}`;
+}
+
+async function resetSignals() {
+  if (!confirm('Сбросить все сигналы и начать поиск заново? Открытые сделки не будут затронуты.')) return;
+  try {
+    const res = await fetch('/api/reset_signals', { method: 'POST' });
+    const d = await res.json();
+    if (d.ok) {
+      alert('Сигналы сброшены, поиск начат заново');
+      loadAlerts();
+    } else {
+      alert('Ошибка: ' + (d.error || 'неизвестно'));
+    }
+  } catch (e) {
+    alert('Ошибка при сбросе: ' + e.message);
+  }
 }
 
 async function clearData() {
