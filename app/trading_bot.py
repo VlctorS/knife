@@ -213,6 +213,7 @@ class TradingBot:
                 if cached and (now - cached['ts']) < 120:
                     atr_work = cached['atr']
                     levels_work = cached['levels']
+                    kl_work = cached.get('kl')  # восстанавливаем для find_pins_with_confirm
                 else:
                     try:
                         kl_work = await self._fetch_klines_safe(sym, mode.work_tf, self.KLINES_PER_REQUEST)
@@ -224,12 +225,15 @@ class TradingBot:
                     else:
                         atr_work = None
                         levels_work = []
-                    self._mode_cache[cache_key] = {'atr': atr_work, 'levels': levels_work, 'ts': now}
+                    self._mode_cache[cache_key] = {'atr': atr_work, 'levels': levels_work, 'kl': kl_work, 'ts': now}
 
                 if not atr_work or atr_work <= 0:
                     continue
                 if not levels_work:
                     # Без уровней нет контекста
+                    continue
+                if not kl_work or len(kl_work) < 3:
+                    # find_pins_with_confirm требует хотя бы несколько свечей
                     continue
 
                 # --- 6. Получаем якорный ТФ для тренда и пространства ---
