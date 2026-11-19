@@ -132,10 +132,40 @@ MODES: Dict[str, ModeParams] = {
 DEFAULT_MODE_ID = 'intraday'
 
 
-def get_mode(mode_id: Optional[str]) -> ModeParams:
-    """Возвращает параметры режима; неизвестный/пустой id -> дефолт."""
+def get_mode(mode_id: Optional[str] = None) -> ModeParams:
+    """Возвращает параметры режима.
+
+    Если mode_id передан и валиден — возвращает этот режим.
+    Если mode_id не передан (None) — читает trade_mode из БД.
+    Если БД недоступна — возвращает DEFAULT_MODE_ID.
+    """
     if mode_id and mode_id in MODES:
         return MODES[mode_id]
+
+    # mode_id не передан или невалиден — читаем из БД
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker, Session
+        from .db import Settings, DB_URL
+        from sqlalchemy.orm import declarative_base
+
+        # Создаём синхронную сессию
+        sync_url = DB_URL.replace('+aiosqlite', '').replace('+asyncpg', '').replace('+pg8000', '')
+        engine_sync = create_engine(sync_url, pool_pre_ping=True)
+        sm = sessionmaker(bind=engine_sync)
+        session = sm()
+        try:
+            s = session.query(Settings).get(1)
+            saved_mode = getattr(s, 'trade_mode', None) if s else None
+        finally:
+            session.close()
+
+        if saved_mode and saved_mode in MODES:
+            return MODES[saved_mode]
+    except Exception:
+        # БД недоступна — возвращаем дефолт
+        pass
+
     return MODES[DEFAULT_MODE_ID]
 
 
