@@ -138,6 +138,7 @@ button:hover { background:#1d4ed8; }
 <body>
 <header>
   <h1 style="margin:0;font-size:18px;">Knife Bot</h1>
+  <span class="pill" id="p-mode" style="background:#2563eb;">—</span>
   <span class="pill" id="p-threshold">—</span>
   <span class="pill" id="p-window">—</span>
   <span class="pill" id="p-ma">—</span>
@@ -1460,6 +1461,8 @@ async function loadSettings() {
   document.getElementById('s-trade_mode').value = tradeMode;
   updateModeInfo(tradeMode);
   updatePageTitle(tradeMode);
+  // Обновить пилюли в шапке
+  updateHeaderPillsFromSettings(tradeMode, d.monitor_threshold, d.monitor_window_minutes);
 
   updateGridPreview();
 }
@@ -1540,9 +1543,42 @@ async function loadModes() {
     }
     updateModeInfo(sel.value);
     updatePageTitle(sel.value);
+    updateHeaderPills(sel.value, data.items);
   } catch (e) {
     console.error('Не удалось загрузить режимы', e);
   }
+}
+
+function updateHeaderPills(modeId, modeItems) {
+  const labels = {scalp:'Скальпинг', intraday:'Интрадэй', swing:'Долгосрок'};
+  const label = labels[modeId] || modeId || 'Интрадэй';
+  const pMode = document.getElementById('p-mode');
+  if (pMode) {
+    pMode.textContent = label;
+    pMode.style.background = modeId === 'scalp' ? '#2563eb' : modeId === 'swing' ? '#7c3aed' : '#059669';
+  }
+  // Найти текущий режим в списке и обновить threshold/window
+  const current = modeItems.find(m => m.id === modeId);
+  if (current) {
+    const pThreshold = document.getElementById('p-threshold');
+    if (pThreshold) pThreshold.textContent = 'Порог ±' + (current.monitor_threshold || 0.5) + '%';
+    const pWindow = document.getElementById('p-window');
+    if (pWindow) pWindow.textContent = 'Окно ' + (current.monitor_window_minutes || 60) + 'м';
+  }
+}
+
+function updateHeaderPillsFromSettings(modeId, monitorThreshold, monitorWindow) {
+  const labels = {scalp:'Скальпинг', intraday:'Интрадэй', swing:'Долгосрок'};
+  const label = labels[modeId] || modeId || 'Интрадэй';
+  const pMode = document.getElementById('p-mode');
+  if (pMode) {
+    pMode.textContent = label;
+    pMode.style.background = modeId === 'scalp' ? '#2563eb' : modeId === 'swing' ? '#7c3aed' : '#059669';
+  }
+  const pThreshold = document.getElementById('p-threshold');
+  if (pThreshold) pThreshold.textContent = 'Порог ±' + (monitorThreshold || 0.5) + '%';
+  const pWindow = document.getElementById('p-window');
+  if (pWindow) pWindow.textContent = 'Окно ' + (monitorWindow || 60) + 'м';
 }
 
 function updateModeInfo(modeId) {

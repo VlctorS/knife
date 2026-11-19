@@ -1032,33 +1032,37 @@ async def api_post_settings(data: dict = Body(...)):
 
 @app.get("/api/settings")
 async def api_get_settings():
+    from .modes import get_mode
     async with SessionLocal() as session:
         s = await session.get(Settings, 1)
         if not s:
             s = Settings(id=1)
             session.add(s)
             await session.commit()
+        mode = get_mode(getattr(s, 'trade_mode', None))
         log.info(f"[SETTINGS GET] max_open_trades={s.max_open_trades}, paper_balance={s.paper_balance}")
         return {
-            "min_turnover": float(s.min_turnover) if s.min_turnover else 0.0, 
+            "min_turnover": float(s.min_turnover) if s.min_turnover else 0.0,
             "min_leverage": float(s.min_leverage) if s.min_leverage else 0.0,
-            "entry_pct": float(s.entry_pct) if s.entry_pct else 0.0, 
+            "entry_pct": float(s.entry_pct) if s.entry_pct else 0.0,
             "grid_step_pct": float(s.grid_step_pct) if s.grid_step_pct else 0.0,
-            "grid_step_multiplier": float(s.grid_step_multiplier) if s.grid_step_multiplier else 0.0, 
+            "grid_step_multiplier": float(s.grid_step_multiplier) if s.grid_step_multiplier else 0.0,
             "grid_size_multiplier": float(s.grid_size_multiplier) if s.grid_size_multiplier else 0.0,
             "max_steps": s.max_steps,
-            "initial_exit_pct": float(s.initial_exit_pct) if s.initial_exit_pct else 0.0, 
+            "initial_exit_pct": float(s.initial_exit_pct) if s.initial_exit_pct else 0.0,
             "exit_step_multiplier": float(s.exit_step_multiplier) if s.exit_step_multiplier else 0.0,
             "exit_contract_pct": float(s.exit_contract_pct) if s.exit_contract_pct else 0.0,
-            "position_size_entry": float(s.position_size_entry) if s.position_size_entry else 0.0, 
+            "position_size_entry": float(s.position_size_entry) if s.position_size_entry else 0.0,
             "position_size_grid": float(s.position_size_grid) if s.position_size_grid else 0.0,
-            "fee_pct": float(s.fee_pct) if s.fee_pct else 0.055, 
+            "fee_pct": float(s.fee_pct) if s.fee_pct else 0.055,
             "min_confidence": float(s.min_confidence) if s.min_confidence else 0.4,
             "paper_balance": float(s.paper_balance) if s.paper_balance else 100.0,
             "max_open_trades": s.max_open_trades if s.max_open_trades else 5,
             "check_validity_before_grid": bool(getattr(s, 'check_validity_before_grid', False)),
             "exit_max_steps": s.exit_max_steps if s.exit_max_steps else 0,
             "trade_mode": getattr(s, 'trade_mode', None) or 'intraday',
+            "monitor_threshold": mode.monitor_threshold,
+            "monitor_window_minutes": mode.monitor_window_minutes,
         }
 
 @app.get("/api/modes")
