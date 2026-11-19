@@ -1459,6 +1459,7 @@ async function loadSettings() {
   const tradeMode = d.trade_mode || 'intraday';
   document.getElementById('s-trade_mode').value = tradeMode;
   updateModeInfo(tradeMode);
+  updatePageTitle(tradeMode);
 
   updateGridPreview();
 }
@@ -1554,11 +1555,12 @@ function updateModeInfo(modeId) {
     swing: '📈 4H/1D — Долгосрочные позиции поWeekly-контексту, широкие шаги, удержание до 28 дней',
   };
   el.textContent = `${labels[modeId] || modeId}: ${descs[modeId] || ''}`;
-  updatePageTitle(labels[modeId] || modeId);
 }
 
-function updatePageTitle(modeLabel) {
-  document.title = `Knife Bot — ${modeLabel}`;
+function updatePageTitle(modeId) {
+  const labels = {scalp:'Скальпинг', intraday:'Интрадэй', swing:'Долгосрок'};
+  const label = labels[modeId] || modeId || 'Интрадэй';
+  document.title = `Knife Bot — ${label}`;
 }
 
 async function clearData() {
