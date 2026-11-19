@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(.venv\\scripts\\python.exe *)",
+      "Bash(.venv\\scripts\\uvicorn *)",
+      "Bash(dir *)",
+      "Bash(git diff *)",
+      "Bash(git checkout *)"
+    ]
+  },
+  "$version": 3
+}

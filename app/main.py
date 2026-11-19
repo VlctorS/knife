@@ -1116,7 +1116,7 @@ def _compute_sr_levels(kl, current_price: float, max_levels: int = 8):
     clusters = []
     for p in pivots:
         last = clusters[-1] if clusters else None
-        if last and abs(p['price'] - last['price']) / last['price'] < tol_pct:
+        if last and abs(p['price'] - last['prices'][-1]) / last['prices'][-1] < tol_pct:
             last['prices'].append(p['price'])
             last['kinds'].append(p['kind'])
             last['timestamps'].append(p['ts'])
@@ -1137,10 +1137,8 @@ def _compute_sr_levels(kl, current_price: float, max_levels: int = 8):
         if n < 2:
             continue
         price = sum(cl['prices']) / n
-        # Тип уровня — мажоритарный в кластере
-        r_count = sum(1 for k in cl['kinds'] if k == 'R')
-        s_count = n - r_count
-        kind = 'R' if r_count > s_count else 'S'
+        # Тип уровня — по положению относительно текущей цены
+        kind = 'S' if price < current_price else 'R'
         # Сила = касания (до 5) * объёмный вес (0..1.5) * свежесть (0..1)
         vol_at = sum(cl['volumes']) / n
         vol_factor = min(vol_at / avg_vol, 2.0) / 2.0 if avg_vol > 0 else 0.5

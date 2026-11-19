@@ -1,5 +1,5 @@
 @echo off
-cd /d C:\knife
+cd /d "%~dp0"
 
 REM --- Явно локальный режим (перебивает системные переменные) ---
 set IS_RENDER=False
@@ -28,7 +28,11 @@ if not exist .env (
     exit /b 1
 )
 
-REM --- Запуск (--reload удобен при разработке; для стабильности уберите его) ---
+REM --- Запуск (автоматический рестарт при аварии) ---
 echo Starting Knife Bot locally (IS_RENDER=%IS_RENDER%)...
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-pause
+:restart_loop
+.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000
+echo.
+echo [!] Bot exited (crashed or stopped). Restarting in 2 seconds...
+timeout /t 2 /nobreak >nul
+goto :restart_loop
