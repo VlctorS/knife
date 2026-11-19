@@ -963,22 +963,23 @@ async def api_get_configs():
 @app.post("/api/settings")
 async def api_post_settings(data: dict = Body(...)):
     log.info(f"[SETTINGS SAVE] Получено: {data}")
-    
+    log.info(f"[SETTINGS SAVE] trade_mode из данных: {data.get('trade_mode', 'NOT SET')}")
+
     async with SessionLocal() as session:
         s = await session.get(Settings, 1)
         if not s:
             s = Settings(id=1)
             session.add(s)
             log.info("[SETTINGS SAVE] Создан новый объект Settings")
-        
+
         float_fields = [
-            "min_turnover", "min_leverage", "entry_pct", "grid_step_pct", 
-            "grid_step_multiplier", "grid_size_multiplier", "initial_exit_pct", 
-            "exit_step_multiplier", "exit_contract_pct", "position_size_entry", 
+            "min_turnover", "min_leverage", "entry_pct", "grid_step_pct",
+            "grid_step_multiplier", "grid_size_multiplier", "initial_exit_pct",
+            "exit_step_multiplier", "exit_contract_pct", "position_size_entry",
             "position_size_grid", "fee_pct", "min_confidence"
         ]
         int_fields = ["max_steps", "paper_balance", "max_open_trades", "exit_max_steps"]
-        
+
         for k in float_fields:
             if k in data:
                 try:
@@ -987,7 +988,7 @@ async def api_post_settings(data: dict = Body(...)):
                     log.info(f"[SETTINGS SAVE] {k} = {val}")
                 except (ValueError, TypeError):
                     log.warning(f"[SETTINGS SAVE] Ошибка парсинга float для {k}: {data[k]}")
-                    
+
         for k in int_fields:
             if k in data:
                 try:
@@ -996,7 +997,7 @@ async def api_post_settings(data: dict = Body(...)):
                     log.info(f"[SETTINGS SAVE] {k} = {val}")
                 except (ValueError, TypeError):
                     log.warning(f"[SETTINGS SAVE] Ошибка парсинга int для {k}: {data[k]}")
-        
+
         # Чекбоксы
         if "check_validity_before_grid" in data:
             s.check_validity_before_grid = bool(data["check_validity_before_grid"])
@@ -1008,24 +1009,31 @@ async def api_post_settings(data: dict = Body(...)):
         if "trade_mode" in data:
             from .modes import VALID_MODE_IDS
             new_mode = str(data["trade_mode"]).strip()
+            old_mode = getattr(s, 'trade_mode', None)
+            log.info(f"[SETTINGS SAVE] trade_mode old='{old_mode}' new='{new_mode}' valid={new_mode in VALID_MODE_IDS}")
             if new_mode in VALID_MODE_IDS:
-                if s.trade_mode != new_mode:
+                if new_mode != old_mode:
                     mode_changed = True
                 s.trade_mode = new_mode
-                log.info(f"[SETTINGS SAVE] trade_mode = {new_mode}")
+                log.info(f"[SETTINGS SAVE] trade_mode SET to '{new_mode}'")
             else:
-                log.warning(f"[SETTINGS SAVE] Неизвестный trade_mode: {data.get('trade_mode')}")
+                log.warning(f"[SETTINGS SAVE] Неизвестный trade_mode: {new_mode}")
 
         await session.commit()
+
+        # Перечитаем из БД и проверим
         await session.refresh(s)
-        
+        saved = getattr(s, 'trade_mode', 'NOT SET')
+        log.info(f"[SETTINGS SAVE] ПОСЛЕ COMMIT trade_mode='{saved}'")
+
         log.info(f"[SETTINGS SAVE] СОХРАНЕНО: min_turnover={s.min_turnover}, paper_balance={s.paper_balance}, entry={s.entry_pct}, grid_step={s.grid_step_pct}, pos_entry={s.position_size_entry}, exit={s.initial_exit_pct}")
 
-    # Смена режима: сбрасываем сигналы и запускаем поиск заново (без state.alerts
-    # из старого режима). Старые сделки не трогаем — они дорабатывают свой режим.
+    # Обновляем параметры монитора на основе текущего режима
     if mode_changed and trading_bot is not None:
+        from .config import update_monitor_params
+        update_monitor_params(new_mode)
         await trading_bot.reset_signal_state()
-        log.info("[SETTINGS SAVE] Режим изменён -> сигналы сброшены, поиск с начала")
+        log.info("[SETTINGS SAVE] Режим изменён -> сигналы сброшены, поиск с начала, monitor params updated")
 
     asyncio.create_task(monitor._refresh_symbols())
     return {"ok": True}
@@ -1039,8 +1047,9 @@ async def api_get_settings():
             s = Settings(id=1)
             session.add(s)
             await session.commit()
-        mode = get_mode(getattr(s, 'trade_mode', None))
-        log.info(f"[SETTINGS GET] max_open_trades={s.max_open_trades}, paper_balance={s.paper_balance}")
+        saved_mode = getattr(s, 'trade_mode', None) or 'intraday'
+        mode = get_mode(saved_mode)
+        log.info(f"[SETTINGS GET] max_open_trades={s.max_open_trades}, paper_balance={s.paper_balance}, trade_mode={saved_mode}")
         return {
             "min_turnover": float(s.min_turnover) if s.min_turnover else 0.0,
             "min_leverage": float(s.min_leverage) if s.min_leverage else 0.0,
@@ -1060,7 +1069,7 @@ async def api_get_settings():
             "max_open_trades": s.max_open_trades if s.max_open_trades else 5,
             "check_validity_before_grid": bool(getattr(s, 'check_validity_before_grid', False)),
             "exit_max_steps": s.exit_max_steps if s.exit_max_steps else 0,
-            "trade_mode": getattr(s, 'trade_mode', None) or 'intraday',
+            "trade_mode": saved_mode,
             "monitor_threshold": mode.monitor_threshold,
             "monitor_window_minutes": mode.monitor_window_minutes,
         }
@@ -1069,6 +1078,13 @@ async def api_get_settings():
 async def api_modes():
     """Список режимов торговли с их параметрами для UI."""
     from .modes import MODES, DEFAULT_MODE_ID
+    async with SessionLocal() as session:
+        s = await session.get(Settings, 1)
+        if not s:
+            s = Settings(id=1)
+            session.add(s)
+            await session.commit()
+        saved_mode = getattr(s, 'trade_mode', None) or DEFAULT_MODE_ID
     items = []
     for m in MODES.values():
         items.append({
@@ -1082,8 +1098,10 @@ async def api_modes():
             'space_rr_min': m.space_rr_min,
             'grid_step_pct': m.grid_step_pct,
             'initial_exit_pct': m.initial_exit_pct,
+            'monitor_threshold': m.monitor_threshold,
+            'monitor_window_minutes': m.monitor_window_minutes,
         })
-    return {'ok': True, 'items': items, 'default': DEFAULT_MODE_ID}
+    return {'ok': True, 'items': items, 'current_mode': saved_mode}
 
 @app.post("/api/clear_data")
 async def api_clear_data():

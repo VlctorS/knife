@@ -1459,10 +1459,6 @@ async function loadSettings() {
   // --- Режимы торговли ---
   const tradeMode = d.trade_mode || 'intraday';
   document.getElementById('s-trade_mode').value = tradeMode;
-  updateModeInfo(tradeMode);
-  updatePageTitle(tradeMode);
-  // Обновить пилюли в шапке
-  updateHeaderPillsFromSettings(tradeMode, d.monitor_threshold, d.monitor_window_minutes);
 
   updateGridPreview();
 }
@@ -1481,11 +1477,11 @@ async function saveSettings() {
   const data = {
     min_turnover: getVal('min-turnover'),
     min_leverage: getVal('min-lev'),
-    
+
     paper_balance: getVal('s-paper_balance') || 100,
     max_open_trades: parseInt(document.getElementById('s-max_open_trades').value) || 5,
     check_validity_before_grid: document.getElementById('s-check_validity_before_grid').checked,
-    trade_mode: document.getElementById('s-trade_mode').value,
+    trade_mode: document.getElementById('s-trade_mode').value || 'intraday',
     
     entry_pct: getVal('s-entry_pct'),
     grid_step_pct: getVal('s-grid_step_pct'),
@@ -1541,9 +1537,12 @@ async function loadModes() {
       opt.title = `Рабочий ТФ: ${m.work_tf} | Якорь: ${m.anchor_tf} | Мин. уверенность: ${m.min_confidence}`;
       sel.appendChild(opt);
     }
-    updateModeInfo(sel.value);
-    updatePageTitle(sel.value);
-    updateHeaderPills(sel.value, data.items);
+    // Устанавливаем current_mode из бэкенда
+    const currentMode = data.current_mode || 'intraday';
+    sel.value = currentMode;
+    updateModeInfo(currentMode);
+    updatePageTitle(currentMode);
+    updateHeaderPills(currentMode, data.items);
   } catch (e) {
     console.error('Не удалось загрузить режимы', e);
   }
@@ -1565,20 +1564,6 @@ function updateHeaderPills(modeId, modeItems) {
     const pWindow = document.getElementById('p-window');
     if (pWindow) pWindow.textContent = 'Окно ' + (current.monitor_window_minutes || 60) + 'м';
   }
-}
-
-function updateHeaderPillsFromSettings(modeId, monitorThreshold, monitorWindow) {
-  const labels = {scalp:'Скальпинг', intraday:'Интрадэй', swing:'Долгосрок'};
-  const label = labels[modeId] || modeId || 'Интрадэй';
-  const pMode = document.getElementById('p-mode');
-  if (pMode) {
-    pMode.textContent = label;
-    pMode.style.background = modeId === 'scalp' ? '#2563eb' : modeId === 'swing' ? '#7c3aed' : '#059669';
-  }
-  const pThreshold = document.getElementById('p-threshold');
-  if (pThreshold) pThreshold.textContent = 'Порог ±' + (monitorThreshold || 0.5) + '%';
-  const pWindow = document.getElementById('p-window');
-  if (pWindow) pWindow.textContent = 'Окно ' + (monitorWindow || 60) + 'м';
 }
 
 function updateModeInfo(modeId) {
