@@ -19,6 +19,16 @@ main { padding:24px; }
 h2 { margin:0; padding:12px 16px; font-size:14px; font-weight:600; border-bottom:1px solid #252b36; color:#8a93a6; }
 table { width:100%; border-collapse:collapse; font-size:13px; }
 th, td { padding:10px 16px; text-align:left; border-bottom:1px solid #252b36; white-space:nowrap; }
+.alerts-table { table-layout: fixed; }
+.alerts-table th:nth-child(1) { width:80px; }
+.alerts-table th:nth-child(2) { width:100px; }
+.alerts-table th:nth-child(3) { width:60px; }
+.alerts-table th:nth-child(4) { width:50px; }
+.alerts-table th:nth-child(5) { width:60px; }
+.alerts-table th:nth-child(6) { width:110px; }
+.alerts-table th:nth-child(7) { width:auto; }
+.alerts-table td[colspan] { white-space:normal !important; }
+.alerts-table tr.knife-group-header td { padding-top:8px !important; padding-bottom:8px !important; }
 th { color:#8a93a6; font-weight:500; font-size:12px; }
 .pump { color:#22c55e; font-weight:600; } .dump { color:#ef4444; font-weight:600; }
 .muted { color:#8a93a6; } .empty { padding:24px; text-align:center; color:#8a93a6; }
@@ -166,7 +176,7 @@ button:hover { background:#1d4ed8; }
   </div>
   
   <div id="tab-alerts" class="tab-content active"><div class="panel"><h2>Сигналы пампов/дампов</h2>
-    <table><thead><tr><th>Время (МСК)</th><th>Символ</th><th>Тип</th><th>ТФ</th><th>Изм</th><th>Цена</th><th>Причина / Статус</th></tr></thead>
+    <table class="alerts-table"><thead><tr><th>Время (МСК)</th><th>Символ</th><th>Тип</th><th>ТФ</th><th>Изм</th><th>Цена</th><th>Причина / Статус</th></tr></thead>
     <tbody id="alerts"><tr><td colspan="7" class="empty">Нет сигналов</td></tr></tbody></table></div></div>
     
   <div id="tab-stats" class="tab-content"><div class="panel"><h2>Монеты</h2>
@@ -452,6 +462,46 @@ button:hover { background:#1d4ed8; }
 const fmtNum = (n, d=6) => n==null ? "—" : Number(n).toLocaleString(undefined,{maximumFractionDigits:d});
 const fmtPnl = (n) => n==null ? "0.0000" : Number(n).toFixed(4);
 
+// ---------- Сохранение состояния групп "Не нож" ----------
+// groups: [{ id, items[], collapsed: bool }]
+let alertGroups = [];
+let alertGroupIdCounter = 0;
+
+function toggleGroup(groupId) {
+  const rows = document.querySelectorAll(`tr[data-group="${groupId}"]`);
+  rows.forEach(row => {
+    if (row.classList.contains('knife-group-header')) {
+      row.querySelector('.k').textContent = row.querySelector('.k').textContent === '▶' ? '▼' : '▶';
+    } else {
+      row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+    }
+  });
+  const g = alertGroups.find(g => g.id === groupId);
+  if (g) g.collapsed = !g.collapsed;
+}
+
+function rebuildAlerts() {
+  const tb = document.getElementById('alerts');
+  if (!alertGroups.length) { tb.innerHTML = ''; return; }
+
+  let rows = [];
+  alertGroups.forEach(g => {
+    const arrow = g.collapsed ? '▶' : '▼';
+    const rowStyle = g.collapsed ? 'display:none' : '';
+    const symbols = [...new Set(g.items.map(x => x.symbol))].join(', ');
+
+    rows.push(`
+      <tr class="knife-group-header" style="cursor:pointer; background:rgba(239,68,68,0.08); border-left:3px solid #ef4444;" data-group="${g.id}" onclick="toggleGroup('${g.id}')">
+        <td colspan="7" style="padding:10px"><span class="k">${arrow}</span> <strong>Не нож — ${g.items.length} шт.</strong> <span style="color:#8a93a6">| ${symbols}</span></td>
+      </tr>
+      ${g.items.map(item => {
+        const ts = new Date(item.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
+        return `<tr class="knife-group-row" data-group="${g.id}" style="${rowStyle}"><td class="muted">${ts}</td><td>${item.symbol}</td><td class="${item.kind==='PUMP'?'pump':'dump'}">${item.kind}</td><td>${item.timeframe||''}</td><td>${item.change_pct.toFixed(2)}%</td><td>${fmtNum(item.price_now)}</td><td class="reason-cell reason-skip">Не нож (нет длинной тени)</td></tr>`;
+      }).join('')}`);
+  });
+  tb.innerHTML = rows.join('');
+}
+
 // ---------- Информационная панель S/R уровней ----------
 function renderSrLevelsPanel(levels, currentPrice) {
   const list = document.getElementById('sr-levels-list');
@@ -736,60 +786,106 @@ async function updateBalanceAndPnl() {
 async function loadAlerts() {
   const d = await (await fetch('/api/alerts?limit=100')).json();
   const tb = document.getElementById('alerts');
-  if (!d.items.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">Нет сигналов</td></tr>'; return; }
+  if (!d.items.length) {
+    alertGroups = [];
+    tb.innerHTML = '<tr><td colspan="7" class="empty">Нет сигналов</td></tr>';
+    return;
+  }
 
-  // Группируем подряд идущие "Не нож" в разворачиваемый блок
-  const isNotKnife = (a) => (a.reason || '').includes('not a rejection candle');
-  const rows = [];
+  const isNotKnife = (a) => /Не нож/.test(a.reason || '');
+
+  // Разбиваем на непрерывные сегменты: группы "не нож" и обычные сигналы
+  const segments = [];
   let i = 0;
   while (i < d.items.length) {
     const a = d.items[i];
     if (isNotKnife(a)) {
-      // Собираем все подряд идущие "Не нож"
       const group = [a];
       i++;
       while (i < d.items.length && isNotKnife(d.items[i])) {
         group.push(d.items[i]);
         i++;
       }
-      const symbols = [...new Set(group.map(x => x.symbol))].join(', ');
-      const arrow = '▼';
-      rows.push(`
-        <tr class="knife-group-header" style="cursor:pointer; background:rgba(239,68,68,0.08); border-left:3px solid #ef4444;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'table-row':'none';this.querySelector('.k').textContent=this.querySelector('.k').textContent==='▼'?'▶':'▼'">
-          <td colspan="7" style="padding:10px"><span class="k">${arrow}</span> <strong>Не нож — ${group.length} шт.</strong> <span style="color:#8a93a6">| ${symbols}</span></td>
-        </tr>
-        ${group.map(g => {
-          const ts = new Date(g.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
-          return `<tr class="knife-group-row"><td class="muted">${ts}</td><td>${g.symbol}</td><td class="${g.kind==='PUMP'?'pump':'dump'}">${g.kind}</td><td>${g.timeframe||''}</td><td>${g.change_pct.toFixed(2)}%</td><td>${fmtNum(g.price_now)}</td><td class="reason-cell reason-skip">Не нож (нет длинной тени)</td></tr>`;
-        }).join('')}`);
+      segments.push({ type: 'notknife', items: group });
     } else {
-      // Обычный сигнал
-      const timeStr = new Date(a.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
-      let reasonText = a.reason || '';
-      let reasonClass = 'reason-skip';
-      if (a.timeframe.includes('5m')) {
-        reasonText = 'Резкий скачок (радар монитора). Бот ждет закрытия 4ч/1д свечи.';
-        reasonClass = 'reason-radar';
-      } else if (reasonText.includes('Успешный вход')) {
-        reasonClass = 'reason-success';
-      } else if (!reasonText) {
-        reasonText = 'Ожидание данных';
-      } else {
-        reasonText = reasonText
-            .replace(/not a rejection candle/g, 'Не нож (нет длинной тени)')
-            .replace(/body=/g, 'Тело: ')
-            .replace(/lo=/g, 'Нижняя тень: ')
-            .replace(/hi=/g, 'Верхняя тень: ')
-            .replace(/, /g, ', ')
-            .replace(/trend continuation:/g, 'Продолжение тренда на старшем ТФ. Сила:')
-            .replace(/price still at knife low \(falling knife\)/g, 'Цена все еще на минимуме ножа (падающий нож)')
-            .replace(/price still at knife high \(rising blow-off\)/g, 'Цена все еще на максимуме ножа (летящий нож)');
-      }
-      rows.push(`<tr><td class="muted">${timeStr}</td><td>${a.symbol}</td><td class="${a.kind==='PUMP'?'pump':'dump'}">${a.kind}</td><td>${a.timeframe||''}</td><td>${a.change_pct.toFixed(2)}%</td><td>${fmtNum(a.price_now)}</td><td class="reason-cell ${reasonClass}">${reasonText}</td></tr>`);
+      const normal = [a];
       i++;
+      while (i < d.items.length && !isNotKnife(d.items[i])) {
+        normal.push(d.items[i]);
+        i++;
+      }
+      segments.push({ type: 'normal', items: normal });
     }
   }
-  tb.innerHTML = rows.join('');
+
+  // Сопоставляем сегменты "notknife" с существующими группами
+  let normalRows = [];
+
+  for (const seg of segments) {
+    if (seg.type === 'notknife') {
+      // Собираем все timestamp+symbol из текущих групп
+      const existingKeys = new Set();
+      for (const g of alertGroups) {
+        for (const it of g.items) existingKeys.add(it.ts + '|' + it.symbol);
+      }
+      const newItems = seg.items.filter(it => !existingKeys.has(it.ts + '|' + it.symbol));
+
+      if (newItems.length > 0) {
+        // Добавляем новые элементы в начало первой группы (или создаём)
+        if (alertGroups.length > 0) {
+          alertGroups[0].items = [...newItems, ...alertGroups[0].items];
+        } else {
+          const id = 'g-' + alertGroupIdCounter++;
+          alertGroups.push({ id, items: [...newItems], collapsed: true });
+        }
+      }
+    } else {
+      // Обычные сигналы — строим строки сразу
+      for (const a of seg.items) {
+        const timeStr = new Date(a.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
+        let reasonText = a.reason || '';
+        let reasonClass = 'reason-skip';
+        if (a.timeframe.includes('5m')) {
+          reasonText = 'Резкий скачок (радар монитора). Бот ждет закрытия 4ч/1д свечи.';
+          reasonClass = 'reason-radar';
+        } else if (reasonText.includes('Успешный вход')) {
+          reasonClass = 'reason-success';
+        } else if (!reasonText) {
+          reasonText = 'Ожидание данных';
+        } else {
+          reasonText = reasonText
+              .replace(/not a rejection candle/g, 'Не нож (нет длинной тени)')
+              .replace(/body=/g, 'Тело: ')
+              .replace(/lo=/g, 'Нижняя тень: ')
+              .replace(/hi=/g, 'Верхняя тень: ')
+              .replace(/, /g, ', ')
+              .replace(/trend continuation:/g, 'Продолжение тренда на старшем ТФ. Сила:')
+              .replace(/price still at knife low \(falling knife\)/g, 'Цена все еще на минимуме ножа (падающий нож)')
+              .replace(/price still at knife high \(rising blow-off\)/g, 'Цена все еще на максимуме ножа (летящий нож)');
+        }
+        normalRows.push(`<tr><td class="muted">${timeStr}</td><td>${a.symbol}</td><td class="${a.kind==='PUMP'?'pump':'dump'}">${a.kind}</td><td>${a.timeframe||''}</td><td>${a.change_pct.toFixed(2)}%</td><td>${fmtNum(a.price_now)}</td><td class="reason-cell ${reasonClass}">${reasonText}</td></tr>`);
+      }
+    }
+  }
+
+  // Перестраиваем DOM
+  let html = '';
+  for (const g of alertGroups) {
+    const arrow = g.collapsed ? '▶' : '▼';
+    const rowStyle = g.collapsed ? 'display:none' : '';
+    const symbols = [...new Set(g.items.map(x => x.symbol))].join(', ');
+
+    html += `
+      <tr class="knife-group-header" style="cursor:pointer; background:rgba(239,68,68,0.08); border-left:3px solid #ef4444;" data-group="${g.id}" onclick="toggleGroup('${g.id}')">
+        <td colspan="7" style="padding:10px"><span class="k">${arrow}</span> <strong>Не нож — ${g.items.length} шт.</strong> <span style="color:#8a93a6">| ${symbols}</span></td>
+      </tr>
+      ${g.items.map(item => {
+        const ts = new Date(item.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
+        return `<tr class="knife-group-row" data-group="${g.id}" style="${rowStyle}"><td class="muted">${ts}</td><td>${item.symbol}</td><td class="${item.kind==='PUMP'?'pump':'dump'}">${item.kind}</td><td>${item.timeframe||''}</td><td>${item.change_pct.toFixed(2)}%</td><td>${fmtNum(item.price_now)}</td><td class="reason-cell reason-skip">Не нож (нет длинной тени)</td></tr>`;
+      }).join('')}`;
+  }
+  html += normalRows.join('');
+  tb.innerHTML = html;
 }
 
 async function loadStats() {
