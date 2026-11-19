@@ -1028,12 +1028,23 @@ async def api_post_settings(data: dict = Body(...)):
 
         log.info(f"[SETTINGS SAVE] СОХРАНЕНО: min_turnover={s.min_turnover}, paper_balance={s.paper_balance}, entry={s.entry_pct}, grid_step={s.grid_step_pct}, pos_entry={s.position_size_entry}, exit={s.initial_exit_pct}")
 
+    # Всегда инвалидируем кэш модулей config/modes, чтобы
+    # актуализировать параметры монитора при любом сохранении
+    import sys
+    for mod in ('app.config', 'app.modes'):
+        if mod in sys.modules:
+            del sys.modules[mod]
+
     # Обновляем параметры монитора на основе текущего режима
+    from .config import update_monitor_params
+    update_monitor_params(new_mode)
+    log.info(f"[SETTINGS SAVE] monitor params reloaded: threshold={update_monitor_params.__globals__['_monitor_threshold']}, window={update_monitor_params.__globals__['_monitor_window_minutes']}")
+
+    # Смена режима: сбрасываем сигналы и запускаем поиск заново (без state.alerts
+    # из старого режима). Старые сделки не трогаем — они дорабатывают свой режим.
     if mode_changed and trading_bot is not None:
-        from .config import update_monitor_params
-        update_monitor_params(new_mode)
         await trading_bot.reset_signal_state()
-        log.info("[SETTINGS SAVE] Режим изменён -> сигналы сброшены, поиск с начала, monitor params updated")
+        log.info("[SETTINGS SAVE] Режим изменён -> сигналы сброшены, поиск с начала")
 
     asyncio.create_task(monitor._refresh_symbols())
     return {"ok": True}
