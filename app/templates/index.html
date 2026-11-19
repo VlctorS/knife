@@ -551,7 +551,7 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   if (t.dataset.tab === 'alerts') loadAlerts();
   if (t.dataset.tab === 'trades') loadTrades();
   if (t.dataset.tab === 'closed') loadClosedTrades();
-  if (t.dataset.tab === 'settings') loadSettings();
+  if (t.dataset.tab === 'settings') { loadSettings(); loadModes(); }
 }));
 
 // ---------- Подвкладки НАСТРОЕК ----------
@@ -2334,16 +2334,17 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
   });
 });
 
-async function tick() { 
-  try { 
-    await loadStatus(); 
+async function tick() {
+  try {
+    await loadStatus();
     if(document.getElementById('tab-trades').classList.contains('active')) await loadTrades();
     if(document.getElementById('tab-closed').classList.contains('active')) await loadClosedTrades();
     if(document.getElementById('tab-alerts').classList.contains('active')) await loadAlerts();
     if(document.getElementById('tab-stats').classList.contains('active')) await loadStats();
-  } catch(e) { console.error(e); } 
+  } catch(e) { console.error(e); }
 }
-tick(); 
+tick();
+loadModes();
 setInterval(tick, 5000);
 </script>
 </body>
