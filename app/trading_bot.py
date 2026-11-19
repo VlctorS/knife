@@ -350,8 +350,9 @@ class TradingBot:
                         continue
 
                 # --- 12. Дедуп: помечаем пин как проверенный ---
-                seen_key = f"{sym}_{mode.id}_{pin_ts}"
-                self._seen_candles.add(seen_key)
+                for pin in pins:
+                    seen_key = f"{sym}_{mode.id}_{pin['ts']}"
+                    self._seen_candles.add(seen_key)
 
             await session.commit()
 
