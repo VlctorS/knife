@@ -1530,7 +1530,9 @@ async function loadModes() {
     if (!data.ok) return;
     const sel = document.getElementById('s-trade_mode');
     sel.innerHTML = '';
+    const itemsMap = {};
     for (const m of data.items) {
+      itemsMap[m.id] = m;
       const opt = document.createElement('option');
       opt.value = m.id;
       opt.textContent = m.label;
@@ -1540,15 +1542,18 @@ async function loadModes() {
     // Устанавливаем current_mode из бэкенда
     const currentMode = data.current_mode || 'intraday';
     sel.value = currentMode;
+
+    // Обновляем пилюли и инфо
+    const current = itemsMap[currentMode];
     updateModeInfo(currentMode);
     updatePageTitle(currentMode);
-    updateHeaderPills(currentMode, data.items);
+    updateHeaderPills(currentMode, current);
   } catch (e) {
     console.error('Не удалось загрузить режимы', e);
   }
 }
 
-function updateHeaderPills(modeId, modeItems) {
+function updateHeaderPills(modeId, currentItem) {
   const labels = {scalp:'Скальпинг', intraday:'Интрадэй', swing:'Долгосрок'};
   const label = labels[modeId] || modeId || 'Интрадэй';
   const pMode = document.getElementById('p-mode');
@@ -1556,13 +1561,11 @@ function updateHeaderPills(modeId, modeItems) {
     pMode.textContent = label;
     pMode.style.background = modeId === 'scalp' ? '#2563eb' : modeId === 'swing' ? '#7c3aed' : '#059669';
   }
-  // Найти текущий режим в списке и обновить threshold/window
-  const current = modeItems.find(m => m.id === modeId);
-  if (current) {
+  if (currentItem) {
     const pThreshold = document.getElementById('p-threshold');
-    if (pThreshold) pThreshold.textContent = 'Порог ±' + (current.monitor_threshold || 0.5) + '%';
+    if (pThreshold) pThreshold.textContent = 'Порог ±' + (currentItem.monitor_threshold || 0.5) + '%';
     const pWindow = document.getElementById('p-window');
-    if (pWindow) pWindow.textContent = 'Окно ' + (current.monitor_window_minutes || 60) + 'м';
+    if (pWindow) pWindow.textContent = 'Окно ' + (currentItem.monitor_window_minutes || 60) + 'м';
   }
 }
 
