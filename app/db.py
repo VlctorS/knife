@@ -66,6 +66,9 @@ class Settings(Base):
     max_open_trades: Mapped[int] = mapped_column(Integer, default=5)
     check_validity_before_grid: Mapped[bool] = mapped_column(default=False)
     exit_max_steps: Mapped[int] = mapped_column(Integer, default=0)  # 0 = без ограничения
+    # Выбранный режим торговли ('scalp' | 'intraday' | 'swing').
+    # Применяется к НОВЫМ сигналам; старые сделки доживают в своём режиме.
+    trade_mode: Mapped[str] = mapped_column(String, default='intraday')
 
 
 class SymbolStat(Base):
@@ -120,6 +123,9 @@ class Trade(Base):
     opened_at: Mapped[datetime.datetime] = mapped_column(DateTime, default=datetime.datetime.utcnow)
     closed_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=True)
     tf: Mapped[str] = mapped_column(String, default='60')
+    # Режим торговли (скальп / интрадэй / долгосрок).
+    # Старые сделки хранят режим, в котором были открыты.
+    mode: Mapped[str] = mapped_column(String, default='intraday')
 
     # --- Новые поля ---
     validity: Mapped[str] = mapped_column(String, default='green')          # green / orange / red
@@ -183,6 +189,9 @@ def _migrate_add_columns(conn):
         ('trades', 'validity_reasons', 'TEXT'),
         ('trades', 'exit_max_steps', 'INTEGER DEFAULT 0'),
         ('trades', 'last_action_at', 'TIMESTAMP'),
+        # --- Режимы торговли ---
+        ('trades', 'mode', "VARCHAR DEFAULT 'intraday'"),
+        ('settings', 'trade_mode', "VARCHAR DEFAULT 'intraday'"),
     ]
     for table, column, ddl in additions:
         if table not in insp.get_table_names():
