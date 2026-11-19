@@ -1527,6 +1527,7 @@ async function loadModes() {
   try {
     const res = await fetch('/api/modes');
     const data = await res.json();
+    console.log('[loadModes] /api/modes response:', data);
     if (!data.ok) return;
     const sel = document.getElementById('s-trade_mode');
     sel.innerHTML = '';
@@ -1541,10 +1542,12 @@ async function loadModes() {
     }
     // Устанавливаем current_mode из бэкенда
     const currentMode = data.current_mode || 'intraday';
+    console.log('[loadModes] current_mode =', currentMode, 'itemsMap keys =', Object.keys(itemsMap));
     sel.value = currentMode;
 
     // Обновляем пилюли и инфо
     const current = itemsMap[currentMode];
+    console.log('[loadModes] currentItem =', current);
     updateModeInfo(currentMode);
     updatePageTitle(currentMode);
     updateHeaderPills(currentMode, current);
