@@ -220,9 +220,6 @@ button:hover { background:#1d4ed8; }
       <p class="muted">Режим торговли (применяется к новым сигналам; открытые сделки доживают в своём режиме):</p>
       <div class="form-row"><select id="s-trade_mode" style="width:100%" onchange="updateModeInfo(this.value)"></select></div>
       <p class="muted" id="mode-info" style="font-size:12px;margin:-6px 0 14px 2px;"></p>
-      <div class="form-row" style="margin-bottom:16px;">
-        <button type="button" onclick="resetSignals()" style="background:#6b7280;">Сбросить сигналы и начать поиск заново</button>
-      </div>
       <p class="muted">Мин. оборот за 24ч (млн USDT):</p>
       <div class="form-row"><input type="number" id="min-turnover" step="0.1"></div>
       <p class="muted">Мин. макс. плечо:</p>
@@ -1556,22 +1553,6 @@ function updateModeInfo(modeId) {
     swing: '📈 4H/1D — Долгосрочные позиции поWeekly-контексту, широкие шаги, удержание до 28 дней',
   };
   el.textContent = `${labels[modeId] || modeId}: ${descs[modeId] || ''}`;
-}
-
-async function resetSignals() {
-  if (!confirm('Сбросить все сигналы и начать поиск заново? Открытые сделки не будут затронуты.')) return;
-  try {
-    const res = await fetch('/api/reset_signals', { method: 'POST' });
-    const d = await res.json();
-    if (d.ok) {
-      alert('Сигналы сброшены, поиск начат заново');
-      loadAlerts();
-    } else {
-      alert('Ошибка: ' + (d.error || 'неизвестно'));
-    }
-  } catch (e) {
-    alert('Ошибка при сбросе: ' + e.message);
-  }
 }
 
 async function clearData() {
