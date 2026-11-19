@@ -1538,6 +1538,7 @@ async function loadModes() {
       sel.appendChild(opt);
     }
     updateModeInfo(sel.value);
+    updatePageTitle(sel.value);
   } catch (e) {
     console.error('Не удалось загрузить режимы', e);
   }
@@ -1553,6 +1554,11 @@ function updateModeInfo(modeId) {
     swing: '📈 4H/1D — Долгосрочные позиции поWeekly-контексту, широкие шаги, удержание до 28 дней',
   };
   el.textContent = `${labels[modeId] || modeId}: ${descs[modeId] || ''}`;
+  updatePageTitle(labels[modeId] || modeId);
+}
+
+function updatePageTitle(modeLabel) {
+  document.title = `Knife Bot — ${modeLabel}`;
 }
 
 async function clearData() {
