@@ -34,6 +34,9 @@ class ModeParams:
     move_pct_min: float     # мин. диапазон свечи в % (защита тихих рынков)
     shadow_lookback_atr: float  # тень пин-бара должна достать уровень в N*ATR
     space_rr_min: float     # минимум (расстояние до цели) / (до entry-stop)
+    # --- Параметры монитора (памп/дамп) — автоматически применяются при выборе режима ---
+    monitor_threshold: float = 0.5      # мин. изменение цены в % для алерта монитора
+    monitor_window_minutes: int = 60    # окно сравнения для монитора в минутах
     # --- Управление позицией (перезаписывает глобальные настройки) ---
     grid_step_pct: Optional[float] = None
     grid_step_atr: Optional[float] = None
@@ -53,6 +56,8 @@ MODES: Dict[str, ModeParams] = {
         work_label='5m',
         anchor_tf='60',
         anchor_label='1H',
+        monitor_threshold=0.3,           # более чувствительный для быстрых движений
+        monitor_window_minutes=5,        # 5 минут
         confirm_window_sec=600,        # ~2 свечи 5m
         scan_period_sec=20,
         min_confidence=0.80,           # низкий ТФ -> максимальная планка
@@ -77,6 +82,8 @@ MODES: Dict[str, ModeParams] = {
         work_label='15m',
         anchor_tf='D',
         anchor_label='1D',
+        monitor_threshold=0.5,           # стандартный
+        monitor_window_minutes=60,       # 1 час
         confirm_window_sec=1800,       # ~2 свечи 15m
         scan_period_sec=60,
         min_confidence=0.70,
@@ -101,6 +108,8 @@ MODES: Dict[str, ModeParams] = {
         work_label='4H',
         anchor_tf='D',
         anchor_label='1D',
+        monitor_threshold=1.0,           # фильтр шума — только сильные движения
+        monitor_window_minutes=240,      # 4 часа
         confirm_window_sec=7200,       # ~2 свечи 4H
         scan_period_sec=300,
         min_confidence=0.60,           # старший ТФ -> меньше шума
