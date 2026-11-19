@@ -328,4 +328,273 @@ def moving_average(klines, period: int) -> Optional[float]:
     return sum(closes) / len(closes)
 
 
+# =============================================================================
+# Пин-бар у уровня + подтверждение входа (режимы scalp/intraday/swing)
+# =============================================================================
+
+@dataclass
+class PinContext:
+    """Полный контекст сигнала: пин-бар + уровень + тренд якоря."""
+    side: str = ''                  # 'LONG' | 'SHORT' | ''
+    pin_index: int = -1             # индекс пин-свечи в списке kline
+    entry_price: float = 0.0        # цена подтверждения (фактический вход)
+    stop_price: float = 0.0         # за экстремумом тени
+    target_price: float = 0.0       # ближайший встречный уровень SR
+    level_price: float = 0.0        # уровень, от которого отвергнули
+    atr_work: float = 0.0           # ATR рабочего ТФ (абсолютный)
+    anchor_trend: str = 'flat'      # 'up' | 'down' | 'flat' по закрытиям якоря
+    anchor_strength: float = 0.0
+    confidence: float = 0.0
+    reason: str = ''
+    confirm_type: str = ''          # 'close' | 'bos' | 'retest'
+    details: dict = field(default_factory=dict)
+
+
+def _kline_ohlc_v(k):
+    o, h, l, c = _to_float(k[K_OPEN]), _to_float(k[K_HIGH]), _to_float(k[K_LOW]), _to_float(k[K_CLOSE])
+    v = _to_float(k[K_VOL])
+    return o, h, l, c, v
+
+
+def is_pin_bar(k, shadow_frac: float, min_range_pct: float,
+               max_body_frac: float = 0.34) -> Tuple[bool, str, float]:
+    """Одиночная свеча — пин-бар с длинной тенью (не менее shadow_frac диапазона)?
+
+    Возвращает (is_pin, direction, range_pct):
+      direction 'down' — длинная НИЖНЯЯ тень (потенциальный LONG),
+      direction 'up'   — длинная ВЕРХНЯЯ тень (потенциальный SHORT).
+    Тело не больше max_body_frac диапазона — иначе это импульс, а не отвержение.
+    """
+    o, h, l, c, _v = _kline_ohlc_v(k)
+    rng = h - l
+    if rng <= 0 or o <= 0 or l <= 0:
+        return False, '', 0.0
+    range_pct = rng / o * 100.0
+    if range_pct < min_range_pct:
+        return False, '', range_pct
+
+    body = abs(c - o)
+    upper = h - max(o, c)
+    lower = min(o, c) - l
+    if body > rng * max_body_frac:
+        return False, '', range_pct
+
+    if lower / rng >= shadow_frac:
+        return True, 'down', range_pct
+    if upper / rng >= shadow_frac:
+        return True, 'up', range_pct
+    return False, '', range_pct
+
+
+def trend_by_closes(klines, lookback: int = 8) -> Tuple[str, float]:
+    """Трендовый фильтр старшего ТФ по MA-закрытиям и направлению MACD.
+
+    Ключевое отличие от trend_context(): здесь флэт — это НЕ «против
+    тренда», а отсутствие направления; вход разрешён только когда
+    направление явного тренда совпадает со стороной сделки.
+    Возвращает ('up'|'down'|'flat', strength 0..1).
+    """
+    if not klines or len(klines) < 30:
+        return 'flat', 0.0
+    closes = [_to_float(k[K_CLOSE]) for k in klines[:-1]]
+    closes = [c for c in closes if c > 0]
+    if len(closes) < 26:
+        return 'flat', 0.0
+
+    ma_fast = sum(closes[-9:]) / 9.0
+    ma_slow = sum(closes[-26:]) / 26.0
+
+    # EMA/MACD по последним свечам якорного ТФ
+    ema12 = ema26 = closes[0]
+    hist_prev = None
+    hist_pos = hist_neg = 0
+    k12, k26 = 2 / 13.0, 2 / 27.0
+    for c in closes:
+        ema12 = c * k12 + ema12 * (1 - k12)
+        ema26 = c * k26 + ema26 * (1 - k26)
+        hist = ema12 - ema26
+        if hist_prev is not None:
+            if hist > hist_prev:
+                hist_pos += 1
+            elif hist < hist_prev:
+                hist_neg += 1
+        hist_prev = hist
+
+    slope = (ma_fast - ma_slow) / ma_slow * 100.0 if ma_slow > 0 else 0.0
+    rising = hist_pos > hist_neg
+    falling = hist_neg > hist_pos
+
+    if slope > 0.15 and rising:
+        direction = 'up'
+    elif slope < -0.15 and falling:
+        direction = 'down'
+    else:
+        return 'flat', 0.0
+
+    n = max(hist_pos + hist_neg, 1)
+    agreement = max(hist_pos, hist_neg) / n
+    mag = min(abs(slope) / 1.5, 1.0)
+    strength = round(min(0.5 * agreement + 0.5 * mag, 1.0), 3)
+    return direction, strength
+
+
+def find_pins_with_confirm(kl, levels, atr_value: float, current_price: float,
+                           shadow_frac: float, move_atr_mult: float,
+                           move_pct_min: float, lookback_candles: int = 36,
+                           max_pin_age_candles: int = 6) -> List[dict]:
+    """Ищем свежие пин-бары у уровней и проверяем подтверждение.
+
+    kl — список kline рабочего ТФ (последний — незакрытая свеча).
+    Подтверждение (любое из трёх, в пределах max_pin_age_candles):
+      1) close  — следующая(ие) свеча(и) закрылась(лись) выше тела пин-бара
+                  (для LONG над max(open,close) пина);
+      2) bos    — break of structure: закрытие за локальным экстремумом
+                  микроструктуры (high/low соседних свечей вокруг пина);
+      3) retest — ретест тени: цена коснулась 50% уровня тени пина и
+                  отверглась (закрытие от неё в сторону сделки).
+
+    Уровень: экстремальная точка тени пин-бара должна доставать S/R уровня
+    рабочего ТФ (допуск ~ shadow_lookback_atr*ATR — считаем попаданием,
+    если |pin_extreme - level| <= допуск или уровень лежит внутри тени).
+
+    Возвращает список найденных кандидатов (максимум 3):
+      {'index', 'side', 'extreme', 'body_top', 'body_bottom', 'confirm': {...}}
+    """
+    out: List[dict] = []
+    if not kl or len(kl) < 12 or not atr_value or not current_price:
+        return out
+
+    closed_end = len(kl) - 1  # последний закрытый индекс (kl[-1] — текущая свеча)
+    start = max(1, closed_end - lookback_candles)
+    avg_vol = _avg_volume(kl, VOLUME_LOOKBACK_DEFAULT)
+    tol = max(atr_value * 0.8, current_price * 0.0015)
+
+    # --- BOS-структуры: high/low соседей окна пина ---
+    def _local_struct(i: int, side: str):
+        lo = max(1, i - 4)
+        hi = min(closed_end, i + 4)
+        neigh = [j for j in range(lo, hi + 1) if j != i]
+        if not neigh:
+            return None
+        if side == 'LONG':
+            # слом вверх: максимум high соседей (кроме самого пина)
+            return max(_to_float(kl[j][K_HIGH]) for j in neigh if j <= closed_end - 1) \
+                if any(j <= closed_end - 1 for j in neigh) else None
+        return min(_to_float(kl[j][K_LOW]) for j in neigh if j <= closed_end - 1) \
+            if any(j <= closed_end - 1 for j in neigh) else None
+
+    for i in range(start, closed_end):
+        k = kl[i]
+        ok, direction, range_pct = is_pin_bar(k, shadow_frac,
+                                              max(move_pct_min, atr_value / _to_float(k[K_OPEN]) * 100 * move_atr_mult))
+        if not ok:
+            continue
+        o, h, l, c, v = _kline_ohlc_v(k)
+        body_top, body_bottom = max(o, c), min(o, c)
+
+        if direction == 'down':
+            side = 'LONG'
+            extreme = l
+        else:
+            side = 'SHORT'
+            extreme = h
+
+        # нужен контакт с уровнем SR
+        touched = None
+        for lv in (levels or []):
+            p = lv.get('price', 0)
+            if p <= 0:
+                continue
+            inside = (min(body_bottom, extreme) - tol) <= p <= (max(body_top, extreme) + tol)
+            near = abs(extreme - p) <= tol
+            if inside or near:
+                # для LONG используем support (ниже цены тела), для SHORT — resistance
+                if side == 'LONG' and p > current_price:
+                    continue
+                if side == 'SHORT' and p < current_price:
+                    continue
+                touched = lv
+                break
+        if touched is None:
+            continue
+
+        vol_ratio = (v / avg_vol) if avg_vol > 0 else None
+        if vol_ratio is not None and vol_ratio < 1.0:
+            # пин без объёма — вероятная пустота, не кандидат
+            continue
+
+        # age: сколько закрытых свечей прошло после пина
+        age_max = min(max_pin_age_candles, closed_end - i)
+        confirm = None
+        struct = _local_struct(i, side)
+
+        for j in range(i + 1, i + 1 + age_max):
+            if j > closed_end:
+                break
+            o_j, h_j, l_j, c_j, _v_j = _kline_ohlc_v(kl[j])
+            if c_j <= 0:
+                continue
+            if side == 'LONG':
+                # close above body пина
+                if c_j > body_top and confirm is None:
+                    confirm = {'type': 'close', 'index': j, 'price': c_j}
+                # BOS: закрытие выше структуры
+                if struct and c_j > struct:
+                    confirm = {'type': 'bos', 'index': j, 'price': c_j,
+                               'struct': struct}
+                    break
+                # retest тени: low дошёл до 50% тени и закрылся выше середины тела
+                mid_shadow = (body_bottom + extreme) / 2.0
+                if l_j <= mid_shadow and c_j > body_bottom:
+                    if confirm is None or confirm['type'] == 'close':
+                        confirm = {'type': 'retest', 'index': j, 'price': c_j,
+                                   'level': mid_shadow}
+            else:
+                if c_j < body_bottom and confirm is None:
+                    confirm = {'type': 'close', 'index': j, 'price': c_j}
+                if struct and c_j < struct:
+                    confirm = {'type': 'bos', 'index': j, 'price': c_j,
+                               'struct': struct}
+                    break
+                mid_shadow = (body_top + extreme) / 2.0
+                if h_j >= mid_shadow and c_j < body_top:
+                    if confirm is None or confirm['type'] == 'close':
+                        confirm = {'type': 'retest', 'index': j, 'price': c_j,
+                                   'level': mid_shadow}
+            if confirm and confirm['type'] in ('close', 'retest') and j >= i + 2:
+                # close/retest достаточно одного-двух свечей; идём дальше за BOS
+                pass
+
+        if confirm is None:
+            continue
+
+        out.append({
+            'index': i,
+            'side': side,
+            'pin_open': o, 'pin_high': h, 'pin_low': l, 'pin_close': c,
+            'extreme': extreme,
+            'body_top': body_top, 'body_bottom': body_bottom,
+            'range_pct': round(range_pct, 3),
+            'level_price': touched['price'],
+            'level_strength': touched.get('strength', 0.5),
+            'vol_ratio': round(vol_ratio, 2) if vol_ratio else None,
+            'confirm': confirm,
+            'ts': _to_float(k[0]),
+        })
+        if len(out) >= 3:
+            break
+    return out
+
+
+VOLUME_LOOKBACK_DEFAULT = 20
+
+
+def _avg_volume(kl, lookback: int = 20) -> float:
+    if len(kl) < lookback + 1:
+        return 0.0
+    vols = [_to_float(k[K_VOL]) for k in kl[-(lookback + 1):-1]]
+    vols = [v for v in vols if v > 0]
+    return sum(vols) / len(vols) if vols else 0.0
+
+
 state = AppState()
