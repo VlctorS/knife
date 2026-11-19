@@ -293,6 +293,7 @@ async def api_trades(limit: int = 100):
                 'change_pct': round(change_pct, 2),
                 'exit_step': t.exit_step,
                 'tf': t.tf or '60',
+                'mode': getattr(t, 'mode', None) or 'intraday',
                 'opened_at': t.opened_at.isoformat() if t.opened_at else None,
                 'closed_at': t.closed_at.isoformat() if t.closed_at else None,
                 'validity': validity,
@@ -1000,12 +1001,32 @@ async def api_post_settings(data: dict = Body(...)):
         if "check_validity_before_grid" in data:
             s.check_validity_before_grid = bool(data["check_validity_before_grid"])
             log.info(f"[SETTINGS SAVE] check_validity_before_grid = {s.check_validity_before_grid}")
-        
+
+        # Режим торговли (скальп/интрадэй/долгосрок). Применяется к НОВЫМ
+        # сигналам; открытые сделки продолжают обрабатываться в своём режиме.
+        mode_changed = False
+        if "trade_mode" in data:
+            from .modes import VALID_MODE_IDS
+            new_mode = str(data["trade_mode"]).strip()
+            if new_mode in VALID_MODE_IDS:
+                if s.trade_mode != new_mode:
+                    mode_changed = True
+                s.trade_mode = new_mode
+                log.info(f"[SETTINGS SAVE] trade_mode = {new_mode}")
+            else:
+                log.warning(f"[SETTINGS SAVE] Неизвестный trade_mode: {data.get('trade_mode')}")
+
         await session.commit()
         await session.refresh(s)
         
         log.info(f"[SETTINGS SAVE] СОХРАНЕНО: min_turnover={s.min_turnover}, paper_balance={s.paper_balance}, entry={s.entry_pct}, grid_step={s.grid_step_pct}, pos_entry={s.position_size_entry}, exit={s.initial_exit_pct}")
-        
+
+    # Смена режима: сбрасываем сигналы и запускаем поиск заново (без state.alerts
+    # из старого режима). Старые сделки не трогаем — они дорабатывают свой режим.
+    if mode_changed and trading_bot is not None:
+        await trading_bot.reset_signal_state()
+        log.info("[SETTINGS SAVE] Режим изменён -> сигналы сброшены, поиск с начала")
+
     asyncio.create_task(monitor._refresh_symbols())
     return {"ok": True}
 
@@ -1037,7 +1058,28 @@ async def api_get_settings():
             "max_open_trades": s.max_open_trades if s.max_open_trades else 5,
             "check_validity_before_grid": bool(getattr(s, 'check_validity_before_grid', False)),
             "exit_max_steps": s.exit_max_steps if s.exit_max_steps else 0,
+            "trade_mode": getattr(s, 'trade_mode', None) or 'intraday',
         }
+
+@app.get("/api/modes")
+async def api_modes():
+    """Список режимов торговли с их параметрами для UI."""
+    from .modes import MODES, DEFAULT_MODE_ID
+    items = []
+    for m in MODES.values():
+        items.append({
+            'id': m.id,
+            'label': m.label,
+            'work_tf': m.work_label,
+            'anchor_tf': m.anchor_label,
+            'min_confidence': m.min_confidence,
+            'max_steps': m.max_steps,
+            'hold_max_hours': m.hold_max_hours,
+            'space_rr_min': m.space_rr_min,
+            'grid_step_pct': m.grid_step_pct,
+            'initial_exit_pct': m.initial_exit_pct,
+        })
+    return {'ok': True, 'items': items, 'default': DEFAULT_MODE_ID}
 
 @app.post("/api/clear_data")
 async def api_clear_data():
@@ -1047,6 +1089,15 @@ async def api_clear_data():
         await session.commit()
     state.alerts.clear()
     return {"ok": True, "message": "Data cleared"}
+
+@app.post("/api/reset_signals")
+async def api_reset_signals():
+    """Сброс сигналов и перезапуск поиска (без удаления сделок)."""
+    if trading_bot is not None:
+        await trading_bot.reset_signal_state()
+    else:
+        state.alerts.clear()
+    return {"ok": True, "message": "Signals reset, search restarted"}
 
 @app.get("/favicon.ico")
 async def favicon():

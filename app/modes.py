@@ -96,11 +96,11 @@ MODES: Dict[str, ModeParams] = {
     ),
     'swing': ModeParams(
         id='swing',
-        label='Долгосрок (4H / якорь 1W)',
+        label='Долгосрок (4H / якорь 1D)',
         work_tf='240',
         work_label='4H',
-        anchor_tf='W',
-        anchor_label='1W',
+        anchor_tf='D',
+        anchor_label='1D',
         confirm_window_sec=7200,       # ~2 свечи 4H
         scan_period_sec=300,
         min_confidence=0.60,           # старший ТФ -> меньше шума
