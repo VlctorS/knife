@@ -152,14 +152,14 @@ button:hover { background:#1d4ed8; }
     <div class="stat"><div class="k"><span class="status-dot"></span>Время в сети</div><div class="v" id="s-uptime">—</div></div>
     
     <div class="stat balance-card">
-      <div class="k">Бумажный баланс <span class="balance-delta" id="s-balance-delta"></span></div>
-      <div class="v" id="s-balance">100.00 USDT</div>
+      <div class="k">Реальный баланс <span class="balance-delta" id="s-balance-delta"></span></div>
+      <div class="v" id="s-balance">— USDT</div>
     </div>
-    
+
     <!-- НОВАЯ КАРТОЧКА -->
     <div class="stat live-balance-card">
-      <div class="k">Живой баланс <span class="balance-delta" id="s-live-balance-delta"></span></div>
-      <div class="v" id="s-live-balance">100.00 USDT</div>
+      <div class="k">В сети (Realized + Open PnL)</div>
+      <div class="v" id="s-live-balance">— USDT</div>
     </div>
 
     <div class="stat pnl-card" id="pnl-card">
@@ -184,7 +184,12 @@ button:hover { background:#1d4ed8; }
     <table><thead><tr><th>Символ</th><th>Ср. прострел</th><th>Макс</th><th>Авто-вход</th><th>Плечо</th><th>Действие</th></tr></thead>
     <tbody id="stats"><tr><td colspan="6" class="empty">Загрузка...</td></tr></tbody></table></div></div>
     
-  <div id="tab-trades" class="tab-content"><div class="panel"><h2>Открытые сделки</h2>
+  <div id="tab-trades" class="tab-content"><div class="panel">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+      <h2 style="margin: 0;">Открытые сделки</h2>
+      <button onclick="syncPositions()" style="background: #0ea5e9; padding: 6px 14px; font-size: 12px; border-radius: 6px;">🔄 Синхронизировать с Bybit</button>
+    </div>
+    <p class="muted" id="sync-status" style="font-size: 12px; margin: 0 0 8px 0;"></p>
     <table><thead><tr>
       <th>Время (МСК)</th><th>Символ</th><th>Разворот</th><th>Тип</th>
       <th>Ср. цена</th><th>Тек. цена</th><th>Изм. %</th>
@@ -225,10 +230,9 @@ button:hover { background:#1d4ed8; }
       <div class="form-row"><input type="number" id="min-turnover" step="0.1"></div>
       <p class="muted">Мин. макс. плечо:</p>
       <div class="form-row"><input type="number" id="min-lev" step="1"></div>
-      <p class="muted">Бумажный баланс (USDT):</p>
-      <div class="form-row"><input type="number" id="s-paper_balance" step="1" min="1"></div>
       <p class="muted">Максимум одновременно открытых сделок:</p>
       <div class="form-row"><input type="number" id="s-max_open_trades" step="1" min="1"></div>
+      <p class="muted" style="color: #f59e0b; font-size: 12px;">⚠ Реальный баланс подгружается автоматически с Bybit при запуске бота.</p>
       <div style="margin-top:24px">
         <button onclick="saveSettings()">Сохранить</button>
         <button onclick="clearData()" style="background:#ef4444; margin-left:8px;">Очистить базу</button>
@@ -359,10 +363,10 @@ button:hover { background:#1d4ed8; }
 <div class="modal" id="sim-modal">
   <div class="modal-content sim-modal-content">
     <h2 id="sim-title">Моделирование</h2>
-    
+
     <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px; background: #141820; padding: 12px; border-radius: 8px; border: 1px solid #252b36;">
-        <label style="color: #8a93a6; font-size: 13px;">Бумажный баланс (USDT):</label>
-        <input type="number" id="sim-balance" value="100" step="1" min="1" style="width: 100px; padding: 6px;">
+        <label style="color: #8a93a6; font-size: 13px;">Используемый баланс:</label>
+        <span id="sim-current-balance" style="color: #e5e7eb; font-size: 14px; font-weight: 600;">—</span>
         <button onclick="runSimulation()" style="background: #2563eb; padding: 6px 12px; font-size: 13px;">Пересчитать</button>
     </div>
 
@@ -718,61 +722,81 @@ async function updateBalanceAndPnl() {
     // Получаем историю балансов с бэкенда
     const histRes = await fetch('/api/balance_history');
     const histData = await histRes.json();
-    
-    const settingsRes = await fetch('/api/settings');
-    const settings = await settingsRes.json();
-    const paperBalanceBase = settings.paper_balance || 100.0;
-    
+
     const statsRes = await fetch('/api/closed_stats');
     const stats = await statsRes.json();
     const totalRealizedPnl = stats.total_pnl || 0;
-    
-    // Текущий реализованный баланс
-    const currentRealizedBalance = paperBalanceBase + totalRealizedPnl;
-    
+
     const openStatsRes = await fetch('/api/open_pnl');
     const openStats = await openStatsRes.json();
     const livePnl = openStats.total_pnl || 0;
-    
-    // Текущий живой баланс
-    const currentLiveBalance = currentRealizedBalance + livePnl;
 
-    // Берем значения минуту назад (первое значение из массива истории)
-    let prevRealized = currentRealizedBalance;
-    let prevLive = currentLiveBalance;
+    console.log('[BALANCE UI] histData:', histData);
+
+    // Проверяем доступность Bybit API
+    let apiAvailable = false;
+    let liveBal = 0;        // equity (с нереализованным PnL)
+    let realizedBal = 0;    // wallet (без нереализованного PnL)
+    let prevLive = 0;
 
     if (histData.ok && histData.items && histData.items.length > 0) {
-      prevRealized = histData.items[0].realized_balance;
+      const latest = histData.items[histData.items.length - 1];
+      apiAvailable = latest.api_available;
+      liveBal = latest.live_balance;
+      realizedBal = latest.realized_balance != null ? latest.realized_balance : liveBal;
       prevLive = histData.items[0].live_balance;
     }
 
-    // Вычисляем дельту
-    const deltaRealized = currentRealizedBalance - prevRealized;
+    // Если API недоступен — считаем от стартового капитала по БД
+    if (!apiAvailable) {
+      liveBal = 100.0 + totalRealizedPnl + livePnl;
+      realizedBal = 100.0 + totalRealizedPnl;
+      prevLive = realizedBal;
+    }
+
+    const currentLiveBalance = liveBal;
+    const prevRealized = prevLive;
+
+    // Вычисляем дельты
+    const deltaRealized = realizedBal - prevRealized;
     const deltaLive = currentLiveBalance - prevLive;
 
     // Вспомогательная функция для форматирования дельты
     const fmtDelta = (val) => {
-      if (Math.abs(val) < 0.0001) return ''; // Если изменений нет, не показываем
+      if (Math.abs(val) < 0.0001) return '';
       const sign = val > 0 ? '+' : '';
       const cls = val > 0 ? 'pump' : 'dump';
       return `<span class="${cls}">${sign}${val.toFixed(4)}</span>`;
     };
 
-    // Обновляем Бумажный баланс
+    // Обновляем Реальный баланс (wallet Bybit, без unrealised PnL)
+    console.log('[BALANCE UI] apiAvailable=', apiAvailable, 'realizedBal=', realizedBal, 'liveBal=', liveBal);
     const balEl = document.getElementById('s-balance');
-    balEl.textContent = currentRealizedBalance.toFixed(2) + ' USDT';
-    balEl.className = currentRealizedBalance >= paperBalanceBase ? 'v pump' : 'v dump';
+    balEl.textContent = apiAvailable
+      ? realizedBal.toFixed(2) + ' USDT'
+      : 'Не подключено';
+    balEl.className = apiAvailable
+      ? (realizedBal >= 100.0 ? 'v pump' : 'v dump')
+      : 'v';
+    
+    // Подсказка про API
+    const balKeyEl = balEl.parentElement.querySelector('.k');
+    if (apiAvailable) {
+      balKeyEl.innerHTML = 'Реальный баланс <span class="balance-delta" id="s-balance-delta"></span>';
+    } else {
+      balKeyEl.innerHTML = 'Реальный баланс <span style="color:#f59e0b;font-size:11px;">⚠ API не настроен</span>';
+    }
 
     const balDeltaEl = document.getElementById('s-balance-delta');
     balDeltaEl.innerHTML = fmtDelta(deltaRealized);
 
-    // Обновляем Живой баланс
+    // Обновляем В сети (equity = wallet + unrealised PnL)
     const liveBalEl = document.getElementById('s-live-balance');
     liveBalEl.textContent = currentLiveBalance.toFixed(2) + ' USDT';
-    liveBalEl.className = currentLiveBalance >= paperBalanceBase ? 'v pump' : 'v dump';
+    liveBalEl.className = currentLiveBalance >= realizedBal ? 'v pump' : 'v dump';
 
     const liveBalDeltaEl = document.getElementById('s-live-balance-delta');
-    liveBalDeltaEl.innerHTML = fmtDelta(deltaLive);
+    if (liveBalDeltaEl) liveBalDeltaEl.innerHTML = fmtDelta(deltaLive);
 
     // Обновляем Живой PnL
     const pnlEl = document.getElementById('s-live-pnl');
@@ -1432,8 +1456,7 @@ async function loadSettings() {
   
   document.getElementById('min-turnover').value = d.min_turnover;
   document.getElementById('min-lev').value = d.min_leverage;
-  
-  document.getElementById('s-paper_balance').value = d.paper_balance || 100;
+
   document.getElementById('s-max_open_trades').value = d.max_open_trades || 5;
   document.getElementById('s-check_validity_before_grid').checked = !!d.check_validity_before_grid;
   
@@ -1478,7 +1501,6 @@ async function saveSettings() {
     min_turnover: getVal('min-turnover'),
     min_leverage: getVal('min-lev'),
 
-    paper_balance: getVal('s-paper_balance') || 100,
     max_open_trades: parseInt(document.getElementById('s-max_open_trades').value) || 5,
     check_validity_before_grid: document.getElementById('s-check_validity_before_grid').checked,
     trade_mode: document.getElementById('s-trade_mode').value || 'intraday',
@@ -1588,6 +1610,35 @@ function updatePageTitle(modeId) {
   const labels = {scalp:'Скальпинг', intraday:'Интрадэй', swing:'Долгосрок'};
   const label = labels[modeId] || modeId || 'Интрадэй';
   document.title = `Knife Bot — ${label}`;
+}
+
+async function syncPositions() {
+  const statusEl = document.getElementById('sync-status');
+  statusEl.textContent = 'Синхронизация...';
+  statusEl.style.color = '#0ea5e9';
+  
+  try {
+    const res = await fetch('/api/sync_positions', { method: 'POST' });
+    const data = await res.json();
+    
+    if (data.ok) {
+      statusEl.textContent = `✓ Синхронизировано позиций: ${data.synced || 'обновлено'}`;
+      statusEl.style.color = '#22c55e';
+      // Перезагружаем список сделок
+      await loadTrades();
+    } else {
+      statusEl.textContent = `✗ Ошибка: ${data.error}`;
+      statusEl.style.color = '#ef4444';
+    }
+  } catch (e) {
+    statusEl.textContent = `✗ Ошибка: ${e.message}`;
+    statusEl.style.color = '#ef4444';
+  }
+  
+  // Через 5 секунд убираем статус
+  setTimeout(() => {
+    statusEl.textContent = '';
+  }, 5000);
 }
 
 async function clearData() {
@@ -1859,12 +1910,16 @@ async function openSimulation() {
   }
 
   const globalData = await (await fetch('/api/settings')).json();
-  
+
   const getVal = (id, fallback) => {
     const v = parseFloat(document.getElementById(id).value);
     return v > 0 ? v : fallback;
   };
-  
+
+  // Получаем реальный баланс
+  const realBalance = globalData.real_balance || 100.0;
+  document.getElementById('sim-current-balance').textContent = realBalance.toFixed(2) + ' USDT';
+
   lastSimPayload = {
     entry_price: tradeData.entry_price,
     entry_size: getVal('cfg-position_size_entry', globalData.position_size_entry) || 6,
@@ -1878,10 +1933,10 @@ async function openSimulation() {
     fee_pct: globalData.fee_pct || 0.055,
     leverage: tradeData.leverage || 10,
     side: tradeData.side,
-    balance: parseFloat(document.getElementById('sim-balance').value) || 100
+    balance: realBalance
   };
 
-  document.getElementById('sim-title').textContent = `Симуляция для ${symbol} (${tradeData.side}, Вход: ${tradeData.entry_price})`;
+  document.getElementById('sim-title').textContent = `Моделирование для ${symbol} (${tradeData.side}, Вход: ${tradeData.entry_price})`;
   
   activateSimTab('profit');
   
@@ -1892,8 +1947,11 @@ async function openSimulation() {
 
 async function runSimulation() {
   if (!lastSimPayload) return;
-  
-  lastSimPayload.balance = parseFloat(document.getElementById('sim-balance').value) || 100;
+
+  // Баланс берем из глобальных настроек (реальный с Bybit)
+  const settingsRes = await fetch('/api/settings');
+  const settingsData = await settingsRes.json();
+  lastSimPayload.balance = settingsData.real_balance || 100.0;
 
   document.getElementById('sim-profit-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
   document.getElementById('sim-loss-body').innerHTML = '<tr><td colspan="6" class="muted">Расчет...</td></tr>';
@@ -2359,9 +2417,20 @@ async function tick() {
     if(document.getElementById('tab-stats').classList.contains('active')) await loadStats();
   } catch(e) { console.error(e); }
 }
+
+// При первом запуске — синхронизируем позиции
+async function init() {
+  try {
+    await syncPositions();
+  } catch(e) {
+    console.error('Init sync failed:', e);
+  }
+}
+
 tick();
 loadModes();
 setInterval(tick, 5000);
+init();
 </script>
 </body>
 </html>

@@ -2,7 +2,13 @@ import datetime
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# Загружаем .env из корня проекта (где находится этот файл)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+_env_path = os.path.join(_ROOT, '.env')
+if os.path.exists(_env_path):
+    load_dotenv(_env_path, override=True)
+
 from typing import Optional
 from sqlalchemy import String, Float, Integer, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -60,9 +66,6 @@ class Settings(Base):
     exit_contract_pct: Mapped[float] = mapped_column(Float, default=50.0)
     min_confidence: Mapped[float] = mapped_column(Float, default=0.4)
     fee_pct: Mapped[float] = mapped_column(Float, default=0.055)
-
-    # --- Новые настройки ---
-    paper_balance: Mapped[float] = mapped_column(Float, default=100.0)
     max_open_trades: Mapped[int] = mapped_column(Integer, default=5)
     check_validity_before_grid: Mapped[bool] = mapped_column(default=False)
     exit_max_steps: Mapped[int] = mapped_column(Integer, default=0)  # 0 = без ограничения
@@ -133,6 +136,10 @@ class Trade(Base):
     exit_max_steps: Mapped[int] = mapped_column(Integer, default=0)  # 0 = без ограничения
     last_action_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, nullable=True)  # для cooldown индикатора
 
+    # --- ID ордеров и позиций Bybit ---
+    bybit_order_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    bybit_position_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
 
 class TradeHistory(Base):
     __tablename__ = 'trade_history'
@@ -181,7 +188,6 @@ def _migrate_add_columns(conn):
         ('trades', 'tf', "VARCHAR DEFAULT '60'"),
         ('trade_history', 'details', 'TEXT'),
         # --- Миграция новых полей ---
-        ('settings', 'paper_balance', 'FLOAT DEFAULT 100'),
         ('settings', 'max_open_trades', 'INTEGER DEFAULT 5'),
         ('settings', 'check_validity_before_grid', 'INTEGER DEFAULT 0'),
         ('settings', 'exit_max_steps', 'INTEGER DEFAULT 0'),
@@ -192,6 +198,10 @@ def _migrate_add_columns(conn):
         # --- Режимы торговли ---
         ('trades', 'mode', "VARCHAR DEFAULT 'intraday'"),
         ('settings', 'trade_mode', "VARCHAR DEFAULT 'intraday'"),
+        # --- ID ордеров и позиций Bybit ---
+        ('trades', 'bybit_order_id', 'TEXT'),
+        ('trades', 'bybit_position_id', 'TEXT'),
+        # --- Удаление paper_balance (больше не нужно) ---
     ]
     for table, column, ddl in additions:
         if table not in insp.get_table_names():

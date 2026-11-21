@@ -5,6 +5,7 @@ import time
 import datetime
 import json
 from contextlib import asynccontextmanager
+from urllib.parse import urlencode
 import collections
 from datetime import timedelta
 
@@ -13,6 +14,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, delete, func
 
+from .bybit import REST_BASE, _sign_request, _read_json
 from .config import settings
 from .monitor import monitor
 from .state import state
@@ -34,40 +36,57 @@ trading_bot = None
 balance_history = collections.deque(maxlen=120)
 
 async def record_balance_loop():
-    """Фоновая задача для записи снимков балансов каждые 10 секунд."""
+    """Фоновая задача для записи снимков реальных балансов каждые 10 секунд."""
     await asyncio.sleep(5)  # Даем боту время на инициализацию
     while True:
         try:
+            # Получаем реальный баланс с Bybit
+            real_balance = await trading_bot.rest.get_balance() if trading_bot and trading_bot.rest else {}
+
+            wallet_value = real_balance.get('wallet_value', 0)
+            available_balance = real_balance.get('available_balance', 0)
+            total_equity = real_balance.get('total_equity', 0)
+
             async with SessionLocal() as session:
-                gs = await session.get(Settings, 1)
-                paper_base = float(gs.paper_balance) if gs and gs.paper_balance else 100.0
-                
                 # Реализованный PnL (только закрытые сделки/выходы)
                 hist_res = await session.execute(
                     select(func.sum(TradeHistory.pnl))
                     .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
                 )
                 realized_pnl = hist_res.scalar() or 0.0
-                
+
                 # Нереализованный PnL (только открытые сделки)
                 open_res = await session.execute(
                     select(func.sum(Trade.pnl))
                     .where(Trade.status.in_(['OPEN', 'PARTIAL']))
                 )
                 open_pnl = open_res.scalar() or 0.0
-                
-                realized_bal = paper_base + realized_pnl
-                live_bal = realized_bal + open_pnl
-                
-                balance_history.append({
-                    'ts': datetime.datetime.utcnow(),
-                    'realized_balance': round(realized_bal, 4),
-                    'live_balance': round(live_bal, 4),
-                })
+
+            # Если баланс получен с Bybit — используем его
+            if total_equity > 0:
+                # Bybit equity = wallet + unrealised PnL.
+                # realized_balance = wallet (без нереализованного PnL)
+                # live_balance = equity (с нереализованным PnL)
+                live_bal = total_equity
+                realized_bal = wallet_value if wallet_value > 0 else total_equity
+            elif wallet_value > 0:
+                live_bal = wallet_value
+                realized_bal = wallet_value
+            else:
+                # Fallback: показываем по БД если API недоступен
+                live_bal = 100.0 + realized_pnl + open_pnl
+                realized_bal = 100.0 + realized_pnl
+
+            balance_history.append({
+                'ts': datetime.datetime.utcnow(),
+                'realized_balance': round(realized_bal, 4),
+                'live_balance': round(live_bal, 4),
+                'api_available': total_equity > 0 or wallet_value > 0,
+            })
         except Exception as e:
             log.error(f"Balance record error: {e}")
-        
-        await asyncio.sleep(10)
+
+        await asyncio.sleep(3)
 
 async def run_history_bg():
     await asyncio.sleep(60)
@@ -76,6 +95,22 @@ async def run_history_bg():
             await trading_bot.run_history_scan()
         except Exception:
             log.exception('History scan crashed')
+
+async def _sync_positions(bot):
+    """Фоновая задача синхронизации позиций при запуске."""
+    await asyncio.sleep(5)  # Даем монитору подключиться к WS
+    try:
+        await bot.sync_open_positions()
+    except Exception as e:
+        log.error('Failed to sync positions: %s', e)
+
+async def _load_instruments(bot):
+    """Загружает параметры контрактов (qtyStep, priceStep, minQty, ...)."""
+    from app.bybit import _load_instruments_cache
+    try:
+        await _load_instruments_cache(bot.rest)
+    except Exception as e:
+        log.warning('Failed to load instruments cache: %s', e)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -87,9 +122,26 @@ async def lifespan(app: FastAPI):
         log.info('Запуск в режиме: %s', 'Render' if IS_RENDER else 'Локальный ПК')
 
     await init_db()
+
+    # Применяем параметры монитора из сохранённого режима торговли,
+    # иначе при старте threshold=0.5 / window=60 не соответствуют режиму.
+    from .config import update_monitor_params, get_monitor_threshold, get_monitor_window_minutes
+    async with SessionLocal() as session:
+        s = await session.get(Settings, 1)
+        saved_mode = getattr(s, 'trade_mode', None) if s else None
+    update_monitor_params(saved_mode)
+    log.info('Monitor params from mode=%s: threshold=%s, window=%s',
+             saved_mode, get_monitor_threshold(), get_monitor_window_minutes())
+
     await monitor.start()
     trading_bot = TradingBot(monitor._rest)
+
+    # Загружаем кэш параметров контрактов (qtyStep, priceStep, minQty, ...)
+    await _load_instruments(trading_bot)
     
+    # Синхронизируем открытые позиции с биржей
+    sync_task = asyncio.create_task(_sync_positions(trading_bot))
+
     # Сохраняем задачи, чтобы потом корректно их завершить
     task_history = asyncio.create_task(run_history_bg())
     task_balance = asyncio.create_task(record_balance_loop())
@@ -236,6 +288,8 @@ async def api_stats(limit: int = 50):
 
 @app.get('/api/trades')
 async def api_trades(limit: int = 100):
+    if not trading_bot:
+        return {'items': []}
     async with SessionLocal() as session:
         r = await session.execute(
             select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL'])).order_by(Trade.opened_at.desc()).limit(limit)
@@ -244,7 +298,22 @@ async def api_trades(limit: int = 100):
         for t in r.scalars().all():
             avg_price = float(t.avg_entry_price) if t.avg_entry_price else 0.0
             curr_price = float(t.current_price) if t.current_price else 0.0
-            
+
+            # Fallback: если current_price = avg_price — берём с REST API
+            if curr_price > 0 and avg_price > 0 and curr_price == avg_price:
+                try:
+                    params = {'category': 'linear', 'symbol': t.symbol}
+                    query_str = urlencode(params)
+                    url = REST_BASE + '/v5/market/tickers?' + query_str
+                    headers = _sign_request(params)
+                    async with trading_bot.rest._s.get(url, headers=headers) as resp:
+                        data = await _read_json(resp)
+                        last = float(data.get('result', {}).get('list', [{}])[0].get('lastPrice') or 0)
+                        if last > 0:
+                            curr_price = last
+                except Exception as e:
+                    log.warning('[TRADES] Failed to fetch ticker for %s: %s', t.symbol, e)
+
             if avg_price > 0:
                 if t.side == 'LONG':
                     change_pct = (curr_price - avg_price) / avg_price * 100
@@ -414,6 +483,7 @@ async def api_balance_history():
         'items': [{
             'realized_balance': rec['realized_balance'],
             'live_balance': rec['live_balance'],
+            'api_available': rec.get('api_available', False),
             'ts': rec['ts'].isoformat(),
         }]
     }
@@ -548,16 +618,34 @@ async def api_close_trade(request: Request):
         t = await session.get(Trade, trade_id)
         if not t or t.status not in ('OPEN', 'PARTIAL'):
             return {'ok': False, 'error': 'Trade not found or already closed'}
-        
+
         st = state.symbols.get(t.symbol)
         price = st.last_price if st else t.current_price
         if price <= 0:
             return {'ok': False, 'error': 'No price'}
-        
+
         gs = await session.get(Settings, 1)
         fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
 
         closed_qty = t.total_qty
+
+        # --- Отправляем реальный ордер на закрытие ---
+        import uuid as _uuid
+        close_order_link_id = f"knife_manual_{t.id}_{_uuid.uuid4().hex[:8]}"
+        try:
+            close_bybit_side = 'Sell' if t.side == 'LONG' else 'Buy'
+            close_result = await monitor._rest.create_order(
+                symbol=t.symbol,
+                side=close_bybit_side,
+                order_type='Market',
+                qty=closed_qty,
+                order_link_id=close_order_link_id,
+                reduce_only=True
+            )
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            log.error('MANUAL CLOSE order failed for %s #%s: %r', t.symbol, t.id, e)
+
         if t.side == 'LONG':
             closed_pnl = (closed_qty * price) - (closed_qty * t.avg_entry_price)
         else:
@@ -565,7 +653,7 @@ async def api_close_trade(request: Request):
 
         exit_commission = closed_qty * price * (fee_pct / 100.0)
         t.exit_fee += exit_commission
-        
+
         realized_part = closed_pnl - exit_commission - t.entry_fee
         t.realized_pnl += realized_part
         total_pnl = t.realized_pnl
@@ -578,7 +666,7 @@ async def api_close_trade(request: Request):
         t.total_qty = 0.0
         t.total_margin = 0.0
         t.entry_fee = 0.0
-        
+
         history = TradeHistory(
             trade_id=t.id, action='MANUAL_CLOSE', price=price, qty=closed_qty,
             margin=t.total_margin, pnl=realized_part, notes=f'manual close, out fee {exit_commission:.4f}, in fee {closed_entry_fee:.4f}'
@@ -602,6 +690,18 @@ async def api_delete_closed_trade(trade_id: int):
             await session.commit()
             return {'ok': True}
     return {'ok': False}
+
+@app.post('/api/sync_positions')
+async def api_sync_positions():
+    """Ручная синхронизация открытых позиций с Bybit."""
+    if not trading_bot:
+        return {'ok': False, 'error': 'Bot not initialized'}
+    
+    try:
+        count = await trading_bot.sync_open_positions()
+        return {'ok': True, 'synced': count}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
 
 @app.get('/api/trade_history')
 async def api_trade_history(trade_id: int):
@@ -978,7 +1078,7 @@ async def api_post_settings(data: dict = Body(...)):
             "exit_step_multiplier", "exit_contract_pct", "position_size_entry",
             "position_size_grid", "fee_pct", "min_confidence"
         ]
-        int_fields = ["max_steps", "paper_balance", "max_open_trades", "exit_max_steps"]
+        int_fields = ["max_steps", "max_open_trades", "exit_max_steps"]
 
         for k in float_fields:
             if k in data:
@@ -1026,19 +1126,17 @@ async def api_post_settings(data: dict = Body(...)):
         saved = getattr(s, 'trade_mode', 'NOT SET')
         log.info(f"[SETTINGS SAVE] ПОСЛЕ COMMIT trade_mode='{saved}'")
 
-        log.info(f"[SETTINGS SAVE] СОХРАНЕНО: min_turnover={s.min_turnover}, paper_balance={s.paper_balance}, entry={s.entry_pct}, grid_step={s.grid_step_pct}, pos_entry={s.position_size_entry}, exit={s.initial_exit_pct}")
+        log.info(f"[SETTINGS SAVE] СОХРАНЕНО: min_turnover={s.min_turnover}, entry={s.entry_pct}, grid_step={s.grid_step_pct}, pos_entry={s.position_size_entry}, exit={s.initial_exit_pct}")
 
     # Всегда инвалидируем кэш модулей config/modes, чтобы
     # актуализировать параметры монитора при любом сохранении
-    import sys
-    for mod in ('app.config', 'app.modes'):
-        if mod in sys.modules:
-            del sys.modules[mod]
-
-    # Обновляем параметры монитора на основе текущего режима
-    from .config import update_monitor_params
-    update_monitor_params(new_mode)
-    log.info(f"[SETTINGS SAVE] monitor params reloaded: threshold={update_monitor_params.__globals__['_monitor_threshold']}, window={update_monitor_params.__globals__['_monitor_window_minutes']}")
+    from . import config as config_module
+    from .modes import MODES
+    update_monitor_params = config_module.update_monitor_params
+    # Используем актуальный режим из БД (saved), а не new_mode из POST —
+    # new_mode может быть не определена, если в POST не было trade_mode.
+    update_monitor_params(saved if saved in MODES else None)
+    log.info(f"[SETTINGS SAVE] monitor params reloaded: threshold={config_module._monitor_threshold}, window={config_module._monitor_window_minutes}")
 
     # Смена режима: сбрасываем сигналы и запускаем поиск заново (без state.alerts
     # из старого режима). Старые сделки не трогаем — они дорабатывают свой режим.
@@ -1060,7 +1158,21 @@ async def api_get_settings():
             await session.commit()
         saved_mode = getattr(s, 'trade_mode', None) or 'intraday'
         mode = get_mode(saved_mode)
-        log.info(f"[SETTINGS GET] max_open_trades={s.max_open_trades}, paper_balance={s.paper_balance}, trade_mode={saved_mode}")
+        
+        # Получаем реальный баланс с Bybit
+        try:
+            real_bal = await trading_bot.rest.get_balance() if trading_bot else {}
+            # wallet_value = equity (в Bybit UTA это одно и то же)
+            real_balance = real_bal.get('wallet_value', 0) or real_bal.get('total_equity', 0)
+            unrealised_pnl = real_bal.get('unrealised_pnl', 0)
+        except Exception:
+            real_balance = 0.0
+            unrealised_pnl = 0.0
+        
+        # Если Bybit вернул equity — вычитаем unrealised для realized_balance
+        realized_balance = real_balance - unrealised_pnl if real_balance > 0 else 0.0
+        
+        log.info(f"[SETTINGS GET] max_open_trades={s.max_open_trades}, trade_mode={saved_mode}, real_balance={real_balance}")
         return {
             "min_turnover": float(s.min_turnover) if s.min_turnover else 0.0,
             "min_leverage": float(s.min_leverage) if s.min_leverage else 0.0,
@@ -1076,8 +1188,10 @@ async def api_get_settings():
             "position_size_grid": float(s.position_size_grid) if s.position_size_grid else 0.0,
             "fee_pct": float(s.fee_pct) if s.fee_pct else 0.055,
             "min_confidence": float(s.min_confidence) if s.min_confidence else 0.4,
-            "paper_balance": float(s.paper_balance) if s.paper_balance else 100.0,
             "max_open_trades": s.max_open_trades if s.max_open_trades else 5,
+            "real_balance": round(real_balance, 4),
+            "realized_balance": round(realized_balance, 4),
+            "unrealised_pnl": round(unrealised_pnl, 4),
             "check_validity_before_grid": bool(getattr(s, 'check_validity_before_grid', False)),
             "exit_max_steps": s.exit_max_steps if s.exit_max_steps else 0,
             "trade_mode": saved_mode,

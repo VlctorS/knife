@@ -3,6 +3,7 @@ import datetime
 import logging
 import time
 import json
+import sqlite3 as _sqlite3
 
 from typing import Optional
 
@@ -11,6 +12,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .bybit import BybitREST
+import uuid
 from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, TradeHistory, engine, Settings
 from .state import (
     state, Alert, classify_event, moving_average,
@@ -78,13 +80,19 @@ class TradingBot:
     KLINES_PER_REQUEST = 1000
     # Сколько последних пин-свечей помним как «уже проверенные без сигнала»
     PENDING_TTL_SEC = 3 * 3600
+    # Лимиты по одновременным запросам kline (Bybit rate limit: ~10 req/s, берём с запасом)
+    MAX_CONCURRENT_KLINE_REQUESTS = 5
+    # Кэш загруженных свечей для открытых сделок (symbol, interval) -> (ts, klines)
+    TRADE_KLINE_CACHE_TTL_SEC = 30
 
     def __init__(self, rest):
         self.rest = rest
         self._last_scan_ts = 0
         self._seen_candles = set()
         self._kline_cache = {}
+        self._trade_kline_cache = {}  # symbol -> {interval: (ts, klines)}
         self._last_prune_ts = 0
+        self._kline_sem = asyncio.Semaphore(self.MAX_CONCURRENT_KLINE_REQUESTS)
         # {(symbol, mode_id): {pin_ts: ts_seen}} — пины без подтверждения ещё
         # живы; если подтверждение появится позже — сигнал пропустится.
         self._pending_pins = {}
@@ -99,9 +107,211 @@ class TradingBot:
         self._pending_pins.clear()
         self._mode_cache.clear()
         self._kline_cache.clear()
+        self._trade_kline_cache.clear()
         self._last_scan_ts = 0
         state.alerts.clear()
         log.info('Signal search reset (new mode); open trades keep their own mode')
+
+    async def sync_open_positions(self):
+        """
+        Синхронизирует открытые позиции с биржей.
+
+        При запуске бота загружает реальные позиции с Bybit и создаёт
+        записи в БД если их нет. Также обновляет существующие записи
+        данными с биржи (qty, avg_entry_price, etc).
+
+        Возвращает количество синхронизированных позиций.
+        """
+        for attempt in range(3):
+            try:
+                return await self._do_sync_positions()
+            except Exception as e:
+                err = str(e)
+                if 'database is locked' in err and attempt < 2:
+                    log.warning('[SYNC] БД заблокирована, попытка %d/3 через 2 сек...', attempt + 1)
+                    await asyncio.sleep(2)
+                else:
+                    raise
+    
+    async def _do_sync_positions(self):
+        log.info('[SYNC] Начальная синхронизация позиций с Bybit...')
+        positions = await self.rest.get_positions()
+        if not positions:
+            log.info('[SYNC] Нет открытых позиций на Bybit')
+        
+        synced = 0
+        async with SessionLocal() as session:
+            # Загружаем существующие открытые сделки из БД
+            result = await session.execute(
+                select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL']))
+            )
+            db_trades = await session.execute(
+                select(Trade)
+            )
+            existing = {}
+            for t in result.scalars().all():
+                existing[t.symbol] = t
+
+            gs = await session.get(Settings, 1)
+            if not gs:
+                gs = Settings(id=1)
+                session.add(gs)
+                await session.commit()
+
+            fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
+
+            for pos in positions:
+                symbol = pos.get('symbol', '')
+                size = float(pos.get('size', 0))
+                if size == 0:
+                    continue
+
+                side_raw = pos.get('side', '')
+                side = 'LONG' if side_raw == 'Buy' else 'SHORT'
+                
+                avg_entry = float(pos.get('avgEntryPrice') or 0)
+                entry_price = float(pos.get('entryPrice') or avg_entry)
+                leverage = float(pos.get('leverage') or 10)
+                unrealisedPnl = float(pos.get('unrealisedPnl') or 0)
+
+                # Fallback: если avg_entry = 0, ищем в истории ордеров
+                if avg_entry <= 0:
+                    try:
+                        order_hist = await self.rest.get_order_history(symbol, limit=50)
+                        for o in reversed(order_hist):
+                            if o.get('orderStatus') == 'Filled' and o.get('cumExecQty', '0') > '0':
+                                avg_entry = float(o.get('avgPrice') or 0)
+                                if avg_entry > 0:
+                                    log.info('[SYNC] Найдена entry цена из истории: %s %.6f', symbol, avg_entry)
+                                    break
+                    except Exception as e:
+                        log.warning('[SYNC] Не удалось найти entry цену для %s: %s', symbol, e)
+                    # entry_price тоже обновляем, если тоже 0
+                    if entry_price <= 0:
+                        entry_price = avg_entry
+                positionValue = float(pos.get('positionValue') or 0)
+                marginCo = float(pos.get('marginCo') or 0)
+                
+                # Калькулируем qty в контрактах
+                # Bybit: 1 контракт = 0.0001 BTC (зависит от символа)
+                # Но size — это количество контрактов
+                qty = size  # size уже в контрактах
+                
+                # Калькулируем маржу
+                margin = marginCo if marginCo > 0 else (positionValue / max(leverage, 1))
+                
+                # Калькулируем entry fee на основе размера позиции
+                entry_fee = positionValue * (fee_pct / 100.0)
+                
+                # Текущая цена: из WS, fallback на avg_entry
+                st = state.symbols.get(symbol)
+                ws_price = st.last_price if st and st.last_price > 0 else 0
+                current_price = ws_price if ws_price > 0 else avg_entry if avg_entry > 0 else entry_price
+                
+                # Определяем mode по TF позиции (по умолчанию intraday)
+                mode_id = 'intraday'  # По умолчанию
+                
+                # Пытаемся определить grid_step по истории ордеров
+                grid_step = 0
+                try:
+                    order_hist = await self.rest.get_order_history(symbol, limit=100)
+                    # Считаем количество GRID_ADD ордеров (с префиксом knife_grid)
+                    for order in order_hist:
+                        olid = order.get('orderLinkId', '')
+                        if 'knife_grid' in olid:
+                            grid_step += 1
+                except Exception:
+                    pass  # Если нет истории — grid_step = 0
+                
+                # Рассчитываем PnL
+                if side == 'LONG':
+                    gross_pnl = qty * (current_price - avg_entry)
+                else:
+                    gross_pnl = qty * (avg_entry - current_price)
+                
+                exit_fee_est = qty * current_price * (fee_pct / 100.0)
+                pnl = unrealisedPnl if unrealisedPnl != 0 else (gross_pnl - entry_fee - exit_fee_est)
+                
+                if symbol in existing:
+                    # Обновляем существующую запись
+                    t = existing[symbol]
+                    t.side = side
+                    t.entry_price = entry_price
+                    t.avg_entry_price = avg_entry
+                    t.total_qty = qty
+                    t.total_margin = margin
+                    t.initial_margin = margin
+                    t.current_price = current_price
+                    t.leverage = leverage
+                    t.entry_fee = entry_fee
+                    t.pnl = pnl
+                    t.status = 'OPEN'
+                    t.grid_step = grid_step  # Из истории ордеров
+                    t.bybit_position_id = pos.get('positionIdx')
+                    
+                    log.info('[SYNC] Обновлена сделка %s: %s qty=%.4f avg=%.6f pnl=%.2f',
+                             symbol, side, qty, avg_entry, pnl)
+                else:
+                    # Создаём новую запись — позиция есть на бирже но нет в БД
+                    mode = get_mode(mode_id)
+                    max_steps = gs.max_steps if gs and gs.max_steps > 0 else mode.max_steps
+                    exit_max_steps = gs.exit_max_steps if gs and gs.exit_max_steps > 0 else 0
+                    
+                    trade = Trade(
+                        symbol=symbol, side=side, entry_price=entry_price,
+                        avg_entry_price=avg_entry, total_qty=qty,
+                        total_margin=margin, initial_margin=margin,
+                        status='OPEN', grid_step=grid_step, max_steps=max_steps,
+                        leverage=leverage, current_price=current_price,
+                        exit_step=0, entry_fee=entry_fee, pnl=pnl,
+                        tf=mode.work_tf, mode=mode_id, validity='green',
+                        exit_max_steps=exit_max_steps,
+                        bybit_order_id=None,
+                        bybit_position_id=pos.get('positionIdx'),
+                    )
+                    session.add(trade)
+                    await session.flush()
+                    
+                    # Записываем в историю как OPEN
+                    notes = f'{side} SYNCED from Bybit (qty: {qty:.4f}, avg: {avg_entry:.6f}, lev: {leverage:.0f}x)'
+                    history = TradeHistory(
+                        trade_id=trade.id, action='SYNCED', price=entry_price,
+                        qty=qty, margin=margin, pnl=0, notes=notes
+                    )
+                    session.add(history)
+                    
+                    log.info('[SYNC] Создана сделка из Bybit: %s %s qty=%.4f avg=%.6f',
+                             symbol, side, qty, avg_entry)
+                    synced += 1
+            
+            await session.commit()
+
+            # Удаляем позиции, которых нет на бирже
+            bybit_symbols = set(pos.get('symbol', '') for pos in positions)
+            stale = [t for t in existing.values() if t.symbol not in bybit_symbols]
+            log.info('[SYNC] Статус синхронизации: существующих=%d, на бирже=%d, будет удалено=%d',
+                     len(existing), len(bybit_symbols), len(stale))
+            if stale:
+                for t in stale:
+                    log.info('[SYNC] Удаляем закрытую позицию: %s (статус: %s, qty: %.4f)',
+                             t.symbol, t.status, t.total_qty)
+                    t.status = 'CLOSED'
+                    t.total_qty = 0
+                    t.avg_entry_price = 0
+                    t.current_price = 0
+
+                    history = TradeHistory(
+                        trade_id=t.id, action='CLOSED_BY_SYNC', price=0,
+                        qty=0, margin=0, pnl=0,
+                        notes='Позиция закрыта на бирже, удалена из БД при синхронизации'
+                    )
+                    session.add(history)
+                    synced += 1
+                await session.commit()
+
+        log.info('[SYNC] Синхронизация завершена. Обработано позиций: %d, удалено: %d',
+                 synced + len(existing), len(stale))
+        return synced
 
     async def run_history_scan(self):
         log.info('Starting history scan for %d symbols...', len(state.symbols))
@@ -163,9 +373,6 @@ class TradingBot:
 
     async def check_for_entries(self):
         now = time.time()
-        if now - self._last_scan_ts < 60:
-            return
-        self._last_scan_ts = now
 
         async with SessionLocal() as session:
             gs = await session.get(Settings, 1)
@@ -173,6 +380,16 @@ class TradingBot:
                 gs = Settings(id=1)
                 session.add(gs)
                 await session.commit()
+
+            # --- 3. Определяем режим для НОВЫХ сигналов ---
+            mode_id = getattr(gs, 'trade_mode', 'intraday') or 'intraday'
+            mode = get_mode(mode_id)
+
+            # Минимальный период прохода задаётся режимом (у скальпа — короче).
+            scan_period = mode.scan_period_sec if mode.scan_period_sec > 0 else 60
+            if now - self._last_scan_ts < scan_period:
+                return
+            self._last_scan_ts = now
 
             # --- 1. Собираем открытые сделки и их символы ---
             result = await session.execute(
@@ -187,21 +404,12 @@ class TradingBot:
             if active_count >= max_open:
                 return
 
-            # --- 3. Определяем режим для НОВЫХ сигналов ---
-            mode_id = getattr(gs, 'trade_mode', 'intraday') or 'intraday'
-            mode = get_mode(mode_id)
-            if active_count == 0:
-                # Нет открытых сделок — сканируем символы
-                pass
-            else:
-                # Символы с открытыми сделками пропускаем
-                pass
-
             symbols_to_check = [s for s in state.symbols.keys() if s not in open_syms]
             if not symbols_to_check:
                 return
 
             # --- 4. Проход по символам с ограничением частоты ---
+            scanned = 0
             for sym in symbols_to_check:
                 st = state.symbols.get(sym)
                 if not st or st.last_price <= 0:
@@ -228,12 +436,15 @@ class TradingBot:
                     self._mode_cache[cache_key] = {'atr': atr_work, 'levels': levels_work, 'kl': kl_work, 'ts': now}
 
                 if not atr_work or atr_work <= 0:
+                    log.debug('[SKIP] %s mode=%s: no ATR', sym, mode.id)
                     continue
                 if not levels_work:
                     # Без уровней нет контекста
+                    log.debug('[SKIP] %s mode=%s: no SR levels (need levels for entry)', sym, mode.id)
                     continue
                 if not kl_work or len(kl_work) < 3:
                     # find_pins_with_confirm требует хотя бы несколько свечей
+                    log.debug('[SKIP] %s mode=%s: not enough klines (%d)', sym, mode.id, len(kl_work) if kl_work else 0)
                     continue
 
                 # --- 6. Получаем якорный ТФ для тренда и пространства ---
@@ -251,12 +462,21 @@ class TradingBot:
                     mode.pin_shadow_frac, mode.move_atr_mult, mode.move_pct_min,
                     lookback_candles=36, max_pin_age_candles=6,
                 )
+                if not pins:
+                    log.debug('[PINS] %s mode=%s: 0 pins found (shadow=%.2f move=%.2f%% atr=%.6f price=%.6f)',
+                              sym, mode.id, mode.pin_shadow_frac, mode.move_pct_min, atr_work, st.last_price)
 
                 for pin in pins:
                     side = pin['side']
                     level_price = pin['level_price']
                     extreme = pin['extreme']
                     pin_ts = pin['ts']
+
+                    # Дедуп: этот пин уже проверялся в предыдущих проходах —
+                    # не переоткрываем по нему сигнал каждый цикл.
+                    seen_key = f"{sym}_{mode.id}_{int(pin_ts)}"
+                    if seen_key in self._seen_candles:
+                        continue
 
                     # Проверяем тренд якоря
                     if anchor_dir == 'flat':
@@ -293,6 +513,7 @@ class TradingBot:
                     # RR = (dist_to_target) / (stop_pct)
                     rr = dist_to_target / stop_pct if stop_pct > 0 else 0.0
                     if rr < mode.space_rr_min:
+                        log.debug('[SKIP-RR] %s mode=%s rr=%.2f < min=%.1f', sym, mode.id, rr, mode.space_rr_min)
                         continue
 
                     # --- 9. Уверенность ---
@@ -302,6 +523,7 @@ class TradingBot:
                         mode,
                     )
                     if confidence < mode.min_confidence:
+                        log.debug('[SKIP-CONF] %s mode=%s conf=%.3f < min=%.2f', sym, mode.id, confidence, mode.min_confidence)
                         continue
 
                     # --- 10. Confirm window ---
@@ -355,24 +577,29 @@ class TradingBot:
 
                 # --- 12. Дедуп: помечаем пин как проверенный ---
                 for pin in pins:
-                    seen_key = f"{sym}_{mode.id}_{pin['ts']}"
+                    seen_key = f"{sym}_{mode.id}_{int(pin['ts'])}"
                     self._seen_candles.add(seen_key)
 
+                scanned += 1
+
+            log.debug('[SCAN] mode=%s: %d symbols scanned, %d open, %d max', mode.id, scanned, active_count, max_open)
             await session.commit()
 
     def _calc_pin_confidence(self, pin, atr_work, anchor_dir, anchor_strength,
                              dist_to_target, stop_pct, rr, level_price,
                              current_price, mode: ModeParams) -> float:
-        """Комплексная уверенность сигнала: пин-бар + контекст + пространство."""
+        """Комплексная уверенность сигнала: пин-бар + контекст + пространство.
+
+        Максимум пересчитан: тень 0.30, объём 0.15, уровень 0.15, тренд 0.25,
+        RR 0.15, подтверждение 0.10 = 1.00 (раньше максимум был ~0.80).
+        """
         score = 0.0
-        # 1. Качество тени (0..0.25): чем длиннее, тем лучше
         side = pin['side']
         if side == 'LONG':
-            shadow_frac = (pin['pin_close'] - pin['pin_low']) / max(pin['pin_close'] - pin['pin_open'], 0.0001) if pin['pin_close'] > pin['pin_open'] else (pin['pin_high'] - pin['pin_low']) / max(pin['pin_high'] - pin['pin_low'], 0.0001)
             shadow_ratio = (pin['pin_low'] - min(pin['pin_open'], pin['pin_close'])) / max(pin['pin_high'] - pin['pin_low'], 0.0001)
         else:
             shadow_ratio = (max(pin['pin_open'], pin['pin_close']) - pin['pin_high']) / max(pin['pin_high'] - pin['pin_low'], 0.0001)
-        shadow_score = min(shadow_ratio / 0.85, 1.0) * 0.25
+        shadow_score = min(shadow_ratio / 0.85, 1.0) * 0.30  # было 0.25
         score += shadow_score
 
         # 2. Объём (0..0.15)
@@ -386,17 +613,15 @@ class TradingBot:
 
         # 4. Тренд якоря (0..0.25)
         if anchor_dir == 'flat':
-            score += 0.10  # флэт допустим, но без бонуса
+            score += 0.10
         elif anchor_dir == side:
-            # Тренд совпадает со стороной
             score += 0.15 + min(anchor_strength, 1.0) * 0.10
-        # Если тренд против — уже отфильтровано ранее
 
         # 5. Пространство RR (0..0.15)
         rr_score = min(rr / (mode.space_rr_min * 2.0), 1.0) * 0.15
         score += rr_score
 
-        # 6. Подтверждение входа (0..0.1)
+        # 6. Подтверждение входа (0..0.10)
         confirm = pin.get('confirm', {})
         ct = confirm.get('type', '')
         if ct == 'close':
@@ -406,20 +631,14 @@ class TradingBot:
         elif ct == 'retest':
             score += 0.07
 
-        # 7. Корректировка по ТФ: чем ниже ТФ, тем выше порог, но
-        #    сам сигнал на младшем ТФ может быть слабее — удерживаем
-        #    в рамках 0..1
         score = max(0.0, min(score, 1.0))
         return round(score, 3)
 
     async def _open_mode_trade(self, session, sym, side, price, max_lev,
                                cfg, gs, change_pct, fee_pct, mode, details):
-        """Открывает сделку в режиме (scalp/intraday/swing)."""
-        # Размер позиции: из конфига/глобальных или берём из режима
-        if cfg and cfg.position_size_entry > 0:
-            pos_size = cfg.position_size_entry
-        else:
-            pos_size = gs.position_size_entry if (gs and gs.position_size_entry > 0) else MIN_POS_SIZE
+        """Открывает сделку в режиме (scalp/intraday/swing) через Bybit API."""
+        pos_size = _pick(cfg.position_size_entry if cfg else 0, 
+                         gs.position_size_entry if gs else 0, MIN_POS_SIZE)
         pos_size = max(MIN_POS_SIZE, pos_size)
         margin = pos_size / max_lev
         qty = pos_size / price
@@ -432,6 +651,30 @@ class TradingBot:
 
         exit_max_steps = gs.exit_max_steps if gs and gs.exit_max_steps > 0 else 0
 
+        # --- Отправляем реальный ордер на Bybit ---
+        order_link_id = f"knife_{mode.id}_{uuid.uuid4().hex[:12]}"
+        try:
+            # Устанавливаем плечо (кэшируется на бирже)
+            await self.rest.set_leverage(sym, max_lev, 'cross')
+
+            # Market-ордер на вход
+            bybit_side = 'Buy' if side == 'LONG' else 'Sell'
+            order_result = await self.rest.create_order(
+                symbol=sym,
+                side=bybit_side,
+                order_type='Market',
+                qty=qty,
+                order_link_id=order_link_id
+            )
+
+            # Получаем ID ордера для отслеживания
+            bybit_order_id = (order_result.get('result', {})
+                             .get('orderId', ''))
+            
+        except Exception as e:
+            log.error('REAL ORDER failed for %s %s: %r', sym, side, e)
+            raise
+
         trade = Trade(
             symbol=sym, side=side, entry_price=price, avg_entry_price=price,
             total_qty=qty, total_margin=margin, initial_margin=margin, status='OPEN',
@@ -439,9 +682,11 @@ class TradingBot:
             leverage=max_lev, current_price=price, exit_step=0,
             entry_fee=entry_fee, pnl=-entry_fee,
             tf=mode.work_tf,
-            mode=mode.id,  # <-- Режим
+            mode=mode.id,
             validity='green',
             exit_max_steps=exit_max_steps,
+            bybit_order_id=bybit_order_id,
+            bybit_position_id=None,
         )
         session.add(trade)
         await session.flush()
@@ -456,8 +701,9 @@ class TradingBot:
             details=json.dumps(details) if details else None
         )
         session.add(history)
-        log.info('OPEN %s %s @ %.6f (mode: %s, size: %.2f USDT, qty: %.2f, lev: %.0fx, fee: %.4f)',
-                 side, sym, price, mode.label, pos_size, qty, max_lev, entry_fee)
+        log.info('OPEN %s %s @ %.6f (mode: %s, size: %.2f USDT, qty: %.2f, lev: %.0fx, fee: %.4f, order: %s)',
+                 side, sym, price, mode.label, pos_size, qty, max_lev, entry_fee,
+                 bybit_order_id)
 
     def _calc_grid_exit_plan(self, t, cfg, gs):
         """Полный план сетки усреднений и ступенчатых выходов (для истории/снимков)."""
@@ -575,6 +821,63 @@ class TradingBot:
         self._kline_cache[key] = (now, kl)
         return kl
 
+    async def _fetch_trade_klines(self, symbol, interval, limit=30):
+        """Приоритетная загрузка свечей для мониторинга открытых сделок.
+        
+        Использует отдельный кэш и семафор для контроля rate-лимитов.
+        Приоритет: открытые сделки > новые сигналы.
+        """
+        now = time.time()
+        cache_key = symbol
+        interval_entry = self._trade_kline_cache.get(cache_key, {})
+        
+        # Проверяем кэш для данного интервала
+        cached = interval_entry.get(interval)
+        if cached and (now - cached[0]) < self.TRADE_KLINE_CACHE_TTL_SEC:
+            return cached[1]
+        
+        async with self._kline_sem:
+            try:
+                kl = await asyncio.wait_for(
+                    self.rest.get_kline(symbol, interval=interval, limit=limit),
+                    timeout=self.REST_TIMEOUT_SEC
+                )
+                # Сохраняем в кэш
+                if cache_key not in self._trade_kline_cache:
+                    self._trade_kline_cache[cache_key] = {}
+                self._trade_kline_cache[cache_key][interval] = (now, kl)
+                
+                # Также обновляем общий кэш (он используется для сигналов)
+                self._kline_cache[(symbol, interval)] = (now, kl)
+                return kl
+            except Exception as e:
+                log.warning('get_kline trade %s %s failed: %r, trying fallback',
+                            symbol, interval, e)
+                # Фоллбек на общий кэш
+                fallback = self._kline_cache.get((symbol, interval))
+                if fallback:
+                    return fallback[1]
+                raise
+
+    async def _prune_trade_kline_cache(self):
+        """Очищает устаревший кэш свечей для открытых сделок."""
+        now = time.time()
+        cutoff = now - self.TRADE_KLINE_CACHE_TTL_SEC
+        symbols_to_remove = []
+        
+        for symbol, intervals in self._trade_kline_cache.items():
+            intervals_to_remove = []
+            for interval, (ts, _) in intervals.items():
+                if ts < cutoff:
+                    intervals_to_remove.append(interval)
+            for interval in intervals_to_remove:
+                del intervals[interval]
+            if not intervals:
+                symbols_to_remove.append(symbol)
+        
+        for symbol in symbols_to_remove:
+            del self._trade_kline_cache[symbol]
+
     def _prune_caches(self):
         """Очищаем кеш свечей, seen-свечей и индикаторный кеш режимов.
 
@@ -691,13 +994,12 @@ class TradingBot:
                 "prev_candle": {"open": float(c_prev[1]), "high": float(c_prev[2]), "low": float(c_prev[3]), "close": float(c_prev[4]), "vol": float(c_prev[5])}
             }
 
-            # Баланс на момент события (бумажный + реализованный + нереализованный)
-            # и план сетки/выходов. Используем переданную сессию, если есть —
-            # иначе открываем свою (вложенная сессия в SQLite может блокироваться).
+            # Реальный баланс с Bybit
             try:
+                real_bal = await self.rest.get_balance()
+                live_from_bybit = real_bal.get('wallet_value', 0) or real_bal.get('total_equity', 0)
+                
                 if session is not None:
-                    gs_row = await session.get(Settings, 1)
-                    paper_base = float(gs_row.paper_balance) if gs_row and gs_row.paper_balance else 100.0
                     realized_res = await session.execute(
                         select(sa_func.sum(TradeHistory.pnl))
                         .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
@@ -710,8 +1012,6 @@ class TradingBot:
                     open_total = open_res.scalar() or 0.0
                 else:
                     async with SessionLocal() as s_sess:
-                        gs_row = await s_sess.get(Settings, 1)
-                        paper_base = float(gs_row.paper_balance) if gs_row and gs_row.paper_balance else 100.0
                         realized_res = await s_sess.execute(
                             select(sa_func.sum(TradeHistory.pnl))
                             .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
@@ -722,8 +1022,15 @@ class TradingBot:
                             .where(Trade.status.in_(['OPEN', 'PARTIAL']))
                         )
                         open_total = open_res.scalar() or 0.0
-                snapshot["balance_realized"] = round(paper_base + realized_total, 4)
-                snapshot["balance_live"] = round(paper_base + realized_total + open_total, 4)
+
+                # Если есть данные с Bybit — используем их
+                if live_from_bybit > 0:
+                    snapshot["balance_realized"] = round(live_from_bybit, 4)
+                    snapshot["balance_live"] = round(live_from_bybit, 4)
+                else:
+                    # Fallback: считаем от стартового 100 USDT (если API недоступен)
+                    snapshot["balance_realized"] = round(100.0 + realized_total, 4)
+                    snapshot["balance_live"] = round(100.0 + realized_total + open_total, 4)
             except Exception as bal_err:
                 log.debug('Balance in snapshot failed for %s: %r', t.symbol, bal_err)
 
@@ -846,13 +1153,29 @@ class TradingBot:
 
     async def _close_position(self, session, t, price, reason='', close_pct=None):
         """
-        Закрывает позицию полностью с фиксацией PnL и записью в историю.
-        Используется когда разворот потерян — вместо усреднения выходим.
+        Закрывает позицию полностью через Bybit API с фиксацией PnL и записью в историю.
         """
         gs = await session.get(Settings, 1)
         fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
 
         closed_qty = t.total_qty
+
+        # --- Отправляем реальный ордер на закрытие ---
+        close_order_link_id = f"knife_validity_{t.id}_{uuid.uuid4().hex[:8]}"
+        try:
+            close_bybit_side = 'Sell' if t.side == 'LONG' else 'Buy'
+            close_result = await self.rest.create_order(
+                symbol=t.symbol,
+                side=close_bybit_side,
+                order_type='Market',
+                qty=closed_qty,
+                order_link_id=close_order_link_id,
+                reduce_only=True
+            )
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            log.error('VALIDITY CLOSE order failed for %s #%s: %r', t.symbol, t.id, e)
+
         if t.side == 'LONG':
             closed_pnl = closed_qty * (price - t.avg_entry_price)
         else:
@@ -893,6 +1216,7 @@ class TradingBot:
         if now_ts - self._last_prune_ts > 3600:
             self._prune_caches()
             self._last_prune_ts = now_ts
+            await self._prune_trade_kline_cache()
 
         async with SessionLocal() as session:
             gs = await session.get(Settings, 1)
@@ -900,14 +1224,34 @@ class TradingBot:
                 gs = Settings(id=1)
                 session.add(gs)
                 await session.commit()
-            
+
             fee_pct = gs.fee_pct if gs and gs.fee_pct > 0 else 0.055
             check_validity = bool(getattr(gs, 'check_validity_before_grid', False))
-            
+
             result = await session.execute(
                 select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL'])).where(Trade.total_qty > 0.0001)
             )
             open_trades = list(result.scalars().all())
+
+            # --- ПРИОРИТЕТНАЯ ЗАГРУЗКА СВЕЧЕЙ ДЛЯ ОТКРЫТЫХ СДЕЛОК ---
+            # Загружаем 4h и D свечи для мониторинга до любых других операций
+            # Это гарантирует что validity check и grid-логика работают на актуальных данных
+            if open_trades:
+                trade_symbols = list({t.symbol for t in open_trades})
+                log.debug('[PRIORITY] Loading 4h/D candles for %d open trades...', len(trade_symbols))
+                for sym in trade_symbols:
+                    try:
+                        # Загружаем 4h свечи (для validity check и тренда)
+                        await self._fetch_trade_klines(sym, '240', limit=30)
+                        await asyncio.sleep(0.03)  # очередь с минимальной задержкой
+                    except Exception as e:
+                        log.warning('Failed to load 4h klines for %s: %r', sym, e)
+                    try:
+                        # Загружаем D свечи (для swing-режима и долгосрочного тренда)
+                        await self._fetch_trade_klines(sym, 'D', limit=15)
+                        await asyncio.sleep(0.03)
+                    except Exception as e:
+                        log.warning('Failed to load D klines for %s: %r', sym, e)
 
             # --- ЛЕЧЕНИЕ «ЗАВИСШИХ» СДЕЛОК ---
             # Если история не обновлялась дольше STALE_TRADE_SEC, но тик свежий — пишем SNAPSHOT
@@ -1030,19 +1374,13 @@ class TradingBot:
                     step_pct = self._grid_step_pct(t, cfg, gs, mode)
                     mult = _pick(cfg.grid_step_multiplier if cfg else 0,
                                  gs.grid_step_multiplier if gs else 0, 0.0) or mode.grid_step_multiplier
-                    
+
                     can_grid = False
                     if t.side == 'LONG' and price <= t.avg_entry_price * (1 - step_pct / 100):
                         can_grid = True
                     elif t.side == 'SHORT' and price >= t.avg_entry_price * (1 + step_pct / 100):
                         can_grid = True
-                    # Фильтр MA остаётся только для legacy-режима (сделки до рефакторинга)
-                    if can_grid and ma and not getattr(t, 'mode', None):
-                        if t.side == 'LONG' and price > ma:
-                            can_grid = False
-                        elif t.side == 'SHORT' and price < ma:
-                            can_grid = False
-                    
+
                     if can_grid:
                         if check_validity:
                             v = validity if validity is not None else await self._check_trade_validity(t)
@@ -1052,24 +1390,50 @@ class TradingBot:
                                     reason='; '.join(v.reasons[:4]) or 'разворот неактуален'
                                 )
                                 continue
-                        
+
                         add_pos_size = _pick(cfg.position_size_grid if cfg else 0, gs.position_size_grid if gs else 0, MIN_POS_SIZE)
-                        
+
                         size_mult = _pick(cfg.grid_size_multiplier if cfg else 0, gs.grid_size_multiplier if gs else 0, 1.0)
                         if size_mult > 1.0:
                             add_pos_size = add_pos_size * (size_mult ** t.grid_step)
-                            
+
                         add_pos_size = max(MIN_POS_SIZE, add_pos_size)
-                        
+
                         add_margin = add_pos_size / t.leverage
                         add_qty = add_pos_size / price
-                        
+
+                        # --- Отправляем реальный ордер на усреднение ---
+                        grid_order_link_id = f"knife_grid_{t.id}_{t.grid_step + 1}_{uuid.uuid4().hex[:8]}"
+                        try:
+                            bybit_side = 'Buy' if t.side == 'LONG' else 'Sell'
+                            grid_result = await self.rest.create_order(
+                                symbol=t.symbol,
+                                side=bybit_side,
+                                order_type='Market',
+                                qty=add_qty,
+                                order_link_id=grid_order_link_id
+                            )
+                            await asyncio.sleep(0.5)  # Даем ордеру исполниться
+                            
+                            # Проверяем позицию
+                            positions = await self.rest.get_positions(t.symbol)
+                            bybit_position_id = None
+                            for pos in positions:
+                                if pos.get('symbol') == t.symbol:
+                                    bybit_position_id = pos.get('positionIdx')
+                                    break
+                            
+                        except Exception as e:
+                            log.error('GRID ORDER failed for %s #%s step %d: %r', 
+                                     t.symbol, t.id, t.grid_step + 1, e)
+                            continue
+
                         old_qty = t.total_qty
                         t.grid_step += 1
                         t.total_qty += add_qty
                         t.total_margin += add_margin
                         t.avg_entry_price = (t.avg_entry_price * old_qty + price * add_qty) / t.total_qty
-                        
+
                         add_commission = add_pos_size * (fee_pct / 100.0)
                         t.entry_fee += add_commission
 
@@ -1083,7 +1447,7 @@ class TradingBot:
 
                         history = TradeHistory(
                             trade_id=t.id, action='GRID_ADD', price=price, qty=add_qty,
-                            margin=add_margin, pnl=-add_commission, 
+                            margin=add_margin, pnl=-add_commission,
                             notes=f'Усреднение {t.grid_step} (left: {t.total_qty:.2f}, fee {add_commission:.4f}{grid_exit_reset})',
                             details=json.dumps(snapshot)
                         )
@@ -1103,7 +1467,7 @@ class TradingBot:
                 
                 # --- 3. СТУПЕНЧАТЫЙ ВЫХОД (параметры режима + план по SR-цели) ---
                 close_pct = _pick(cfg.exit_contract_pct if cfg else 0, gs.exit_contract_pct if gs else 0, 50.0)
-                
+
                 current_exit_step = t.exit_step if t.exit_step is not None else 0
                 target_exit_pct = self._exit_target_pct(t, cfg, gs, mode)
 
@@ -1118,17 +1482,51 @@ class TradingBot:
                     if (force_full_close
                             or t.total_qty * (close_pct / 100.0) * price < 1.0
                             or t.total_qty * (1 - close_pct / 100.0) < 0.001):
+                        # --- FULL CLOSE через Bybit API ---
                         closed_qty = t.total_qty
                         closed_frac = 1.0
                         action = 'FULL_CLOSE'
+                        
+                        close_order_link_id = f"knife_close_full_{t.id}_{uuid.uuid4().hex[:8]}"
+                        try:
+                            close_bybit_side = 'Sell' if t.side == 'LONG' else 'Buy'
+                            close_result = await self.rest.create_order(
+                                symbol=t.symbol,
+                                side=close_bybit_side,
+                                order_type='Market',
+                                qty=closed_qty,
+                                order_link_id=close_order_link_id,
+                                reduce_only=True
+                            )
+                            await asyncio.sleep(0.5)
+                        except Exception as e:
+                            log.error('FULL CLOSE order failed for %s #%s: %r', t.symbol, t.id, e)
+
                         t.status = 'CLOSED'
                         t.closed_at = datetime.datetime.utcnow()
+
                     else:
+                        # --- PARTIAL CLOSE через Bybit API ---
                         closed_qty = t.total_qty * (close_pct / 100.0)
                         closed_frac = close_pct / 100.0
                         action = 'PARTIAL_CLOSE'
                         t.exit_step = current_exit_step + 1
                         t.grid_step = 0
+
+                        close_order_link_id = f"knife_close_part_{t.id}_{t.exit_step}_{uuid.uuid4().hex[:8]}"
+                        try:
+                            close_bybit_side = 'Sell' if t.side == 'LONG' else 'Buy'
+                            close_result = await self.rest.create_order(
+                                symbol=t.symbol,
+                                side=close_bybit_side,
+                                order_type='Market',
+                                qty=closed_qty,
+                                order_link_id=close_order_link_id,
+                                reduce_only=True
+                            )
+                            await asyncio.sleep(0.5)
+                        except Exception as e:
+                            log.error('PARTIAL CLOSE order failed for %s #%s: %r', t.symbol, t.id, e)
 
                     entry_fee_part = t.entry_fee * closed_frac
                     old_avg = t.avg_entry_price

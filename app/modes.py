@@ -58,22 +58,22 @@ MODES: Dict[str, ModeParams] = {
         anchor_label='1H',
         monitor_threshold=0.3,           # более чувствительный для быстрых движений
         monitor_window_minutes=5,        # 5 минут
-        confirm_window_sec=600,        # ~2 свечи 5m
+        confirm_window_sec=900,          # ~3 свечи 5m — даём время на подтверждение
         scan_period_sec=20,
-        min_confidence=0.80,           # низкий ТФ -> максимальная планка
-        pin_shadow_frac=0.70,
-        move_atr_mult=1.6,
-        move_pct_min=0.45,
+        min_confidence=0.55,             # скальп 5m — шумный, 0.80 убивает все сигналы
+        pin_shadow_frac=0.60,            # 0.70 слишком жёстко для 5m
+        move_atr_mult=1.2,               # 1.6 слишком высоко для 5m
+        move_pct_min=0.3,                # 0.45% слишком высоко для 5m
         shadow_lookback_atr=0.8,
-        space_rr_min=1.5,
+        space_rr_min=1.3,                # 1.5 для скальпа слишком много, 1.3 достаточно
         grid_step_pct=0.55,
         grid_step_atr=0.8,
         grid_step_multiplier=1.4,
-        initial_exit_pct=1.1,
+        initial_exit_pct=0.9,            # цель выхода — 0.9% для быстрого скальпа
         exit_step_atr=1.2,
         exit_step_multiplier=1.3,
-        max_steps=3,
-        hold_max_hours=24,
+        max_steps=4,                     # 3 мало для сетки на 5m, 4 лучше
+        hold_max_hours=12,               # 24ч много для скальпа, 12ч достаточно
     ),
     'intraday': ModeParams(
         id='intraday',
@@ -136,36 +136,10 @@ def get_mode(mode_id: Optional[str] = None) -> ModeParams:
     """Возвращает параметры режима.
 
     Если mode_id передан и валиден — возвращает этот режим.
-    Если mode_id не передан (None) — читает trade_mode из БД.
-    Если БД недоступна — возвращает DEFAULT_MODE_ID.
+    Если mode_id не передан (None) — возвращает DEFAULT_MODE_ID.
     """
     if mode_id and mode_id in MODES:
         return MODES[mode_id]
-
-    # mode_id не передан или невалиден — читаем из БД
-    try:
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker, Session
-        from .db import Settings, DB_URL
-        from sqlalchemy.orm import declarative_base
-
-        # Создаём синхронную сессию
-        sync_url = DB_URL.replace('+aiosqlite', '').replace('+asyncpg', '').replace('+pg8000', '')
-        engine_sync = create_engine(sync_url, pool_pre_ping=True)
-        sm = sessionmaker(bind=engine_sync)
-        session = sm()
-        try:
-            s = session.query(Settings).get(1)
-            saved_mode = getattr(s, 'trade_mode', None) if s else None
-        finally:
-            session.close()
-
-        if saved_mode and saved_mode in MODES:
-            return MODES[saved_mode]
-    except Exception:
-        # БД недоступна — возвращаем дефолт
-        pass
-
     return MODES[DEFAULT_MODE_ID]
 
 

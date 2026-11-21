@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -23,12 +24,9 @@ def _i(name, default):
         return default
 
 
-# =============================================================================
-# Базовые (env) параметры — fallback для всех режимов
-# =============================================================================
-
 @dataclass(frozen=True)
 class BaseSettings:
+    """Static fallback для monitor.py."""
     threshold: float = _f('THRESHOLD', 0.5)
     window_minutes: int = _i('WINDOW_MINUTES', 60)
     ma_period: int = _i('MA_PERIOD', 24)
@@ -37,67 +35,72 @@ class BaseSettings:
     symbols_refresh_sec: int = _i('SYMBOLS_REFRESH_SEC', 3600)
     log_level: str = os.getenv('LOG_LEVEL', 'INFO')
 
-    # --- Детекция «ножа» (rejection candle) ---
+    # --- Детекция «ножа» ---
     min_knife_move_pct: float = _f('MIN_KNIFE_MOVE_PCT', 2.0)
     rejection_shadow_pct: float = _f('REJECTION_SHADOW_PCT', 55.0)
     max_body_frac: float = _f('MAX_BODY_FRAC', 0.35)
     min_shadow_pct: float = _f('MIN_SHADOW_PCT', 60.0)
 
-    # --- Разделение всплеска и продолжения тренда ---
     trend_min_move_pct: float = _f('TREND_MIN_MOVE_PCT', 1.5)
     max_anchor_trend: float = _f('MAX_ANCHOR_TREND', 0.5)
     min_confidence: float = _f('MIN_CONFIDENCE', 0.35)
 
-    # --- Дополнительные фильтры входа ---
     min_knife_volume_ratio: float = _f('MIN_KNIFE_VOLUME_RATIO', 1.2)
     min_bounce_pct: float = _f('MIN_BOUNCE_PCT', 0.5)
     max_retrace_to_open_pct: float = _f('MAX_RETRACE_TO_OPEN_PCT', 70.0)
 
-    # --- Комиссии ---
     taker_fee_pct: float = _f('TAKER_FEE_PCT', 0.055)
 
 
 # =============================================================================
-# Динамический accessor — объединяет BaseSettings + текущий trade_mode
+# Текущие параметры монитора — обновляются при смене режима торговли.
+# monitor.py читает monitor_threshold и monitor_window_minutes
+# напрямую из этого модуля.
 # =============================================================================
 
-class _LazySettings:
-    """Обёртка: по умолчанию возвращает base, но для threshold и
-    window_minutes динамически читает trade_mode из БД и подменяет
-    значениями режима.
+_monitor_threshold: float = 0.5
+_monitor_window_minutes: int = 60
 
-    Механизм ленивый: сессия БД открывается только при обращении к
-    threshold/window_minutes, не при каждом экспорте config.
+
+def update_monitor_params(mode_id: Optional[str]) -> None:
+    """Устанавливает параметры монитора на основе выбранного режима.
+
+    Если mode_id не передан или невалиден — использует fallback из env.
     """
-    __slots__ = ('_base',)
+    global _monitor_threshold, _monitor_window_minutes
+    try:
+        from .modes import MODES
+        if mode_id and mode_id in MODES:
+            m = MODES[mode_id]
+            _monitor_threshold = m.monitor_threshold
+            _monitor_window_minutes = m.monitor_window_minutes
+        else:
+            base = BaseSettings()
+            _monitor_threshold = base.threshold
+            _monitor_window_minutes = base.window_minutes
+    except Exception:
+        base = BaseSettings()
+        _monitor_threshold = base.threshold
+        _monitor_window_minutes = base.window_minutes
 
-    def __init__(self) -> None:
-        self._base = BaseSettings()
 
+def get_monitor_threshold() -> float:
+    return _monitor_threshold
+
+
+def get_monitor_window_minutes() -> int:
+    return _monitor_window_minutes
+
+
+class _SettingsAccessor:
+    """Proxy для backward compatibility: monitor.py использует settings.threshold."""
     def __getattr__(self, name: str):
-        base = object.__getattribute__(self, '_base')
+        base = BaseSettings()
+        if name == 'threshold':
+            return get_monitor_threshold()
+        if name == 'window_minutes':
+            return get_monitor_window_minutes()
         return getattr(base, name)
 
-    @property
-    def threshold(self) -> float:
-        v = self._try_mode('monitor_threshold')
-        return v if v is not None else self._base.threshold
 
-    @property
-    def window_minutes(self) -> int:
-        v = self._try_mode('monitor_window_minutes')
-        return v if v is not None else self._base.window_minutes
-
-    @staticmethod
-    def _try_mode(attr: str):
-        """Пытаемся прочитать attr из ModeParams текущего режима."""
-        try:
-            from .modes import get_mode
-            mode = get_mode()
-            val = getattr(mode, attr, None)
-            return val
-        except Exception:
-            return None
-
-
-settings = _LazySettings()
+settings = _SettingsAccessor()

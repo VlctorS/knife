@@ -519,7 +519,7 @@ def find_pins_with_confirm(kl, levels, atr_value: float, current_price: float,
             continue
 
         vol_ratio = (v / avg_vol) if avg_vol > 0 else None
-        if vol_ratio is not None and vol_ratio < 1.0:
+        if vol_ratio is not None and vol_ratio < 0.5:
             # пин без объёма — вероятная пустота, не кандидат
             continue
 

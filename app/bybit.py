@@ -8,6 +8,9 @@ import hashlib
 from urllib.parse import urlencode
 from typing import List
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'))
+
 import aiohttp
 import websockets
 
@@ -16,8 +19,136 @@ log = logging.getLogger(__name__)
 REST_BASE = 'https://api.bybit.com'
 WS_URL = 'wss://stream.bybit.com/v5/public/linear'
 
-API_KEY = os.getenv('BYBIT_API_KEY', '')
-API_SECRET = os.getenv('BYBIT_API_SECRET', '')
+# Загружаем после load_dotenv() — иначе ключи будут пустые
+_api_key_raw = os.getenv('BYBIT_API_KEY', '')
+_api_secret_raw = os.getenv('BYBIT_API_SECRET', '')
+# Debug
+import sys
+_log = logging.getLogger(__name__)
+_log.warning('[BYBIT-DEBUG] os.getenv keys: KEY=%s SECRET=%s', repr(_api_key_raw[:10] if _api_key_raw else None), repr(_api_secret_raw[:10] if _api_secret_raw else None))
+
+API_KEY = _api_key_raw
+API_SECRET = _api_secret_raw
+
+if API_KEY:
+    log.info('[BYBIT] API ключи загружены: %s...', API_KEY[:8])
+else:
+    log.warning('[BYBIT] API ключи НЕ загружены — работает только публичное')
+
+# Кэш instrument info: {symbol: {qtyStep, priceStep, minQty, maxQty, tickSize, ...}}
+_instruments_cache = {}
+_instruments_ts = {}
+_INSTR_TTL = 3600  # 1 час
+
+
+def _round_to_tick(value, step, round_down=True):
+    """
+    Округляет значение до шага тика (qtyStep / priceStep).
+    
+    round_down=True  → вниз для qty (меньше контрактов = меньше риск)
+    round_down=False → вверх для qty (больше контрактов)
+    Для цены: round_down=True → вниз, round_down=False → вверх
+    """
+    step = float(step)
+    if step <= 0:
+        return value
+    
+    rounded = value / step
+    if round_down:
+        rounded = int(rounded)
+    else:
+        rounded = int(rounded) + (1 if rounded != int(rounded) else 0)
+    return rounded * step
+
+
+async def _load_instruments_cache(rest):
+    """Загружает и кэширует информацию о контрактах (qtyStep, priceStep, minQty, ...)."""
+    global _instruments_cache, _instruments_ts
+    
+    now = time.time()
+    if now - _instruments_ts.get('last_load', 0) < _INSTR_TTL and _instruments_cache:
+        return _instruments_cache
+    
+    try:
+        instruments = await rest.get_instruments()
+        for inst in instruments:
+            symbol = inst.get('symbol', '')
+            filters = inst.get('filters', [])
+            
+            info = {'symbol': symbol}
+            
+            for f in filters:
+                f_type = f.get('filterType', '')
+                
+                if f_type == 'PriceFilter':
+                    info['priceStep'] = float(f.get('tickSize', '0.01'))
+                    info['minPrice'] = float(f.get('minPrice', '0'))
+                    info['maxPrice'] = float(f.get('maxPrice', '999999'))
+                    info['tickSize'] = info['priceStep']
+                
+                elif f_type == 'LotSizeFilter':
+                    info['qtyStep'] = float(f.get('stepValue', '0.001'))
+                    info['minQty'] = float(f.get('minOrderQty', '0.001'))
+                    info['maxQty'] = float(f.get('maxOrderQty', '100'))
+                    info['lotSizeFilter'] = f
+            
+            if 'qtyStep' in info:
+                _instruments_cache[symbol] = info
+        
+        _instruments_ts['last_load'] = now
+        log.info('[INSTR] Загружено %d контрактов с параметрами лотов', len(_instruments_cache))
+        
+    except Exception as e:
+        log.warning('[INSTR] Загрузка failed: %s', e)
+    
+    return _instruments_cache
+
+
+def get_instrument_info(symbol):
+    """Возвращает информацию о контракте (qtyStep, priceStep, minQty, ...)."""
+    # Fallback если кэш ещё не загружен
+    info = _instruments_cache.get(symbol)
+    if info:
+        return info
+    
+    # Консервативные defaults
+    return {
+        'qtyStep': '1',           # BTCUSDT и крупные — обычно 1
+        'priceStep': '0.01',      # большинство — 0.01
+        'minQty': '0.001',
+        'maxQty': '100',
+        'fallback': True,
+    }
+
+
+def normalize_qty(symbol, qty):
+    """Нормализует количество контрактов по qtyStep и minQty."""
+    info = get_instrument_info(symbol)
+    qty_step = float(info.get('qtyStep', '0.001'))
+    min_qty = float(info.get('minQty', '0.001'))
+    max_qty = float(info.get('maxQty', '10000'))
+    
+    # Округляем вниз по шагу
+    qty = _round_to_tick(qty, qty_step, round_down=True)
+    
+    # Минимум
+    if qty < min_qty:
+        qty = min_qty
+    
+    # Максимум (защита от перерасхода)
+    if qty > max_qty:
+        qty = max_qty
+        log.warning('[NORM] qty для %s обрезан до maxQty: %.3f > %.3f', symbol, qty, max_qty)
+    
+    return qty
+
+
+def normalize_price(symbol, price):
+    """Нормализует цену по priceStep."""
+    info = get_instrument_info(symbol)
+    price_step = float(info.get('priceStep', '0.01'))
+    
+    return _round_to_tick(price, price_step, round_down=False)
 
 
 async def _read_json(resp):
@@ -55,8 +186,11 @@ class BybitREST:
         })
 
     async def _get(self, path: str, params: dict):
+        """GET запрос с подписью. params добавляются в URL после urlencode."""
+        query_str = urlencode(params)
+        url = REST_BASE + path + ('?' + query_str if query_str else '')
         headers = _sign_request(params)
-        async with self._s.get(REST_BASE + path, params=params, headers=headers) as r:
+        async with self._s.get(url, headers=headers) as r:
             if r.status == 403:
                 log.error('403 Forbidden on %s. API keys: %s', path, 'SET' if API_KEY else 'NOT SET')
             r.raise_for_status()
@@ -146,6 +280,293 @@ class BybitREST:
         if data.get('retCode') != 0:
             log.warning('tickers retCode=%s retMsg=%s',
                         data.get('retCode'), data.get('retMsg'))
+            return []
+        return data.get('result', {}).get('list', [])
+
+    # ======================================================================
+    # ТОРГОВЫЕ МЕТОДЫ (POST-запросы)
+    # ======================================================================
+
+    async def _post(self, path: str, params: dict):
+        """Отправляет POST-запрос с подписью."""
+        headers = _sign_request(params)
+        async with self._s.post(REST_BASE + path, params=params, headers=headers) as r:
+            if r.status == 403:
+                log.error('403 Forbidden on %s. API keys: %s', path, 'SET' if API_KEY else 'NOT SET')
+            if r.status != 200:
+                text = await r.text(encoding='utf-8', errors='replace')
+                log.error('POST %s failed: status=%d body=%s', path, r.status, text[:500])
+                raise aiohttp.ClientResponseError(r.request_info, r.status, text)
+            r.raise_for_status()
+            return await _read_json(r)
+
+    async def create_order(self, symbol: str, side: str, order_type: str,
+                           qty: float, price: float = None,
+                           reduce_only: bool = False,
+                           order_link_id: str = None) -> dict:
+        """
+        Создаёт ордер на Bybit.
+
+        side: 'Buy' | 'Sell'
+        order_type: 'Market' | 'Limit'
+        qty: количество контрактов (будет нормализовано по qtyStep)
+        price: цена (для Limit-ордеров, будет нормализовано по priceStep)
+        reduce_only: True если только на закрытие
+        order_link_id: уникальный ID клиента (для дедупликации)
+        """
+        # Нормализуем qty и price по шагам контракта
+        qty = normalize_qty(symbol, qty)
+        if price:
+            price = normalize_price(symbol, price)
+        
+        params = {
+            'category': 'linear',
+            'symbol': symbol,
+            'side': side,
+            'orderType': order_type,
+            'qty': str(qty),
+        }
+        if price:
+            params['price'] = str(price)
+        if order_link_id:
+            params['orderLinkId'] = order_link_id
+        if reduce_only:
+            params['reduceOnly'] = 'true'
+
+        data = await self._post('/v5/order/create', params)
+        if data.get('retCode') != 0:
+            log.error('create_order failed: %s (qty=%.3f, price=%s)', 
+                      data.get('retMsg'), qty, price or 'MKT')
+            raise Exception(f"Bybit create_order failed: {data.get('retMsg')}")
+
+        result = data.get('result', {})
+        order_id = result.get('orderId') or result.get('orderLinkId') or ''
+        log.info('ORDER created: %s %s %s qty=%.3f @ %s id=%s',
+                 side, symbol, order_type, qty, price or 'MKT', order_id)
+        return result
+
+    async def cancel_order(self, symbol: str, order_id: str = None,
+                           order_link_id: str = None) -> dict:
+        """Отменяет ордер."""
+        params = {'category': 'linear', 'symbol': symbol}
+        if order_id:
+            params['orderId'] = order_id
+        if order_link_id:
+            params['orderLinkId'] = order_link_id
+
+        data = await self._post('/v5/order/reject', params)
+        if data.get('retCode') != 0:
+            log.warning('cancel_order failed: %s', data.get('retMsg'))
+        return data
+
+    async def cancel_all_orders(self, symbol: str) -> dict:
+        """Отменяет все ордера символа."""
+        params = {'category': 'linear', 'symbol': symbol}
+        data = await self._post('/v5/order/cancel-all', params)
+        if data.get('retCode') != 0:
+            log.warning('cancel_all_orders failed: %s', data.get('retMsg'))
+        return data
+
+    async def close_position(self, symbol: str, order_type: str = 'Market',
+                             order_link_id: str = None) -> dict:
+        """
+        Закрывает позицию через Reverse-Order или Sell.
+        Использует reduceOnly для безопасного закрытия.
+        """
+        params = {
+            'category': 'linear',
+            'symbol': symbol,
+            'side': 'Sell',
+            'orderType': order_type,
+            'qty': '0',
+            'reduceOnly': 'true',
+            'slippageLimit': 'true',
+        }
+        if order_link_id:
+            params['orderLinkId'] = order_link_id
+
+        data = await self._post('/v5/order/create', params)
+        if data.get('retCode') != 0:
+            log.error('close_position failed: %s', data.get('retMsg'))
+            raise Exception(f"Bybit close_position failed: {data.get('retMsg')}")
+
+        result = data.get('result', {})
+        log.info('POSITION CLOSE order: %s %s id=%s', symbol, order_type,
+                 result.get('orderId', ''))
+        return result
+
+    async def set_leverage(self, symbol: str, leverage: int,
+                           margin_mode: str = 'cross') -> dict:
+        """Устанавливает плечо для символа."""
+        params = {
+            'category': 'linear',
+            'symbol': symbol,
+            'leverage': str(int(leverage)),
+        }
+        if margin_mode == 'cross':
+            params['positionIdx'] = '0'
+        else:
+            params['positionIdx'] = '1'
+
+        data = await self._post('/v5/position/set-leverage', params)
+        if data.get('retCode') != 0:
+            log.warning('set_leverage failed: %s', data.get('retMsg'))
+        else:
+            result = data.get('result', {})
+            log.info('Leverage set for %s: %dx (%s)', symbol, leverage, margin_mode)
+        return data
+
+    async def get_positions(self, symbol: str = None, settle_coin: str = 'USDT') -> list:
+        """Получает открытые позиции."""
+        params = {'category': 'linear', 'settleCoin': settle_coin}
+        if symbol:
+            params['symbol'] = symbol
+
+        data = await self._get('/v5/position/list', params)
+        if data.get('retCode') != 0:
+            log.warning('get_positions failed: %s', data.get('retMsg'))
+            return []
+        result = data.get('result', {})
+        positions = result.get('list', [])
+        if data.get('result', {}).get('nextPageCursor'):
+            # Пагинация — подгружаем всё
+            cursor = result['nextPageCursor']
+            while cursor:
+                params['cursor'] = cursor
+                data = await self._get('/v5/position/list', params)
+                positions.extend(data.get('result', {}).get('list', []))
+                cursor = data.get('result', {}).get('nextPageCursor', '')
+        return positions
+
+    async def get_balance(self) -> dict:
+        """
+        Получает баланс аккаунта (USDT) с Bybit.
+        
+        Использует Unified Trading Account (UTA) режим.
+        """
+        # 1. UTA (Unified Trading Account) — основной режим
+        try:
+            params = {'category': 'unified', 'accountType': 'UNIFIED'}
+            query_str = urlencode(params)
+            url = REST_BASE + '/v5/account/wallet-balance' + ('?' + query_str if query_str else '')
+            headers = _sign_request(params)
+            
+            async with self._s.get(url, headers=headers) as r:
+                if r.status != 200:
+                    raise aiohttp.ClientResponseError(r.request_info, r.status, await r.text())
+                r.raise_for_status()
+                data = await _read_json(r)
+                
+                if data.get('retCode') != 0:
+                    raise Exception(f"retCode={data.get('retCode')} retMsg={data.get('retMsg')}")
+                
+                wallet_data = data.get('result', {})
+                for acct in wallet_data.get('list', []):
+                    for coin_data in (acct.get('coin') or []):
+                        if coin_data.get('coin') != 'USDT':
+                            continue
+                        equity = float(coin_data.get('equity') or 0)
+                        # walletBalance в UTA может быть 0 — фоллбек на totalWalletBalance аккаунта
+                        wallet_bal = float(coin_data.get('walletBalance') or 0)
+                        if wallet_bal == 0:
+                            wallet_bal = float(acct.get('totalWalletBalance') or 0)
+                        unrealised_pnl = float(coin_data.get('unrealisedPnl') or 0)
+                        available = float(coin_data.get('availableBalance') or 0)
+
+                        if equity > 0:
+                            result = {
+                                'total_equity': equity,
+                                'available_balance': available,
+                                'wallet_value': wallet_bal,
+                                'unrealised_pnl': unrealised_pnl,
+                                'mode': 'UTA',
+                            }
+                            log.info('[BALANCE] UTA: equity=%.2f wallet=%.2f upnl=%.2f avail=%.2f',
+                                     equity, wallet_bal, unrealised_pnl, available)
+                            return result
+                log.warning('[BALANCE] UTA: USDT coin не найден')
+        except Exception as e:
+            log.warning('[BALANCE] UTA mode failed: %s', e)
+        
+        return {}
+
+    async def get_order_status(self, symbol: str, order_id: str = None,
+                               order_link_id: str = None) -> dict:
+        """Получает статус ордера."""
+        params = {'category': 'linear', 'symbol': symbol}
+        if order_id:
+            params['orderId'] = order_id
+        if order_link_id:
+            params['orderLinkId'] = order_link_id
+
+        data = await self._get('/v5/order/realtime', params)
+        if data.get('retCode') != 0:
+            log.warning('get_order_status failed: %s', data.get('retMsg'))
+        return data
+
+    async def get_open_orders(self, symbol: str = None) -> list:
+        """Получает активные ордера."""
+        params = {'category': 'linear'}
+        if symbol:
+            params['symbol'] = symbol
+
+        data = await self._get('/v5/order/open-orders', params)
+        if data.get('retCode') != 0:
+            log.warning('get_open_orders failed: %s', data.get('retMsg'))
+            return []
+        result = data.get('result', {})
+        orders = result.get('list', [])
+        if result.get('nextPageCursor'):
+            cursor = result['nextPageCursor']
+            while cursor:
+                params['cursor'] = cursor
+                data = await self._get('/v5/order/open-orders', params)
+                orders.extend(data.get('result', {}).get('list', []))
+                cursor = data.get('result', {}).get('nextPageCursor', '')
+        return orders
+
+    async def get_order_history(self, symbol: str, limit: int = 50,
+                                order_link_id: str = None) -> list:
+        """
+        Получает историю ордеров (заполненные + отменённые).
+        Используется для определения grid_step по количеству GRID_ADD ордеров.
+        """
+        params = {
+            'category': 'linear',
+            'symbol': symbol,
+            'limit': str(limit),
+        }
+        if order_link_id:
+            params['orderLinkId'] = order_link_id
+
+        data = await self._get('/v5/order/history', params)
+        if data.get('retCode') != 0:
+            log.warning('get_order_history failed: %s', data.get('retMsg'))
+            return []
+        result = data.get('result', {})
+        orders = result.get('list', [])
+        if result.get('nextPageCursor'):
+            cursor = result['nextPageCursor']
+            while cursor:
+                params['cursor'] = cursor
+                data = await self._get('/v5/order/history', params)
+                orders.extend(data.get('result', {}).get('list', []))
+                cursor = data.get('result', {}).get('nextPageCursor', '')
+        return orders
+
+    async def get_execution_history(self, symbol: str, limit: int = 50) -> list:
+        """
+        Получает историю исполнений (executions) — реальных сделок.
+        Полезно для точного подсчёта grid-шагов.
+        """
+        params = {
+            'category': 'linear',
+            'symbol': symbol,
+            'limit': str(limit),
+        }
+        data = await self._get('/v5/execution/list', params)
+        if data.get('retCode') != 0:
+            log.warning('get_execution_history failed: %s', data.get('retMsg'))
             return []
         return data.get('result', {}).get('list', [])
 
