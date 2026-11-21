@@ -592,6 +592,10 @@ class TradingBot:
 
         Максимум пересчитан: тень 0.30, объём 0.15, уровень 0.15, тренд 0.25,
         RR 0.15, подтверждение 0.10 = 1.00 (раньше максимум был ~0.80).
+
+        Дополнительно: волатильность (ATR) влияет на уверенность. Для
+        скальпа оптимальна умеренная волатильность — слишком тихий рынок
+        не даёт пробежать цель, слишком бурный выбивает по стопу.
         """
         score = 0.0
         side = pin['side']
@@ -630,6 +634,26 @@ class TradingBot:
             score += 0.10
         elif ct == 'retest':
             score += 0.07
+
+        # 7. Волатильность (ATR) — штраф/бонус за режим (±0.10)
+        # ATR в % от цены: optimal band для скальпа 0.15%..1.2%.
+        if atr_work and current_price > 0:
+            atr_pct = atr_work / current_price * 100.0
+            if mode.id == 'scalp':
+                if atr_pct < 0.08:
+                    score -= 0.08   # тишина — цель не пробегает, комиссии съедят
+                elif atr_pct <= 1.2:
+                    score += 0.05   # оптимальная полоса скальпа
+                elif atr_pct > 2.5:
+                    score -= 0.05   # слишком бурно — стоп выбивается шумом
+            elif mode.id == 'intraday':
+                if atr_pct < 0.2:
+                    score -= 0.06
+                elif 0.4 <= atr_pct <= 2.5:
+                    score += 0.04
+            else:  # swing
+                if atr_pct >= 0.8:
+                    score += 0.04
 
         score = max(0.0, min(score, 1.0))
         return round(score, 3)
