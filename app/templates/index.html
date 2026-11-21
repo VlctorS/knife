@@ -738,20 +738,24 @@ async function updateBalanceAndPnl() {
     let liveBal = 0;        // equity (с нереализованным PnL)
     let realizedBal = 0;    // wallet (без нереализованного PnL)
     let prevLive = 0;
+    let prevRealized = 0;
 
-    if (histData.ok && histData.items && histData.items.length > 0) {
-      const latest = histData.items[histData.items.length - 1];
+    if (histData.latest) {
+      const latest = histData.latest;
       apiAvailable = latest.api_available;
       liveBal = latest.live_balance;
       realizedBal = latest.realized_balance != null ? latest.realized_balance : liveBal;
-      prevLive = histData.items[0].live_balance;
+    }
+    if (histData.prev) {
+      prevLive = histData.prev.live_balance;
+      prevRealized = histData.prev.realized_balance != null ? histData.prev.realized_balance : prevLive;
     }
 
     // Если API недоступен — считаем от стартового капитала по БД
     if (!apiAvailable) {
       liveBal = 100.0 + totalRealizedPnl + livePnl;
       realizedBal = 100.0 + totalRealizedPnl;
-      prevLive = realizedBal;
+      prevLive = prevRealized;
     }
 
     const currentLiveBalance = liveBal;

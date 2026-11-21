@@ -462,30 +462,33 @@ async def api_open_pnl():
 
 @app.get('/api/balance_history')
 async def api_balance_history():
-    """Возвращает снимок балансов минуту назад (для расчета дельты)."""
+    """Возвращает два снимка баланса: самый свежий и ~60 сек назад (для дельты)."""
     now = datetime.datetime.utcnow()
     one_min_ago = now - timedelta(seconds=60)
-    
+
     if not balance_history:
-        return {'ok': True, 'items': []}
-    
-    # Ищем самую свежую запись, которая старше 60 секунд
+        return {'ok': True, 'items': [], 'latest': None}
+
+    latest = balance_history[-1]
+
+    # Ищем самую свежую запись, которая старше 60 секунд (для расчёта дельты)
     past = [x for x in balance_history if x['ts'] <= one_min_ago]
-    
-    if past:
-        rec = past[-1]
-    else:
-        # Бот работает меньше минуты — берём самую старую запись
-        rec = balance_history[0]
-    
-    return {
-        'ok': True,
-        'items': [{
+    prev = past[-1] if past else balance_history[0]
+
+    def _ser(rec):
+        return {
             'realized_balance': rec['realized_balance'],
             'live_balance': rec['live_balance'],
             'api_available': rec.get('api_available', False),
             'ts': rec['ts'].isoformat(),
-        }]
+        }
+
+    return {
+        'ok': True,
+        # Обратная совместимость: items = [prev, latest]
+        'items': [_ser(prev), _ser(latest)],
+        'latest': _ser(latest),
+        'prev': _ser(prev),
     }
 
 @app.get('/api/closed_trades')

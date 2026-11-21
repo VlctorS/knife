@@ -145,9 +145,6 @@ class TradingBot:
             result = await session.execute(
                 select(Trade).where(Trade.status.in_(['OPEN', 'PARTIAL']))
             )
-            db_trades = await session.execute(
-                select(Trade)
-            )
             existing = {}
             for t in result.scalars().all():
                 existing[t.symbol] = t
@@ -208,9 +205,6 @@ class TradingBot:
                 ws_price = st.last_price if st and st.last_price > 0 else 0
                 current_price = ws_price if ws_price > 0 else avg_entry if avg_entry > 0 else entry_price
                 
-                # Определяем mode по TF позиции (по умолчанию intraday)
-                mode_id = 'intraday'  # По умолчанию
-                
                 # Пытаемся определить grid_step по истории ордеров
                 grid_step = 0
                 try:
@@ -223,6 +217,24 @@ class TradingBot:
                 except Exception:
                     pass  # Если нет истории — grid_step = 0
                 
+                # Определяем mode: если позиция уже была в БД — берём её режим;
+                # для новой позиции пытаемся угадать по размеру сетки/объёму, иначе intraday.
+                if symbol in existing:
+                    mode_id = getattr(existing[symbol], 'mode', None) or 'intraday'
+                else:
+                    # Новая позиция вне бота: если есть история усреднений — считаем grid_step
+                    guessed_mode = 'intraday'
+                    try:
+                        pos_size_usdt = positionValue if positionValue > 0 else qty * avg_entry
+                        # Очень маленькие позиции чаще скальперские
+                        if 0 < pos_size_usdt <= 15:
+                            guessed_mode = 'scalp'
+                        elif pos_size_usdt >= 200:
+                            guessed_mode = 'swing'
+                    except Exception:
+                        pass
+                    mode_id = guessed_mode
+                
                 # Рассчитываем PnL
                 if side == 'LONG':
                     gross_pnl = qty * (current_price - avg_entry)
@@ -233,7 +245,9 @@ class TradingBot:
                 pnl = unrealisedPnl if unrealisedPnl != 0 else (gross_pnl - entry_fee - exit_fee_est)
                 
                 if symbol in existing:
-                    # Обновляем существующую запись
+                    # Обновляем существующую запись: только рыночные данные,
+                    # НЕ перезаписываем режим, tf, открытую дату, grid_step
+                    # и validty — они могут быть установлены ботом или вручную.
                     t = existing[symbol]
                     t.side = side
                     t.entry_price = entry_price
@@ -246,7 +260,9 @@ class TradingBot:
                     t.entry_fee = entry_fee
                     t.pnl = pnl
                     t.status = 'OPEN'
-                    t.grid_step = grid_step  # Из истории ордеров
+                    # grid_step обновляем ТОЛЬКО если новый больше (внешнее усреднение)
+                    if grid_step > t.grid_step:
+                        t.grid_step = grid_step
                     t.bybit_position_id = pos.get('positionIdx')
                     
                     log.info('[SYNC] Обновлена сделка %s: %s qty=%.4f avg=%.6f pnl=%.2f',
@@ -293,19 +309,27 @@ class TradingBot:
                      len(existing), len(bybit_symbols), len(stale))
             if stale:
                 for t in stale:
-                    log.info('[SYNC] Удаляем закрытую позицию: %s (статус: %s, qty: %.4f)',
+                    log.info('[SYNC] Закрываем позицию в БД (нет на бирже): %s (статус: %s, qty: %.4f)',
                              t.symbol, t.status, t.total_qty)
+
+                    # Фиксируем последний PnL до обнуления позиции.
+                    last_price = t.current_price or t.avg_entry_price or 0.0
+                    closed_pnl = float(t.pnl or 0.0)
+
+                    history = TradeHistory(
+                        trade_id=t.id, action='CLOSED_BY_SYNC', price=last_price,
+                        qty=0, margin=0, pnl=closed_pnl,
+                        notes=f'Позиция закрыта на бирже вне бота; зафиксирован PnL {closed_pnl:.4f} USDT'
+                    )
+                    session.add(history)
+
+                    t.realized_pnl += closed_pnl
                     t.status = 'CLOSED'
+                    t.closed_at = datetime.datetime.utcnow()
                     t.total_qty = 0
                     t.avg_entry_price = 0
                     t.current_price = 0
-
-                    history = TradeHistory(
-                        trade_id=t.id, action='CLOSED_BY_SYNC', price=0,
-                        qty=0, margin=0, pnl=0,
-                        notes='Позиция закрыта на бирже, удалена из БД при синхронизации'
-                    )
-                    session.add(history)
+                    t.pnl = t.realized_pnl
                     synced += 1
                 await session.commit()
 
@@ -424,7 +448,8 @@ class TradingBot:
                     kl_work = cached.get('kl')  # восстанавливаем для find_pins_with_confirm
                 else:
                     try:
-                        kl_work = await self._fetch_klines_safe(sym, mode.work_tf, self.KLINES_PER_REQUEST)
+                        async with self._kline_sem:
+                            kl_work = await self._fetch_klines_safe(sym, mode.work_tf, self.KLINES_PER_REQUEST)
                     except Exception:
                         kl_work = None
                     if kl_work and len(kl_work) >= 30:
@@ -449,7 +474,8 @@ class TradingBot:
 
                 # --- 6. Получаем якорный ТФ для тренда и пространства ---
                 try:
-                    kl_anchor = await self._fetch_klines_safe(sym, mode.anchor_tf, self.KLINES_PER_REQUEST)
+                    async with self._kline_sem:
+                        kl_anchor = await self._fetch_klines_safe(sym, mode.anchor_tf, self.KLINES_PER_REQUEST)
                 except Exception:
                     kl_anchor = None
                 if not kl_anchor or len(kl_anchor) < 30:
@@ -571,9 +597,19 @@ class TradingBot:
                         if active_count >= max_open:
                             break
                         break  # один сигнал на символ
+
                     except Exception as e:
                         log.warning('Open trade failed for %s %s: %r', sym, mode.id, e)
-                        continue
+                        # Помечаем пин как проверенный только при неустранимых ошибках:
+                        # если ошибка — временная (rate-limit, проскальзывание),
+                        # пин можно попробовать снова в следующем цикле.
+                        # Но если confidence/rr ниже порога — пин негоден, помечаем.
+                        if 'rate' in str(e).lower() or 'timeout' in str(e).lower() or 'temp' in str(e).lower():
+                            pass  # не помечаем — попробуем снова
+                        else:
+                            seen_key = f"{sym}_{mode.id}_{int(pin['ts'])}"
+                            self._seen_candles.add(seen_key)
+                            break  # ошибка неустранимая — переходим к следующему пину
 
                 # --- 12. Дедуп: помечаем пин как проверенный ---
                 for pin in pins:
