@@ -44,7 +44,7 @@ if not exist .env (
 REM --- Zapusk (avtomaticheskiy restart pri avanii) ---
 echo Starting Knife Bot locally (IS_RENDER=%IS_RENDER%)...
 :restart_loop
-.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000
+.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000 --no-use-colors
 
 REM --- Ctrl+C = osoznannaya ostanovka, bez restarta i podtverzhdeniy ---
 if errorlevel 130 (
