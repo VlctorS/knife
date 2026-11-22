@@ -717,18 +717,29 @@ async function loadStatus() {
   await updateBalanceAndPnl();
 }
 
+// Кэш тяжёлых агрегатных запросов — обновляем не каждый тик, а раз в 30 сек
+let _statsCache = { data: null, ts: 0 };
+let _openPnlCache = { data: null, ts: 0 };
+
 async function updateBalanceAndPnl() {
   try {
     // Получаем историю балансов с бэкенда
     const histRes = await fetch('/api/balance_history');
     const histData = await histRes.json();
 
-    const statsRes = await fetch('/api/closed_stats');
-    const stats = await statsRes.json();
+    const now = Date.now();
+    if (!_statsCache.data || now - _statsCache.ts > 30000) {
+      const statsRes = await fetch('/api/closed_stats');
+      _statsCache = { data: await statsRes.json(), ts: now };
+    }
+    const stats = _statsCache.data;
     const totalRealizedPnl = stats.total_pnl || 0;
 
-    const openStatsRes = await fetch('/api/open_pnl');
-    const openStats = await openStatsRes.json();
+    if (!_openPnlCache.data || now - _openPnlCache.ts > 15000) {
+      const openStatsRes = await fetch('/api/open_pnl');
+      _openPnlCache = { data: await openStatsRes.json(), ts: now };
+    }
+    const openStats = _openPnlCache.data;
     const livePnl = openStats.total_pnl || 0;
 
     console.log('[BALANCE UI] histData:', histData);
@@ -759,9 +770,8 @@ async function updateBalanceAndPnl() {
     }
 
     const currentLiveBalance = liveBal;
-    const prevRealized = prevLive;
 
-    // Вычисляем дельты
+    // Вычисляем дельты — от prevRealized для realized, от prevLive для live
     const deltaRealized = realizedBal - prevRealized;
     const deltaLive = currentLiveBalance - prevLive;
 
