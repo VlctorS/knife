@@ -44,6 +44,14 @@ REM --- Запуск (автоматический рестарт при ава�
 echo Starting Knife Bot locally (IS_RENDER=%IS_RENDER%)...
 :restart_loop
 .venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000
+
+REM --- Ctrl+C = осознанная остановка, без рестарта и подтверждений ---
+if errorlevel 130 (
+    echo.
+    echo [OK] Bot stopped by user. Exiting without restart.
+    exit /b 0
+)
+
 echo.
 echo [!] Bot exited (crashed or stopped). Restarting in 2 seconds...
 timeout /t 2 >nul
