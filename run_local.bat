@@ -38,10 +38,10 @@ if not exist .env (
     echo [OK] .env sozdan.
 )
 
-REM --- Zapusk bota v novom okne ---
+REM --- Zapusk bota v novom okne KnifeBot ---
+REM --- /D = rabochaya papka novogo okna; bez lomanyh kvotok ---
 REM --- Interpolator .venv\Scripts\python.exe -m uvicorn garantiruet, chto ---
 REM --- bot idenno iz venv, a ne iz sistemnogo Python. ---
-REM --- Ctrl+C v okne KnifeBot ostanavlivaet bot bez voprosa o zahvate faila. ---
 echo Starting Knife Bot locally (IS_RENDER=%IS_RENDER%)...
-start "KnifeBot" cmd /k ""cd /d "%~dp0" && set IS_RENDER=False && .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-use-colors""
+start "KnifeBot" /D "%~dp0" cmd /k "set IS_RENDER=False&& .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-use-colors"
 exit /b 0
