@@ -1270,6 +1270,25 @@ class TradingBot:
         log.info('VALIDITY EXIT %s %s @ %.6f | PnL: %.4f | reason: %s',
                  t.side, t.symbol, price, realized_part, reason)
 
+    async def _periodic_position_sync(self, session):
+        """Лёгкая периодическая синхронизация позиций с биржей (раз в 60 сек).
+
+        Подхватывает сделки, открытые/закрытые/усреднённые вне бота:
+        - новая позиция на бирже без записи в БД -> создаёт Trade;
+        - внешнее усреднение -> обновляет qty/avg_entry/grid_step;
+        - закрытая на бирже позиция -> закрывает сделку и фиксирует PnL.
+        Вызывается из update_open_trades, чтобы не ждать рестарта.
+        """
+        if not hasattr(self, '_last_pos_sync'):
+            self._last_pos_sync = time.time()
+        if time.time() - self._last_pos_sync < 60:
+            return
+        self._last_pos_sync = time.time()
+        try:
+            await self.sync_open_positions()
+        except Exception as e:
+            log.warning('[SYNC-PERIODIC] failed: %r', e)
+
     async def update_open_trades(self):
         # Периодическая очистка кеша seen-свечей (раз в час)
         now_ts = time.time()
@@ -1313,6 +1332,13 @@ class TradingBot:
                     except Exception as e:
                         log.warning('Failed to load D klines for %s: %r', sym, e)
 
+            # --- ПЕРИОДИЧЕСКАЯ СИНХРОНИЗАЦИЯ ПОЗИЦИЙ С БИРЖОЙ ---
+            # Подхват сделок, открытых/усреднённых/закрытых вне бота
+            try:
+                await self._periodic_position_sync(session)
+            except Exception as e:
+                log.warning('Periodic position sync failed: %r', e)
+            
             # --- ЛЕЧЕНИЕ «ЗАВИСШИХ» СДЕЛОК ---
             # Если история не обновлялась дольше STALE_TRADE_SEC, но тик свежий — пишем SNAPSHOT
             try:
