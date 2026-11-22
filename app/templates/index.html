@@ -1158,7 +1158,11 @@ async function clearClosedTrades(mode) {
   });
   const d = await r.json();
   if (d.ok) {
+    // Сбрасываем кэш статы/PnL, чтобы карточки тотчас показали нули
+    _statsCache = { data: null, ts: 0 };
+    _openPnlCache = { data: null, ts: 0 };
     loadClosedTrades();
+    updateBalanceAndPnl();
   }
 }
 

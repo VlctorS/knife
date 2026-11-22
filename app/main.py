@@ -603,14 +603,28 @@ async def api_clear_closed_trades(request: Request):
             msk_now = now_utc - datetime.timedelta(hours=3)
             today_start = msk_now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(hours=3)
             
+            closed_res = await session.execute(
+                select(Trade.id).where(Trade.status == 'CLOSED').where(Trade.closed_at >= today_start)
+            )
+            trade_ids = [row[0] for row in closed_res.all()]
+            if trade_ids:
+                await session.execute(
+                    delete(TradeHistory).where(TradeHistory.trade_id.in_(trade_ids))
+                )
             result = await session.execute(
                 delete(Trade).where(Trade.status == 'CLOSED').where(Trade.closed_at >= today_start)
             )
         else:
+            # Полная очистка: удаляем ВСЮ историю выходов вместе со сделками,
+            # иначе /api/closed_stats продолжает суммировать 'осиротевшие'
+            # записи TradeHistory и PnL не обнуляется.
+            await session.execute(delete(TradeHistory))
             result = await session.execute(delete(Trade).where(Trade.status == 'CLOSED'))
         
         await session.commit()
-        
+
+    # Сбрасываем кэш балансов — следующий снимок пересчитается от чистой БД
+    balance_history.clear()
     return {'ok': True}
 
 @app.post('/api/close_trade')
@@ -1238,6 +1252,7 @@ async def api_clear_data():
         await session.execute(delete(TradeHistory))
         await session.commit()
     state.alerts.clear()
+    balance_history.clear()
     return {"ok": True, "message": "Data cleared"}
 
 @app.post("/api/reset_signals")
