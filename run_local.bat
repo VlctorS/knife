@@ -13,13 +13,10 @@ for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8000 ^| findstr LISTENING 2^
 timeout /t 1 /nobreak >nul
 
 REM --- Virtualnoe okruzhenie ---
-if not exist .venv (
+if not exist .venv\Scripts\python.exe (
     echo Creating venv...
     python -m venv .venv
-    call .venv\Scripts\activate.bat
-    pip install -r requirements.txt
-) else (
-    call .venv\Scripts\activate.bat
+    .venv\Scripts\python.exe -m pip install -r requirements.txt
 )
 
 REM --- Proverka .env ---
@@ -41,8 +38,10 @@ if not exist .env (
     echo [OK] .env sozdan.
 )
 
-REM --- Zapusk bota v tekom okne bez avto-restarta ---
-REM --- Ctrl+C ostanavlivaet uvicorn i srazu zahodit v komandnuyu stroku ---
+REM --- Zapusk bota v novom okne ---
+REM --- Interpolator .venv\Scripts\python.exe -m uvicorn garantiruet, chto ---
+REM --- bot idenno iz venv, a ne iz sistemnogo Python. ---
+REM --- Ctrl+C v okne KnifeBot ostanavlivaet bot bez voprosa o zahvate faila. ---
 echo Starting Knife Bot locally (IS_RENDER=%IS_RENDER%)...
-start "KnifeBot" cmd /k "cd /d "%~dp0" && call .venv\Scripts\activate.bat && set IS_RENDER=False && uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-use-colors"
+start "KnifeBot" cmd /k ""cd /d "%~dp0" && set IS_RENDER=False && .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-use-colors""
 exit /b 0
