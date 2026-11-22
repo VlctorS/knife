@@ -41,19 +41,8 @@ if not exist .env (
     echo [OK] .env sozdan.
 )
 
-REM --- Zapusk (avtomaticheskiy restart pri avanii) ---
+REM --- Zapusk bota v tekom okne bez avto-restarta ---
+REM --- Ctrl+C ostanavlivaet uvicorn i srazu zahodit v komandnuyu stroku ---
 echo Starting Knife Bot locally (IS_RENDER=%IS_RENDER%)...
-:restart_loop
-.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000 --no-use-colors
-
-REM --- Ctrl+C = osoznannaya ostanovka, bez restarta i podtverzhdeniy ---
-if errorlevel 130 (
-    echo.
-    echo [OK] Bot stopped by user. Exiting without restart.
-    exit /b 0
-)
-
-echo.
-echo [!] Bot exited ^(crashed or stopped^). Restarting in 2 seconds...
-timeout /t 2 >nul
-goto :restart_loop
+start "KnifeBot" cmd /k "cd /d "%~dp0" && call .venv\Scripts\activate.bat && set IS_RENDER=False && uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-use-colors"
+exit /b 0
