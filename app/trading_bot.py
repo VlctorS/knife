@@ -525,9 +525,15 @@ class TradingBot:
                             dist_to_target = (target['price'] - st.last_price) / st.last_price * 100
                         else:
                             dist_to_target = (st.last_price - target['price']) / st.last_price * 100
+                        # ATR-защита: если уровень слишком близко к entry (меньше 1 ATR),
+                        # сигнал ненадёжен — RR будет ложно высокий из-за близкой цели
+                        atr_pct_val = atr_work / st.last_price * 100 if st.last_price > 0 else 0
+                        if atr_pct_val > 0 and dist_to_target < atr_pct_val * 0.8:
+                            dist_to_target = atr_pct_val * 1.2  # растягиваем до 1.2 ATR
                     else:
-                        # Нет уровня — ориентируемся на ATR
-                        dist_to_target = 5.0 * atr_work / st.last_price * 100 if st.last_price > 0 else 10.0
+                        # Нет уровня — ориентируемся на ATR (3..5 ATR для разных режимов)
+                        atr_mult = 3.0 if mode.id == 'scalp' else 5.0
+                        dist_to_target = atr_mult * atr_work / st.last_price * 100 if st.last_price > 0 else 10.0
 
                     # Стоп: за экстремумом тени пина
                     if side == 'LONG':
