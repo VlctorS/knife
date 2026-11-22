@@ -703,9 +703,24 @@ class TradingBot:
     async def _open_mode_trade(self, session, sym, side, price, max_lev,
                                cfg, gs, change_pct, fee_pct, mode, details):
         """Открывает сделку в режиме (scalp/intraday/swing) через Bybit API."""
+        # --- Проверка баланса перед выставлением ордера ---
+        try:
+            bal = await self.rest.get_balance()
+            avail = float(bal.get('available_balance') or 0)
+        except Exception as e:
+            log.warning('[ENTRY] Balance check failed for %s: %r', sym, e)
+            avail = 0.0
+
         pos_size = _pick(cfg.position_size_entry if cfg else 0, 
                          gs.position_size_entry if gs else 0, MIN_POS_SIZE)
         pos_size = max(MIN_POS_SIZE, pos_size)
+        margin_needed = pos_size / max(max_lev, 1)
+        if avail < margin_needed * 1.2:
+            raise Exception(
+                f"Insufficient balance: available={avail:.2f} USDT, "
+                f"need ~{margin_needed:.2f} USDT (+20% буфер) для {sym}"
+            )
+
         margin = pos_size / max_lev
         qty = pos_size / price
         entry_fee = pos_size * (fee_pct / 100.0)

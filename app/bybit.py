@@ -177,6 +177,21 @@ def _sign_request(params: dict) -> dict:
     }
 
 
+def _sign_post(timestamp: str, params: dict) -> str:
+    """Подпись POST по канону Bybit v5: timestamp + api_key + recv_window + JSON-тело.
+
+    Bybit вычисляет подпись над СЫРЫМ JSON-телом запроса, а не над
+    urlencoded-строкой. Ключи должны быть в том же порядке, что и в теле.
+    """
+    body = json.dumps(params)
+    payload = timestamp + API_KEY + '5000' + body
+    return hmac.new(
+        API_SECRET.encode('utf-8'),
+        payload.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+
+
 class BybitREST:
     def __init__(self, session):
         self._s = session
@@ -288,9 +303,26 @@ class BybitREST:
     # ======================================================================
 
     async def _post(self, path: str, params: dict):
-        """Отправляет POST-запрос с подписью."""
-        headers = _sign_request(params)
-        async with self._s.post(REST_BASE + path, params=params, headers=headers) as r:
+        """Отправляет POST-запрос с подписью.
+
+        Bybit v5 требует: тело = сырой JSON, подпись = HMAC(timestamp+key+recv+body).
+        Отправка через params= (form-urlencoded) даёт 'Error sign'.
+        """
+        timestamp = str(int(time.time() * 1000))
+        body = json.dumps(params)
+        signature = hmac.new(
+            API_SECRET.encode('utf-8'),
+            (timestamp + API_KEY + '5000' + body).encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        headers = {
+            'X-BAPI-API-KEY': API_KEY,
+            'X-BAPI-TIMESTAMP': timestamp,
+            'X-BAPI-RECV-WINDOW': '5000',
+            'X-BAPI-SIGN': signature,
+            'Content-Type': 'application/json',
+        }
+        async with self._s.post(REST_BASE + path, data=body, headers=headers) as r:
             if r.status == 403:
                 log.error('403 Forbidden on %s. API keys: %s', path, 'SET' if API_KEY else 'NOT SET')
             if r.status != 200:
