@@ -1022,13 +1022,15 @@ class TradingBot:
 
             age_hours = _trade_age_hours(t)
 
-            # Получаем актуальность разворота
+            # Получаем актуальность разворота (с ATR-порогами режима)
             v = evaluate_validity(
                 symbol=t.symbol, side=t.side,
                 current_price=curr_price, avg_entry_price=t.avg_entry_price,
                 klines_1h=kl_1h, klines_4h=kl_4h,
                 ma_1h=ma_1h, ma_4h=ma_4h,
                 age_hours=age_hours,
+                mode_id=getattr(t, 'mode', None),
+                atr_pct=getattr(t, '_atr_pct', 0.0) or 0.0,
             )
 
             snapshot = {
@@ -1194,6 +1196,8 @@ class TradingBot:
                 ma_1h=ma_1h,
                 ma_4h=ma_4h,
                 age_hours=age_hours,
+                mode_id=getattr(t, 'mode', None),
+                atr_pct=getattr(t, '_atr_pct', 0.0) or 0.0,
             )
             if v:
                 t.validity = v.status

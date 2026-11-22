@@ -16,6 +16,8 @@ import logging
 from dataclasses import dataclass
 from typing import List, Optional
 
+from .modes import get_mode
+
 log = logging.getLogger(__name__)
 
 
@@ -46,10 +48,34 @@ def _classify(score: float, reasons: List[str]) -> ValidityResult:
 
 
 # Пороги структурного слома разворота (красный цвет)
+# NEW_EXTREME_PCT — базовый порог для intraday; для других режимов
+# корректируется по ATR рабочего ТФ (см. _structural_checks).
 NEW_EXTREME_PCT = 2.0        # новый экстремум глубже entry не менее чем на 2%
 STRUCT_MIN_HOURS = 4         # минимум часов в сделке до возможного красного
 STRUCT_CONFIRM_CANDLES = 2   # закрытых 1h-свечи без возврата к средней
 STRUCT_VOLUME_RATIO = 1.3    # объём свечи-пробойника к среднему за 20 свечей
+
+
+def _extreme_threshold_pct(mode_id: Optional[str], atr_pct: float = 0.0) -> float:
+    """Порог нового экстремума (в %) с учётом режима и волатильности (ATR).
+
+    Для скальпинга 5m экстремум в 2% — это слишком глубоко; используем
+    минимум 1.0% или 2.5 * ATR (в % от цены), что для типичного ATR(14)
+    5m ~0.3% даёт 0.75%, но не меньше 1.0%.
+    """
+    base = NEW_EXTREME_PCT
+    if not mode_id:
+        return base
+    mode = get_mode(mode_id)
+    if mode.id == 'scalp':
+        base = 1.0
+    elif mode.id == 'intraday':
+        base = 1.5
+    else:  # swing
+        base = 2.5
+    if atr_pct > 0:
+        return max(base, atr_pct * 2.5)
+    return base
 
 
 def evaluate_validity(
@@ -62,6 +88,8 @@ def evaluate_validity(
     ma_1h: Optional[float],
     ma_4h: Optional[float],
     age_hours: Optional[float] = None,   # сколько часов открыта сделка
+    mode_id: Optional[str] = None,       # режим сделки (для ATR-порогов)
+    atr_pct: float = 0.0,                # текущий ATR рабочего ТФ в % от цены
 ) -> ValidityResult:
     """
     Оценивает актуальность разворота для продолжения сделки.
@@ -119,8 +147,10 @@ def evaluate_validity(
     result.metrics = metrics
 
     # --- Структурные критерии красного (единственный путь к red) ---
+    extreme_threshold = _extreme_threshold_pct(mode_id, atr_pct)
     checks, blockers = _structural_checks(side, current_price, avg_entry_price,
-                                          klines_1h, metrics)
+                                          klines_1h, metrics,
+                                          extreme_pct=extreme_threshold)
     in_cooldown = age_hours is not None and age_hours < STRUCT_MIN_HOURS
 
     verdict_reasons: List[str] = []
@@ -164,10 +194,17 @@ def evaluate_validity(
 
 
 def _structural_checks(side: str, current_price: float, avg_entry: float,
-                       klines_1h: List, metrics: dict):
-    """Возвращает (checks, blockers) — список структурных условий слома разворота."""
+                       klines_1h: List, metrics: dict,
+                       extreme_pct: Optional[float] = None):
+    """Возвращает (checks, blockers) — список структурных условий слома разворота.
+
+    extreme_pct — порог нового экстремума в %; если не задан, берется базовый
+    NEW_EXTREME_PCT. Зависит от режима сделки и ATR рабочего ТФ.
+    """
     checks: List[dict] = []
     blockers: List[str] = []
+    if extreme_pct is None:
+        extreme_pct = NEW_EXTREME_PCT
 
     closed = klines_1h[:-1]  # последняя свеча ещё не закрыта
     recent = closed[-STRUCT_CONFIRM_CANDLES:] if len(closed) >= STRUCT_CONFIRM_CANDLES else closed
@@ -177,12 +214,12 @@ def _structural_checks(side: str, current_price: float, avg_entry: float,
         lows = [float(k[3]) for k in closed[-10:]] if closed else []
         min_low = min(lows) if lows else current_price
         depth_pct = (avg_entry - min_low) / avg_entry * 100 if avg_entry > 0 else 0.0
-        passed_1 = depth_pct >= NEW_EXTREME_PCT
+        passed_1 = depth_pct >= extreme_pct
         checks.append({
             'name': 'новый_минимум',
             'passed': passed_1,
             'detail': f'мин. low за 10 закрытых свечей = {min_low:.6f}, '
-                      f'просадка ниже средней на {depth_pct:.2f}% (нужно ≥ {NEW_EXTREME_PCT}%)',
+                      f'просадка ниже средней на {depth_pct:.2f}% (нужно ≥ {extreme_pct:.2f}%)',
         })
         if not passed_1:
             blockers.append('нет нового глубокого минимума ниже средней')
@@ -229,12 +266,12 @@ def _structural_checks(side: str, current_price: float, avg_entry: float,
         highs = [float(k[2]) for k in closed[-10:]] if closed else []
         max_high = max(highs) if highs else current_price
         depth_pct = (max_high - avg_entry) / avg_entry * 100 if avg_entry > 0 else 0.0
-        passed_1 = depth_pct >= NEW_EXTREME_PCT
+        passed_1 = depth_pct >= extreme_pct
         checks.append({
             'name': 'новый_максимум',
             'passed': passed_1,
             'detail': f'макс. high за 10 закрытых свечей = {max_high:.6f}, '
-                      f'выход выше средней на {depth_pct:.2f}% (нужно ≥ {NEW_EXTREME_PCT}%)',
+                      f'выход выше средней на {depth_pct:.2f}% (нужно ≥ {extreme_pct:.2f}%)',
         })
         if not passed_1:
             blockers.append('нет нового высокого максимума выше средней')
@@ -276,7 +313,7 @@ def _structural_checks(side: str, current_price: float, avg_entry: float,
             blockers.append('цена уже вернулась к средней')
 
     metrics['structure'] = {
-        'new_extreme_needed_pct': NEW_EXTREME_PCT,
+        'new_extreme_needed_pct': extreme_pct,
         'confirm_candles': STRUCT_CONFIRM_CANDLES,
         'volume_ratio_needed': STRUCT_VOLUME_RATIO,
         'min_age_hours': STRUCT_MIN_HOURS,
