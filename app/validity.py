@@ -90,6 +90,9 @@ def evaluate_validity(
     age_hours: Optional[float] = None,   # сколько часов открыта сделка
     mode_id: Optional[str] = None,       # режим сделки (для ATR-порогов)
     atr_pct: float = 0.0,                # текущий ATR рабочего ТФ в % от цены
+    tf_sec: int = 3600,                  # длительность бара klines_1h (сек)
+    min_hold_sec: Optional[int] = None,  # cooldown красного; None = STRUCT_MIN_HOURS
+    confirm_candles: Optional[int] = None,  # закрытых баров слома; None = STRUCT_CONFIRM_CANDLES
 ) -> ValidityResult:
     """
     Оценивает актуальность разворота для продолжения сделки.
@@ -146,12 +149,17 @@ def evaluate_validity(
     result = _classify(score, reasons)
     result.metrics = metrics
 
+    min_hold_hours = (min_hold_sec if min_hold_sec else STRUCT_MIN_HOURS * 3600) / 3600.0
+
     # --- Структурные критерии красного (единственный путь к red) ---
     extreme_threshold = _extreme_threshold_pct(mode_id, atr_pct)
     checks, blockers = _structural_checks(side, current_price, avg_entry_price,
                                           klines_1h, metrics,
-                                          extreme_pct=extreme_threshold)
-    in_cooldown = age_hours is not None and age_hours < STRUCT_MIN_HOURS
+                                          extreme_pct=extreme_threshold,
+                                          tf_sec=tf_sec,
+                                          confirm_candles=confirm_candles,
+                                          min_hold_hours=min_hold_hours)
+    in_cooldown = age_hours is not None and age_hours < min_hold_hours
 
     verdict_reasons: List[str] = []
     red_candidate = all(c['passed'] for c in checks)
@@ -161,14 +169,13 @@ def evaluate_validity(
     if in_cooldown:
         verdict_reasons.insert(
             0,
-            f"[cooldown] красен невозможна первые {STRUCT_MIN_HOURS} ч после входа "
+            f"[cooldown] красный невозможен первые {min_hold_hours:.1f} ч после входа "
             f"(сделке {age_hours:.1f} ч)"
         )
 
-    red_candidate = all(c['passed'] for c in checks)
     if red_candidate and in_cooldown:
         reasons_note = ('структурные признаки слома есть, но красный запрещён '
-                        f'в cooldown первые {STRUCT_MIN_HOURS} ч после входа')
+                        f'в cooldown первые {min_hold_hours:.1f} ч после входа')
     elif red_candidate:
         reasons_note = 'разворот структурно сломан: все структурные условия подтверждены'
     else:
@@ -195,23 +202,36 @@ def evaluate_validity(
 
 def _structural_checks(side: str, current_price: float, avg_entry: float,
                        klines_1h: List, metrics: dict,
-                       extreme_pct: Optional[float] = None):
+                       extreme_pct: Optional[float] = None,
+                       tf_sec: Optional[int] = None,
+                       confirm_candles: Optional[int] = None,
+                       min_hold_hours: float = STRUCT_MIN_HOURS):
     """Возвращает (checks, blockers) — список структурных условий слома разворота.
 
     extreme_pct — порог нового экстремума в %; если не задан, берется базовый
     NEW_EXTREME_PCT. Зависит от режима сделки и ATR рабочего ТФ.
+    tf_sec / confirm_candles — длительность бара и нужное число закрытых
+    подтверждений; по умолчанию 1h-логика (STRUCT_CONFIRM_CANDLES).
+    Окна «закрытых свечей» пересчитываются из баров выбранного ТФ так,
+    чтобы скальп на 5m смотрел на 5m-структуру, а не ждал закрытия часовиков.
     """
     checks: List[dict] = []
     blockers: List[str] = []
     if extreme_pct is None:
         extreme_pct = NEW_EXTREME_PCT
+    n_confirm = confirm_candles or STRUCT_CONFIRM_CANDLES
+    sec = tf_sec or 3600
+    # 12 баров ~ час истории для 5m, но не больше имеющихся данных;
+    # для 4H/D берём 10 баров как раньше.
+    lookback_lows = max(4, min(12, int(3600 * 2 // sec))) if sec < 3600 else 10
+    vol_lookback = max(8, min(24, int(3600 * 6 // sec))) if sec < 3600 else 20
 
     closed = klines_1h[:-1]  # последняя свеча ещё не закрыта
-    recent = closed[-STRUCT_CONFIRM_CANDLES:] if len(closed) >= STRUCT_CONFIRM_CANDLES else closed
+    recent = closed[-n_confirm:] if len(closed) >= n_confirm else closed
 
     if side == 'LONG':
         # 1. Новый минимум глубже entry минимум на NEW_EXTREME_PCT
-        lows = [float(k[3]) for k in closed[-10:]] if closed else []
+        lows = [float(k[3]) for k in closed[-lookback_lows:]] if closed else []
         min_low = min(lows) if lows else current_price
         depth_pct = (avg_entry - min_low) / avg_entry * 100 if avg_entry > 0 else 0.0
         passed_1 = depth_pct >= extreme_pct
@@ -226,18 +246,18 @@ def _structural_checks(side: str, current_price: float, avg_entry: float,
 
         # 2. Закрытия последних свечей ниже entry (отскока нет)
         closes_below = [k for k in recent if float(k[4]) < avg_entry]
-        passed_2 = len(recent) >= STRUCT_CONFIRM_CANDLES and len(closes_below) == len(recent)
+        passed_2 = len(recent) >= n_confirm and len(closes_below) == len(recent)
         checks.append({
             'name': 'без_отскока',
             'passed': passed_2,
-            'detail': f'{len(closes_below)} из {len(recent)} последних закрытых 1h-свечей '
-                      f'закрылись ниже средней (нужно все {STRUCT_CONFIRM_CANDLES})',
+            'detail': f'{len(closes_below)} из {len(recent)} последних закрытых свечей '
+                      f'закрылись ниже средней (нужно все {n_confirm})',
         })
         if not passed_2:
             blockers.append('есть отскок — свечи закрываются выше средней')
 
         # 3. Объём пробоя выше среднего
-        vols = [float(k[5]) for k in closed[-20:]] if closed else []
+        vols = [float(k[5]) for k in closed[-vol_lookback:]] if closed else []
         avg_vol = sum(vols) / len(vols) if vols else 0.0
         breach_candle = min(recent, key=lambda k: float(k[3])) if recent else None
         breach_vol = float(breach_candle[5]) if breach_candle else 0.0
@@ -263,7 +283,7 @@ def _structural_checks(side: str, current_price: float, avg_entry: float,
         if not passed_4:
             blockers.append('цена уже вернулась к средней')
     else:  # SHORT — зеркально
-        highs = [float(k[2]) for k in closed[-10:]] if closed else []
+        highs = [float(k[2]) for k in closed[-lookback_lows:]] if closed else []
         max_high = max(highs) if highs else current_price
         depth_pct = (max_high - avg_entry) / avg_entry * 100 if avg_entry > 0 else 0.0
         passed_1 = depth_pct >= extreme_pct
@@ -277,17 +297,17 @@ def _structural_checks(side: str, current_price: float, avg_entry: float,
             blockers.append('нет нового высокого максимума выше средней')
 
         closes_above = [k for k in recent if float(k[4]) > avg_entry]
-        passed_2 = len(recent) >= STRUCT_CONFIRM_CANDLES and len(closes_above) == len(recent)
+        passed_2 = len(recent) >= n_confirm and len(closes_above) == len(recent)
         checks.append({
             'name': 'без_отскока',
             'passed': passed_2,
-            'detail': f'{len(closes_above)} из {len(recent)} последних закрытых 1h-свечей '
-                      f'закрылись выше средней (нужно все {STRUCT_CONFIRM_CANDLES})',
+            'detail': f'{len(closes_above)} из {len(recent)} последних закрытых свечей '
+                      f'закрылись выше средней (нужно все {n_confirm})',
         })
         if not passed_2:
             blockers.append('есть откат — свечи закрываются ниже средней')
 
-        vols = [float(k[5]) for k in closed[-20:]] if closed else []
+        vols = [float(k[5]) for k in closed[-vol_lookback:]] if closed else []
         avg_vol = sum(vols) / len(vols) if vols else 0.0
         breach_candle = max(recent, key=lambda k: float(k[2])) if recent else None
         breach_vol = float(breach_candle[5]) if breach_candle else 0.0
@@ -314,9 +334,10 @@ def _structural_checks(side: str, current_price: float, avg_entry: float,
 
     metrics['structure'] = {
         'new_extreme_needed_pct': extreme_pct,
-        'confirm_candles': STRUCT_CONFIRM_CANDLES,
+        'confirm_candles': n_confirm,
         'volume_ratio_needed': STRUCT_VOLUME_RATIO,
-        'min_age_hours': STRUCT_MIN_HOURS,
+        'min_age_hours': min_hold_hours,
+        'tf_sec': sec,
     }
     return checks, blockers
 

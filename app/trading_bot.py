@@ -36,6 +36,36 @@ def _get_upsert(model, values, pk_col):
     return sqlite_insert(model).values(**values).on_conflict_do_update(index_elements=[pk_col], set_={k: v for k, v in values.items() if k != pk_col})
 
 
+# --- Валидация разворота по ЖИВОМУ ТФ сделки (а не по захардкоженным 1H/4H) ---
+# Раньше validity скальпа-на-5m проверялась по закрытию 1H и 4H свечей:
+# для hold_max_hours=6 это абсурд — «красный» мог появиться только после
+# закрытия 4H бара. Теперь ТФ валидации = рабочий ТФ режима, cooldown и
+# подтверждение слома — в барах этого ТФ.
+_VALID_TF_SEC = {'5': 300, '15': 900, '240': 14400}
+
+
+def _validity_tf(mode) -> str:
+    """ТФ для оценки актуальности разворота = рабочий ТФ режима."""
+    return mode.work_tf
+
+
+def _validity_struct_params(mode) -> tuple:
+    """(min_hold_sec, confirm_candles) для структурного красного на ТФ режима.
+
+    Скальп 5m: минимум 45 минут удержания + 2 подтверждённые 5m свечи.
+    Интрадэй 15m: 3 часа + 2 свечи 15m. Свинг 4H: 6 часов + 2 свечи 4H
+    (не дольше, чем раньше по 1h-логике, но на живом графике сделки).
+    """
+    tf_sec = _VALID_TF_SEC.get(str(mode.work_tf), 3600)
+    if mode.id == 'scalp':
+        min_age_sec = 45 * 60
+    elif mode.id == 'intraday':
+        min_age_sec = 3 * 3600
+    else:
+        min_age_sec = 6 * 3600
+    return min_age_sec, max(2, int(2 * 3600 / tf_sec)) if mode.id == 'swing' else 2
+
+
 def _calc_avg_volume(candles, lookback=20):
     if len(candles) < lookback + 1:
         return 0.0
@@ -1055,17 +1085,21 @@ class TradingBot:
     async def _get_market_snapshot(self, t, session=None):
         """Собирает подробный снимок текущего состояния для истории."""
         try:
-            kl_1h = await self._fetch_klines_safe(t.symbol, '60', 30)
-            kl_4h = await self._fetch_klines_safe(t.symbol, '240', 30)
+            mode_v = get_mode(getattr(t, 'mode', None))
+            v_tf = _validity_tf(mode_v)
+            v_sec, v_confirm = _validity_struct_params(mode_v)
+            kl_1h = await self._fetch_klines_safe(t.symbol, v_tf, 60)
+            anchor_map = {'5': '60', '15': '240', '240': 'D'}
+            kl_4h = await self._fetch_klines_safe(t.symbol, anchor_map.get(v_tf, '60'), 30)
             if not kl_1h or not kl_4h:
                 return {}
             st = state.symbols.get(t.symbol)
-            
+
             curr_price = st.last_price if st else t.current_price
             ma_1h = moving_average(kl_1h, min(20, len(kl_1h) - 1)) if len(kl_1h) > 5 else None
             ma_4h = moving_average(kl_4h, min(20, len(kl_4h) - 1)) if len(kl_4h) > 5 else None
-            
-            # Текущая и прошлая свеча на 1ч
+
+            # Текущая и прошлая свеча на ТФ валидации
             c_curr = kl_1h[-1] if kl_1h else [0]*6
             c_prev = kl_1h[-2] if len(kl_1h) > 1 else [0]*6
 
@@ -1080,6 +1114,9 @@ class TradingBot:
                 age_hours=age_hours,
                 mode_id=getattr(t, 'mode', None),
                 atr_pct=getattr(t, '_atr_pct', 0.0) or 0.0,
+                tf_sec=v_sec,
+                min_hold_sec=_validity_struct_params(mode_v)[0],
+                confirm_candles=v_confirm,
             )
 
             snapshot = {
@@ -1219,15 +1256,22 @@ class TradingBot:
         Возвращает ValidityResult или None если данных недостаточно.
         Побочный эффект: обновляет t.validity и t.validity_reasons (JSON).
         Красный цвет разрешён только после cooldown-периода с момента входа/усреднения.
+
+        ТФ валидации = рабочий ТФ режима (не захардкоженные 1H/4H).
+        Скальп 5m проверяется по 5m свечам, интрадэй 15m по 15m, свинг 4H по 4H.
         """
         try:
-            kl_1h = await self._fetch_klines_safe(t.symbol, '60', 30)
-            kl_4h = await self._fetch_klines_safe(t.symbol, '240', 30)
-            if not kl_1h or not kl_4h:
-                return None
+            mode = get_mode(getattr(t, 'mode', None))
+            valid_tf = _validity_tf(mode)
+            min_age_sec, confirm_candles = _validity_struct_params(mode)
 
-            ma_1h = moving_average(kl_1h, min(20, len(kl_1h) - 1)) if len(kl_1h) > 5 else None
-            ma_4h = moving_average(kl_4h, min(20, len(kl_4h) - 1)) if len(kl_4h) > 5 else None
+            kl_work = await self._fetch_klines_safe(t.symbol, valid_tf, 60)
+            # Старший якорь — на шаг выше: 1H для скальпа, 4H для интрадэй, D для свинг.
+            anchor_tf_map = {'5': '60', '15': '240', '240': 'D'}
+            kl_anchor = await self._fetch_klines_safe(t.symbol, anchor_tf_map.get(valid_tf, '60'), 30)
+
+            if not kl_work or not kl_anchor:
+                return None
 
             st = state.symbols.get(t.symbol)
             current_price = st.last_price if st and st.last_price > 0 else t.current_price
@@ -1240,13 +1284,16 @@ class TradingBot:
                 side=t.side,
                 current_price=current_price,
                 avg_entry_price=t.avg_entry_price,
-                klines_1h=kl_1h,
-                klines_4h=kl_4h,
-                ma_1h=ma_1h,
-                ma_4h=ma_4h,
+                klines_1h=kl_work,
+                klines_4h=kl_anchor,
+                ma_1h=moving_average(kl_work, min(20, len(kl_work) - 1)) if len(kl_work) > 5 else None,
+                ma_4h=moving_average(kl_anchor, min(20, len(kl_anchor) - 1)) if len(kl_anchor) > 5 else None,
                 age_hours=age_hours,
                 mode_id=getattr(t, 'mode', None),
                 atr_pct=getattr(t, '_atr_pct', 0.0) or 0.0,
+                tf_sec=_VALID_TF_SEC.get(str(valid_tf), 3600),
+                min_hold_sec=min_age_sec,
+                confirm_candles=confirm_candles,
             )
             if v:
                 t.validity = v.status
