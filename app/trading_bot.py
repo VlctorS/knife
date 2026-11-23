@@ -1416,21 +1416,21 @@ class TradingBot:
             # Загружаем 4h и D свечи для мониторинга до любых других операций
             # Это гарантирует что validity check и grid-логика работают на актуальных данных
             if open_trades:
-                trade_symbols = list({t.symbol for t in open_trades})
-                log.debug('[PRIORITY] Loading 4h/D candles for %d open trades...', len(trade_symbols))
-                for sym in trade_symbols:
-                    try:
-                        # Загружаем 4h свечи (для validity check и тренда)
-                        await self._fetch_trade_klines(sym, '240', limit=30)
-                        await asyncio.sleep(0.03)  # очередь с минимальной задержкой
-                    except Exception as e:
-                        log.warning('Failed to load 4h klines for %s: %r', sym, e)
-                    try:
-                        # Загружаем D свечи (для swing-режима и долгосрочного тренда)
-                        await self._fetch_trade_klines(sym, 'D', limit=15)
-                        await asyncio.sleep(0.03)
-                    except Exception as e:
-                        log.warning('Failed to load D klines for %s: %r', sym, e)
+                trade_symbols = {}
+                for t in open_trades:
+                    m = get_mode(getattr(t, 'mode', None))
+                    v_tf = _validity_tf(m)
+                    anchor_map = {'5': '60', '15': '240', '240': 'D'}
+                    a_tf = anchor_map.get(v_tf, '60')
+                    trade_symbols.setdefault(t.symbol, set()).update({v_tf, a_tf})
+                log.debug('[PRIORITY] Loading live mode TF candles for %d open trades...', len(trade_symbols))
+                for sym, tfs in trade_symbols.items():
+                    for tf in sorted(tfs):
+                        try:
+                            await self._fetch_trade_klines(sym, tf, limit=60)
+                            await asyncio.sleep(0.03)  # очередь с минимальной задержкой
+                        except Exception as e:
+                            log.warning('Failed to load %s klines for %s: %r', tf, sym, e)
 
             # --- ПЕРИОДИЧЕСКАЯ СИНХРОНИЗАЦИЯ ПОЗИЦИЙ С БИРЖОЙ ---
             # Подхват сделок, открытых/усреднённых/закрытых вне бота
