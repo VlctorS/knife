@@ -16,6 +16,29 @@ from dataclasses import dataclass, replace as dc_replace
 from typing import Dict, Optional
 
 
+# Секунды в одном баре интервала Bybit. Используется для «живого» якоря:
+# пока старшая свеча не закрылась, её направление считаем по накопленному
+# объёму младших баров внутри неё (не ждём закрытия 1H/4H/D).
+_INTERVAL_SEC = {
+    '1': 60, '3': 180, '5': 300, '15': 900, '30': 1800,
+    '60': 3600, '120': 7200, '240': 14400, '360': 21600,
+    'D': 86400, 'W': 604800, 'M': 2592000,
+}
+
+# Интервалы якорей, которые НЕ нужно ждать по полному закрытию бара:
+# 1H-якорь скальпа закрывается 60 мин — это вдвое больше confirm_window,
+# сигнал успевает протухнуть. Якорь 1D закрывается сутки — неприемлемо
+# ни для какого режима. Поэтому тренд якоря считается «накопленным» баром.
+def interval_sec(tf) -> int:
+    """Длительность одного бара интервала Bybit в секундах."""
+    return _INTERVAL_SEC.get(str(tf), 3600)
+
+
+def anchor_refresh_cap(mode_id: str, work_tf: str) -> int:
+    """Свежесть данных якорного ТФ для режима (сек)."""
+    return interval_sec(work_tf) * 2
+
+
 @dataclass(frozen=True)
 class ModeParams:
     id: str
@@ -54,8 +77,10 @@ MODES: Dict[str, ModeParams] = {
         label='Скальпинг (5m / якорь 1H)',
         work_tf='5',
         work_label='5m',
+        # Якорь — НАКОПЛЕННЫЙ часовой бар из 5m-свечей: не ждём закрытия
+        # 1H (60 мин > confirm_window), тренд часа считаем живым объёмом.
         anchor_tf='60',
-        anchor_label='1H',
+        anchor_label='1H (живой)',
         monitor_threshold=0.3,           # более чувствительный для быстрых движений
         monitor_window_minutes=5,        # 5 минут
         confirm_window_sec=900,          # ~3 свечи 5m — даём время на подтверждение
@@ -64,7 +89,7 @@ MODES: Dict[str, ModeParams] = {
         pin_shadow_frac=0.55,            # 0.55 для 5m — не жёстко 0.70
         move_atr_mult=0.8,               # 0.8 ATR для 5m — не 1.6, слишком высоко
         move_pct_min=0.2,                # 0.2% для 5m — не 0.45%, слишком много
-        shadow_lookback_atr=0.5,         # 0.5 ATR — не 0.8, ближе к уровню
+        shadow_lookback_atr=0.5,         # допуск контакта тени с уровнем: 0.5*ATR
         space_rr_min=1.2,                # 1.2 для скальпа достаточно (комиссии съедают RR)
         grid_step_pct=0.5,
         grid_step_atr=0.7,
@@ -77,11 +102,14 @@ MODES: Dict[str, ModeParams] = {
     ),
     'intraday': ModeParams(
         id='intraday',
-        label='Интрадэй (15m / якорь 1D)',
+        label='Интрадэй (15m / якорь 1H)',
         work_tf='15',
         work_label='15m',
-        anchor_tf='D',
-        anchor_label='1D',
+        # Якорь 1D был ошибкой: дневная свеча закрывается сутки — сигнал
+        # умирал раньше. Интрадэй торгуется ВНУТРИ дня, поэтому якорь —
+        # живой часовой тренд, а день остаётся контекстом (SR/уровни).
+        anchor_tf='60',
+        anchor_label='1H (живой)',
         monitor_threshold=0.5,           # стандартный
         monitor_window_minutes=60,       # 1 час
         confirm_window_sec=1800,       # ~2 свечи 15m
@@ -106,6 +134,8 @@ MODES: Dict[str, ModeParams] = {
         label='Долгосрок (4H / якорь 1D)',
         work_tf='240',
         work_label='4H',
+        # Единственный режим, где якорь 1D оправдан: сделка живут дни,
+        # ожидание закрытия дневного бара = часть цикла сделки.
         anchor_tf='D',
         anchor_label='1D',
         monitor_threshold=1.0,           # фильтр шума — только сильные движения

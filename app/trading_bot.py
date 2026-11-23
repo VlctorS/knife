@@ -432,9 +432,18 @@ class TradingBot:
             if not symbols_to_check:
                 return
 
+            # --- 3b. Конфиги монет (min_confidence и пр.) — один запрос на проход ---
+            cfg_map = {}
+            try:
+                cfg_res = await session.execute(select(SymbolConfig))
+                cfg_map = {c.symbol: c for c in cfg_res.scalars().all()}
+            except Exception as e:
+                log.warning('[SCAN] SymbolConfig load failed: %r', e)
+
             # --- 4. Проход по символам с ограничением частоты ---
             scanned = 0
             for sym in symbols_to_check:
+                cfg = cfg_map.get(sym)
                 st = state.symbols.get(sym)
                 if not st or st.last_price <= 0:
                     continue
@@ -480,13 +489,17 @@ class TradingBot:
                     kl_anchor = None
                 if not kl_anchor or len(kl_anchor) < 30:
                     kl_anchor = None
-                anchor_dir, anchor_strength = trend_by_closes(kl_anchor) if kl_anchor else ('flat', 0.0)
+                # use_open=True: незакрытая свеча якоря участвует в тренде —
+                # не ждём закрытия 1H/D бара (иначе окно подтверждения короче
+                # жизни свечи якоря и сигнал протухает).
+                anchor_dir, anchor_strength = trend_by_closes(kl_anchor, use_open=True) if kl_anchor else ('flat', 0.0)
 
                 # --- 7. Пин-бары с подтверждением ---
                 pins = find_pins_with_confirm(
                     kl_work, levels_work, atr_work, st.last_price,
                     mode.pin_shadow_frac, mode.move_atr_mult, mode.move_pct_min,
                     lookback_candles=36, max_pin_age_candles=6,
+                    level_tol_atr=mode.shadow_lookback_atr,
                 )
                 if not pins:
                     log.debug('[PINS] %s mode=%s: 0 pins found (shadow=%.2f move=%.2f%% atr=%.6f price=%.6f)',
@@ -554,12 +567,21 @@ class TradingBot:
                         dist_to_target, stop_pct, rr, level_price, st.last_price,
                         mode,
                     )
-                    if confidence < mode.min_confidence:
-                        log.debug('[SKIP-CONF] %s mode=%s conf=%.3f < min=%.2f', sym, mode.id, confidence, mode.min_confidence)
+                    # Порог: конфиг монеты > глобальные настройки > режим.
+                    # (Раньше min_confidence из UI игнорировался.)
+                    conf_min = _pick(cfg.min_confidence if cfg else 0,
+                                     gs.min_confidence if gs else 0,
+                                     mode.min_confidence) or mode.min_confidence
+                    if confidence < conf_min:
+                        log.debug('[SKIP-CONF] %s mode=%s conf=%.3f < min=%.2f', sym, mode.id, confidence, conf_min)
                         continue
 
                     # --- 10. Confirm window ---
-                    pin_age_sec = now - pin_ts
+                    # Окно отсчитываем от момента ПОДТВЕРЖДЕНИЯ (закрытие
+                    # свечи-кандидата), а не от открытия пин-свечи: иначе
+                    # retest/BOS на 4-6 свечах никогда бы не прошёл фильтр.
+                    confirm_ts = pin.get('confirm_ts') or pin_ts
+                    pin_age_sec = now - confirm_ts
                     if pin_age_sec > mode.confirm_window_sec:
                         # Время подтверждения вышло — не входим
                         continue
@@ -568,7 +590,7 @@ class TradingBot:
                     try:
                         await self._open_mode_trade(
                             session, sym, side, st.last_price, st.max_leverage,
-                            cfg=None, gs=gs, change_pct=None,
+                            cfg=cfg, gs=gs, change_pct=None,
                             fee_pct=gs.fee_pct if gs and gs.fee_pct > 0 else 0.055,
                             mode=mode,
                             details={
@@ -576,7 +598,7 @@ class TradingBot:
                                 'work_tf': mode.work_label,
                                 'anchor_tf': mode.anchor_label,
                                 'confidence': round(confidence, 2),
-                                'min_confidence': mode.min_confidence,
+                                'min_confidence': conf_min,
                                 'anchor_trend': anchor_dir,
                                 'anchor_strength': round(anchor_strength, 3),
                                 'level_price': round(level_price, 8),
@@ -606,21 +628,27 @@ class TradingBot:
 
                     except Exception as e:
                         log.warning('Open trade failed for %s %s: %r', sym, mode.id, e)
-                        # Помечаем пин как проверенный только при неустранимых ошибках:
-                        # если ошибка — временная (rate-limit, проскальзывание),
-                        # пин можно попробовать снова в следующем цикле.
-                        # Но если confidence/rr ниже порога — пин негоден, помечаем.
-                        if 'rate' in str(e).lower() or 'timeout' in str(e).lower() or 'temp' in str(e).lower():
-                            pass  # не помечаем — попробуем снова
-                        else:
-                            seen_key = f"{sym}_{mode.id}_{int(pin['ts'])}"
-                            self._seen_candles.add(seen_key)
-                            break  # ошибка неустранимая — переходим к следующему пину
+                        # Временные ошибки (сеть/лимиты/недостаток баланса):
+                        # НЕ сжигаем пин — попробуем снова в следующем проходе.
+                        msg = str(e).lower()
+                        if any(t in msg for t in ('rate', 'timeout', 'temp', 'insufficient balance')):
+                            continue
+                        seen_key = f"{sym}_{mode.id}_{int(pin['ts'])}"
+                        self._seen_candles.add(seen_key)
+                        break  # неустранимая ошибка — переходим к следующему пину
 
                 # --- 12. Дедуп: помечаем пин как проверенный ---
+                # Пин сжигается, только если он действительно протух
+                # (подтверждение старше confirm_window) — тогда он не сможет
+                # войти и в следующем проходе. Пины, отброшенные фильтрами,
+                # которые зависят от ЖИВОГО рынка (тренд, RR, уверенность,
+                # уровень), оставляем живыми: рынок меняется, сигнал может
+                # стать валидным, пока пин не вышел из окна подтверждения.
                 for pin in pins:
-                    seen_key = f"{sym}_{mode.id}_{int(pin['ts'])}"
-                    self._seen_candles.add(seen_key)
+                    confirm_ts = pin.get('confirm_ts') or pin['ts']
+                    if now - confirm_ts > mode.confirm_window_sec:
+                        seen_key = f"{sym}_{mode.id}_{int(pin['ts'])}"
+                        self._seen_candles.add(seen_key)
 
                 scanned += 1
 

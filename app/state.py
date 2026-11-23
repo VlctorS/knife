@@ -386,17 +386,25 @@ def is_pin_bar(k, shadow_frac: float, min_range_pct: float,
     return False, '', range_pct
 
 
-def trend_by_closes(klines, lookback: int = 8) -> Tuple[str, float]:
+def trend_by_closes(klines, lookback: int = 8,
+                    use_open: bool = False) -> Tuple[str, float]:
     """Трендовый фильтр старшего ТФ по MA-закрытиям и направлению MACD.
 
     Ключевое отличие от trend_context(): здесь флэт — это НЕ «против
     тренда», а отсутствие направления; вход разрешён только когда
     направление явного тренда совпадает со стороной сделки.
     Возвращает ('up'|'down'|'flat', strength 0..1).
+
+    use_open=True: незакрытая свеча участвует в MA/MACD как есть (живой
+    price), а сила умножается на fraction — долю бара, прошедшую к текущему
+    моменту. Это снимает конфликт «окно подтверждения короче времени жизни
+    свечи якоря»: для часового якоря сигнал живёт десятки минут, но тренд
+    часа виден сразу по накопленным барам внутри текущего часа.
     """
     if not klines or len(klines) < 30:
         return 'flat', 0.0
-    closes = [_to_float(k[K_CLOSE]) for k in klines[:-1]]
+    src = list(klines) if use_open else list(klines[:-1])
+    closes = [_to_float(k[K_CLOSE]) for k in src]
     closes = [c for c in closes if c > 0]
     if len(closes) < 26:
         return 'flat', 0.0
@@ -435,16 +443,36 @@ def trend_by_closes(klines, lookback: int = 8) -> Tuple[str, float]:
     agreement = max(hist_pos, hist_neg) / n
     mag = min(abs(slope) / 1.5, 1.0)
     strength = round(min(0.5 * agreement + 0.5 * mag, 1.0), 3)
+    if use_open and klines:
+        strength = round(strength * _anchor_progress(klines[-1]), 3)
     return direction, strength
+
+
+def _anchor_progress(last_kline) -> float:
+    """Доля незакрытой свечи якоря, прошедшая к текущему моменту (0.35..1)."""
+    try:
+        ts = _to_float(last_kline[0])
+        dur = _to_float(last_kline[6]) if len(last_kline) > 6 else 0.0
+        if ts <= 0 or dur <= 0:
+            return 0.6
+        frac = (time.time() - ts) / dur
+        return max(0.35, min(frac, 1.0))
+    except (TypeError, ValueError):
+        return 0.6
 
 
 def find_pins_with_confirm(kl, levels, atr_value: float, current_price: float,
                            shadow_frac: float, move_atr_mult: float,
                            move_pct_min: float, lookback_candles: int = 36,
-                           max_pin_age_candles: int = 6) -> List[dict]:
+                           max_pin_age_candles: int = 6,
+                           level_tol_atr: float = 0.8) -> List[dict]:
     """Ищем свежие пин-бары у уровней и проверяем подтверждение.
 
     kl — список kline рабочего ТФ (последний — незакрытая свеча).
+
+    Порог диапазона свечи ЕДИНЫЙ: max(move_pct_min, move_atr_mult*ATR%) —
+        применяется ровно один раз (раньше удваивался через is_pin_bar).
+
     Подтверждение (любое из трёх, в пределах max_pin_age_candles):
       1) close  — следующая(ие) свеча(и) закрылась(лись) выше тела пин-бара
                   (для LONG над max(open,close) пина);
@@ -454,11 +482,11 @@ def find_pins_with_confirm(kl, levels, atr_value: float, current_price: float,
                   отверглась (закрытие от неё в сторону сделки).
 
     Уровень: экстремальная точка тени пин-бара должна доставать S/R уровня
-    рабочего ТФ (допуск ~ shadow_lookback_atr*ATR — считаем попаданием,
-    если |pin_extreme - level| <= допуск или уровень лежит внутри тени).
+    рабочего ТФ (допуск = level_tol_atr*ATR, настраивается режимом).
 
     Возвращает список найденных кандидатов (максимум 3):
-      {'index', 'side', 'extreme', 'body_top', 'body_bottom', 'confirm': {...}}
+      {'index', 'side', 'extreme', 'body_top', 'body_bottom',
+       'confirm': {...}, 'ts': ts_открытия_пина, 'confirm_ts': ts_подтверждения}
     """
     out: List[dict] = []
     if not kl or len(kl) < 12 or not atr_value or not current_price:
@@ -467,7 +495,12 @@ def find_pins_with_confirm(kl, levels, atr_value: float, current_price: float,
     closed_end = len(kl) - 1  # последний закрытый индекс (kl[-1] — текущая свеча)
     start = max(1, closed_end - lookback_candles)
     avg_vol = _avg_volume(kl, VOLUME_LOOKBACK_DEFAULT)
-    tol = max(atr_value * 0.8, current_price * 0.0015)
+    tol = max(atr_value * level_tol_atr, current_price * 0.0015)
+
+    # Единый порог диапазона: ATR-привязка + защита тихого рынка (%).
+    # Считаем один раз от ATR и текущей цены; внутрицикловая перепроверка
+    # в is_pin_bar убрана, чтобы множители режима оставались независимыми.
+    min_range_pct = max(move_pct_min, move_atr_mult * atr_value / current_price * 100.0)
 
     # --- BOS-структуры: high/low соседей окна пина ---
     def _local_struct(i: int, side: str):
@@ -485,8 +518,7 @@ def find_pins_with_confirm(kl, levels, atr_value: float, current_price: float,
 
     for i in range(start, closed_end):
         k = kl[i]
-        ok, direction, range_pct = is_pin_bar(k, shadow_frac,
-                                              max(move_pct_min, atr_value / _to_float(k[K_OPEN]) * 100 * move_atr_mult))
+        ok, direction, range_pct = is_pin_bar(k, shadow_frac, min_range_pct)
         if not ok:
             continue
         o, h, l, c, v = _kline_ohlc_v(k)
@@ -580,6 +612,10 @@ def find_pins_with_confirm(kl, levels, atr_value: float, current_price: float,
             'vol_ratio': round(vol_ratio, 2) if vol_ratio else None,
             'confirm': confirm,
             'ts': _to_float(k[0]),
+            # ts закрытия свечи-подтверждения — точка отсчёта для confirm window.
+            # Раньше окно считалось от открытия пина и retest/BOS на 4-6 свечах
+            # физически не проходили фильтр.
+            'confirm_ts': _to_float(kl[confirm['index']][0]) + _candle_sec(kl),
         })
         if len(out) >= 3:
             break
@@ -595,6 +631,18 @@ def _avg_volume(kl, lookback: int = 20) -> float:
     vols = [_to_float(k[K_VOL]) for k in kl[-(lookback + 1):-1]]
     vols = [v for v in vols if v > 0]
     return sum(vols) / len(vols) if vols else 0.0
+
+
+def _candle_sec(kl) -> float:
+    """Длительность свечи в секундах по первым двум таймстампам."""
+    try:
+        if len(kl) >= 2:
+            d = _to_float(kl[1][0]) - _to_float(kl[0][0])
+            if d > 0:
+                return d
+    except (TypeError, ValueError):
+        pass
+    return 3600.0
 
 
 state = AppState()
