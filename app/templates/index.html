@@ -56,6 +56,7 @@ button:hover { background:#1d4ed8; }
 .reason-success { color: #22c55e; }
 .reason-skip { color: #8a93a6; }
 .reason-radar { color: #f59e0b; }
+.countdown { font-variant-numeric: tabular-nums; font-weight: 600; color: #fbbf24; }
 
 .grid-preview { 
   background: #0e1117; 
@@ -187,9 +188,8 @@ button:hover { background:#1d4ed8; }
   <div id="tab-trades" class="tab-content"><div class="panel">
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
       <h2 style="margin: 0;">Открытые сделки</h2>
-      <button onclick="syncPositions()" style="background: #0ea5e9; padding: 6px 14px; font-size: 12px; border-radius: 6px;">🔄 Синхронизировать с Bybit</button>
+      <span class="muted" style="font-size: 12px;">Синхронизация с Bybit — автоматически (каждые 60с)</span>
     </div>
-    <p class="muted" id="sync-status" style="font-size: 12px; margin: 0 0 8px 0;"></p>
     <table><thead><tr>
       <th>Время (МСК)</th><th>Символ</th><th>Разворот</th><th>Тип</th>
       <th>Ср. цена</th><th>Тек. цена</th><th>Изм. %</th>
@@ -887,9 +887,23 @@ async function loadAlerts() {
         const timeStr = new Date(a.ts*1000).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' });
         let reasonText = a.reason || '';
         let reasonClass = 'reason-skip';
-        if (a.timeframe.includes('5m')) {
-          reasonText = 'Резкий скачок (радар монитора). Бот ждет закрытия 4ч/1д свечи.';
-          reasonClass = 'reason-radar';
+        // Ожидание закрытия свечи рабочего ТФ (радар-сигнал): какой свечи ждём,
+        // когда она закроется и сколько осталось (обновляется каждый тик 5с).
+        if (a.wait_deadline_ts > 0 && a.wait_candle_open_ts > 0 && a.tf_sec > 0) {
+          const closeTs = a.wait_candle_open_ts + a.tf_sec;
+          const remainMs = closeTs * 1000 - Date.now();
+          const deadlineMs = a.wait_deadline_ts * 1000 - Date.now();
+          if (remainMs > 0 && deadlineMs > 0) {
+            const closeTime = new Date(closeTs * 1000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
+            reasonText = `Радар. Ждём закрытие ${a.wait_tf_label} свечи (закрытие в ${closeTime} МСК, осталось <span class="countdown" data-close-ts="${closeTs}" data-deadline-ts="${a.wait_deadline_ts}">--:--</span>)`;
+            reasonClass = 'reason-radar';
+          } else if (deadlineMs > 0) {
+            reasonText = `Радар. Свеча ${a.wait_tf_label} закрыта, ждём подтверждения входа (<span class="countdown" data-close-ts="0" data-deadline-ts="${a.wait_deadline_ts}">--:--</span> до сброса)`;
+            reasonClass = 'reason-radar';
+          } else {
+            reasonText = 'Радар. Окно подтверждения истекло';
+            reasonClass = 'reason-skip';
+          }
         } else if (reasonText.includes('Успешный вход')) {
           reasonClass = 'reason-success';
         } else if (!reasonText) {
@@ -928,6 +942,38 @@ async function loadAlerts() {
   }
   html += normalRows.join('');
   tb.innerHTML = html;
+  startCountdowns();
+}
+
+// Плавный обратный отсчёт в сигналах: тикаем раз в секунду, не дёргая fetch.
+let _cdTimer = null;
+function fmtRemain(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(total / 60), s = total % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+function tickCountdowns() {
+  const els = document.querySelectorAll('.countdown');
+  if (!els.length) {
+    if (_cdTimer) { clearInterval(_cdTimer); _cdTimer = null; }
+    return;
+  }
+  const now = Date.now();
+  els.forEach(el => {
+    const closeTs = parseFloat(el.dataset.closeTs || 0);
+    const deadlineTs = parseFloat(el.dataset.deadlineTs || 0);
+    let target = 0;
+    if (closeTs > 0 && closeTs * 1000 > now) target = closeTs * 1000;
+    else if (deadlineTs * 1000 > now) target = deadlineTs * 1000;
+    el.textContent = target ? fmtRemain(target - now) : '0:00';
+  });
+}
+function startCountdowns() {
+  tickCountdowns();
+  if (_cdTimer) clearInterval(_cdTimer);
+  if (document.querySelector('.countdown')) {
+    _cdTimer = setInterval(tickCountdowns, 1000);
+  }
 }
 
 async function loadStats() {
@@ -1628,35 +1674,6 @@ function updatePageTitle(modeId) {
   const labels = {scalp:'Скальпинг', intraday:'Интрадэй', swing:'Долгосрок'};
   const label = labels[modeId] || modeId || 'Интрадэй';
   document.title = `Knife Bot — ${label}`;
-}
-
-async function syncPositions() {
-  const statusEl = document.getElementById('sync-status');
-  statusEl.textContent = 'Синхронизация...';
-  statusEl.style.color = '#0ea5e9';
-  
-  try {
-    const res = await fetch('/api/sync_positions', { method: 'POST' });
-    const data = await res.json();
-    
-    if (data.ok) {
-      statusEl.textContent = `✓ Синхронизировано позиций: ${data.synced || 'обновлено'}`;
-      statusEl.style.color = '#22c55e';
-      // Перезагружаем список сделок
-      await loadTrades();
-    } else {
-      statusEl.textContent = `✗ Ошибка: ${data.error}`;
-      statusEl.style.color = '#ef4444';
-    }
-  } catch (e) {
-    statusEl.textContent = `✗ Ошибка: ${e.message}`;
-    statusEl.style.color = '#ef4444';
-  }
-  
-  // Через 5 секунд убираем статус
-  setTimeout(() => {
-    statusEl.textContent = '';
-  }, 5000);
 }
 
 async function clearData() {
@@ -2436,19 +2453,12 @@ async function tick() {
   } catch(e) { console.error(e); }
 }
 
-// При первом запуске — синхронизируем позиции
-async function init() {
-  try {
-    await syncPositions();
-  } catch(e) {
-    console.error('Init sync failed:', e);
-  }
-}
-
+// Синхронизация с биржей полностью автоматическая: при старте бота
+// (_sync_positions в main.py) и далее каждые 60с в update_open_trades.
+// Ручная кнопка убрана из UI.
 tick();
 loadModes();
 setInterval(tick, 5000);
-init();
 </script>
 </body>
 </html>

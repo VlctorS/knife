@@ -42,7 +42,13 @@ class Alert:
     ma: Optional[float]
     change_pct: float  # (price_now / ref_price - 1) * 100
     timeframe: str = ""
-    reason: str = ""   
+    reason: str = ""
+    # Ожидание закрытия свечи (радар-сигнал): ТФ ожидаемой свечи, её
+    # таймстемп открытия (сек) и дедлайн подтверждения (сек). 0 — не ждём.
+    wait_tf_label: str = ""
+    wait_candle_open_ts: float = 0.0
+    wait_deadline_ts: float = 0.0
+    tf_sec: int = 0  # длительность бара рабочего ТФ в секундах
 
 
 class AppState:

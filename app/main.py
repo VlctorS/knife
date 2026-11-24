@@ -206,6 +206,12 @@ async def api_alerts(limit: int = 100):
                 'change_pct': a.change_pct,
                 'timeframe': getattr(a, 'timeframe', ''),
                 'reason': getattr(a, 'reason', ''),
+                # Ожидание закрытия свечи рабочего ТФ (радар-сигнал):
+                # UI рисует «ждём закрытие 5m-свечи, закроется в HH:MM (мм:сс)»
+                'wait_tf_label': getattr(a, 'wait_tf_label', ''),
+                'wait_candle_open_ts': getattr(a, 'wait_candle_open_ts', 0.0),
+                'wait_deadline_ts': getattr(a, 'wait_deadline_ts', 0.0),
+                'tf_sec': getattr(a, 'tf_sec', 0),
             }
             for a in list(state.alerts)[:limit]
         ]

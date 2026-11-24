@@ -16,10 +16,10 @@ import uuid
 from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, TradeHistory, engine, Settings
 from .state import (
     state, Alert, classify_event, moving_average,
-    trend_by_closes, find_pins_with_confirm, PinContext,
+    trend_by_closes, find_pins_with_confirm, PinContext, _candle_sec,
 )
 from .indicators import atr as calc_atr, find_levels, nearest_level
-from .modes import get_mode, resolve_distance, ModeParams
+from .modes import get_mode, resolve_distance, ModeParams, interval_sec as _interval_sec
 from .config import settings
 from .validity import evaluate_validity
 
@@ -27,6 +27,12 @@ log = logging.getLogger(__name__)
 
 MIN_POS_SIZE = 6.0
 VOLUME_LOOKBACK = 20
+
+
+class InsufficientBalance(Exception):
+    """Недостаточно свободно маржи для входа. НЕ блокирует сигнал: сделка
+    не открывается, но пин остаётся живым и сигнал виден вUI до проверки
+    баланса (см. 'insufficient balance' в обработчике ошибок входа)."""
 
 
 def _get_upsert(model, values, pk_col):
@@ -126,8 +132,12 @@ class TradingBot:
         # {(symbol, mode_id): {pin_ts: ts_seen}} — пины без подтверждения ещё
         # живы; если подтверждение появится позже — сигнал пропустится.
         self._pending_pins = {}
-        # Индикаторный кеш режима: symbol -> dict(atr_work, levels_work, ...)
+        # Индикаторный кеш режима: symbol -> dict(atr_work, levels_work, ...)      
         self._mode_cache = {}
+        # {(symbol, mode_id): (open_ts_sec, deadline_sec)} — какую свечу рабочего
+        # ТФ ждёт бот по последнему найденному пин-сигналу. Живёт до смены бара
+        # или выхода пина из окна подтверждения; UI рисует обратный отсчёт.
+        self._wait_tf = {}
 
     async def reset_signal_state(self):
         """Сброс состояния поиска сигналов (при смене режима в настройках):
@@ -138,6 +148,7 @@ class TradingBot:
         self._mode_cache.clear()
         self._kline_cache.clear()
         self._trade_kline_cache.clear()
+        self._wait_tf.clear()
         self._last_scan_ts = 0
         state.alerts.clear()
         log.info('Signal search reset (new mode); open trades keep their own mode')
@@ -459,6 +470,16 @@ class TradingBot:
                 return
 
             symbols_to_check = [s for s in state.symbols.keys() if s not in open_syms]
+
+            # --- 3c. Ожидаемые закрытия свечей по радар-сигналам ---
+            # Обновляем и чистим «wait»-информацию в алертах монитора: UI
+            # показывает, какой свечи ждёт бот, когда она закроется и сколько
+            # осталось. Работает даже если ниже есть открытые сделки (return).
+            try:
+                self._refresh_wait_info(symbols_to_check, mode_id)
+            except Exception as e:
+                log.debug('[WAIT-TF] refresh failed: %r', e)
+
             if not symbols_to_check:
                 return
 
@@ -534,6 +555,20 @@ class TradingBot:
                 if not pins:
                     log.debug('[PINS] %s mode=%s: 0 pins found (shadow=%.2f move=%.2f%% atr=%.6f price=%.6f)',
                               sym, mode.id, mode.pin_shadow_frac, mode.move_pct_min, atr_work, st.last_price)
+                    self._wait_tf.pop((sym, mode.id), None)
+                else:
+                    # Какую свечу рабочего ТФ ждёт бот: подтверждение пина —
+                    # закрытие бара после свечи-кандидата. ts/confirm_ts пина —
+                    # в МС; переводим в секунды. Дедлайн — конец окна подтверждения.
+                    dur_sec = _candle_sec(kl_work) / 1000.0 if kl_work else 0.0
+                    newest = max(pins, key=lambda p: p.get('confirm_ts') or p['ts'])
+                    exp_open_ms = (newest.get('confirm_ts') or newest['ts'])
+                    exp_open = int(exp_open_ms / 1000.0)
+                    deadline = (newest.get('confirm_ts') or newest['ts']) / 1000.0 + mode.confirm_window_sec
+                    if dur_sec > 0 and deadline > now:
+                        self._wait_tf[(sym, mode.id)] = (exp_open, deadline)
+                    else:
+                        self._wait_tf.pop((sym, mode.id), None)
 
                 for pin in pins:
                     side = pin['side']
@@ -661,7 +696,14 @@ class TradingBot:
                         # Временные ошибки (сеть/лимиты/недостаток баланса):
                         # НЕ сжигаем пин — попробуем снова в следующем проходе.
                         msg = str(e).lower()
-                        if any(t in msg for t in ('rate', 'timeout', 'temp', 'insufficient balance')):
+                        if isinstance(e, InsufficientBalance) or 'insufficient balance' in msg:
+                            # Сигнал существует и ждёт входа, но баланс не
+                            # позволяет открыть сделку. Регистрируем его в
+                            # мониторе как радар-сигнал (до проверки баланса),
+                            # чтобы UI показал сигнал + ожидание закрытия свечи.
+                            self._signal_no_funds(sym, side, st.last_price, mode, pin, now)
+                            continue
+                        if any(t in msg for t in ('rate', 'timeout', 'temp')):
                             continue
                         seen_key = f"{sym}_{mode.id}_{int(pin['ts'])}"
                         self._seen_candles.add(seen_key)
@@ -774,7 +816,7 @@ class TradingBot:
         pos_size = max(MIN_POS_SIZE, pos_size)
         margin_needed = pos_size / max(max_lev, 1)
         if avail < margin_needed * 1.2:
-            raise Exception(
+            raise InsufficientBalance(
                 f"Insufficient balance: available={avail:.2f} USDT, "
                 f"need ~{margin_needed:.2f} USDT (+20% буфер) для {sym}"
             )
@@ -1388,6 +1430,97 @@ class TradingBot:
             await self.sync_open_positions()
         except Exception as e:
             log.warning('[SYNC-PERIODIC] failed: %r', e)
+
+    def _signal_no_funds(self, sym: str, side: str, price: float,
+                         mode, pin, now: float) -> None:
+        """Сигнал валиден, но маржи не хватает — регистрируем его как радар.
+
+        Сделки нет, поэтому сигнал должен быть виден во вкладке «Сигналы»
+        ДО проверки баланса: добавляем/обновляем алерт с причиной и
+        ожиданием закрытия свечи рабочего ТФ (UI рисует обратный отсчёт).
+        Дедупликация: не создаём дубликаты по символу каждые 10 минут.
+        """
+        dur = _interval_sec(mode.work_tf)
+        confirm_ts = (pin.get('confirm_ts') or pin['ts']) / 1000.0
+        deadline = confirm_ts + mode.confirm_window_sec
+        if deadline <= now:
+            return
+        # Живой пин — обновляем окно ожидания всегда
+        self._wait_tf[(sym, mode.id)] = (int(confirm_ts), deadline)
+        reason = f'⚠ Сигнал {side} {mode.work_label}: мало маржи, вход отложен (пополните баланс)'
+        # Не плодим алерты: если по символу уже есть свежий сигнал — только
+        # обновляем окна и причину.
+        for a in state.alerts:
+            if a.symbol == sym and now - a.ts < 600:
+                a.reason = reason
+                a.wait_tf_label = mode.work_label
+                a.wait_candle_open_ts = int(confirm_ts)
+                a.wait_deadline_ts = deadline
+                a.tf_sec = dur
+                return
+        ref_price = state.price_n_minutes_ago(sym, settings.window_minutes) or price
+        state.add_alert(Alert(
+            ts=now,
+            symbol=sym,
+            kind='PUMP' if side == 'LONG' else 'DUMP',
+            price_now=price,
+            ref_price=ref_price,
+            ma=None,
+            change_pct=(price / ref_price - 1.0) * 100 if ref_price else 0.0,
+            timeframe=f'{settings.window_minutes}m',
+            reason=reason,
+            wait_tf_label=mode.work_label,
+            wait_candle_open_ts=int(confirm_ts),
+            wait_deadline_ts=deadline,
+            tf_sec=dur,
+        ))
+
+    def _refresh_wait_info(self, symbols_to_check, mode_id: str) -> None:
+        """Актуализирует в радар-алертах инфо об ожидаемой свече рабочего ТФ.
+
+        Для алертов монитора (PUMP/DUMP) по символам без открытых сделок:
+        если бот уже нашёл пин — ставим точные границы ожидаемой свечи и
+        дедлайн окна подтверждения; если пин протух или его нет — снимаем
+        ожидание (UI перестанет показывать отсчёт). Работает поверх кешей,
+        сетевых запросов не делает.
+        """
+        now = time.time()
+        checkable = set(symbols_to_check)
+        # Живые пины: только те символы, что ещё сканируются (без позиции)
+        for key in list(self._wait_tf.keys()):
+            sym, mid = key
+            if sym not in checkable or mid != mode_id:
+                continue
+            open_ts, deadline = self._wait_tf[key]
+            if now > deadline:
+                del self._wait_tf[key]
+        for a in state.alerts:
+            if a.wait_deadline_ts == 0.0 and a.symbol not in checkable:
+                continue
+            wait = self._wait_tf.get((a.symbol, mode_id))
+            if wait is None:
+                # Пина нет / он протух / есть открытая сделка — снимаем отсчёт,
+                # но только для «сырых» алертов без причины входа.
+                if not a.reason or 'Успешный вход' not in a.reason:
+                    a.wait_deadline_ts = 0.0
+                    a.wait_candle_open_ts = 0.0
+                    a.wait_tf_label = ''
+                    a.tf_sec = 0
+                continue
+            open_ts, deadline = float(wait[0]), float(wait[1])
+            if now > deadline:
+                del self._wait_tf[(a.symbol, mode_id)]
+                if not a.reason or 'Успешный вход' not in a.reason:
+                    a.wait_deadline_ts = 0.0
+                    a.wait_candle_open_ts = 0.0
+                    a.wait_tf_label = ''
+                    a.tf_sec = 0
+                continue
+            a.wait_candle_open_ts, a.wait_deadline_ts = open_ts, deadline
+            mode = get_mode(mode_id)
+            if not a.wait_tf_label:
+                a.wait_tf_label = mode.work_label
+            a.tf_sec = _interval_sec(mode.work_tf)
 
     async def update_open_trades(self):
         # Периодическая очистка кеша seen-свечей (раз в час)

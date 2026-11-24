@@ -20,8 +20,12 @@ class Monitor:
         self._tasks = []
         self._ws_tasks = []
         self._stop = asyncio.Event()
+        self._loop = None
+        # (ts, ModeParams|None) — кеш текущего режима для _attach_wait
+        self._mode_cache = (0.0, None)
 
     async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         self._session = aiohttp.ClientSession()
         self._rest = BybitREST(self._session)
         self._tasks.append(asyncio.create_task(self._symbols_loop(), name='symbols'))
@@ -198,20 +202,74 @@ class Monitor:
                 if a.symbol == sym and now - a.ts < 600:
                     break
             else:
-                state.add_alert(
-                    Alert(
-                        ts=now,
-                        symbol=sym,
-                        kind=kind,
-                        price_now=s.last_price,
-                        ref_price=ref,
-                        ma=s.ma,
-                        change_pct=change * 100,
-                        timeframe=f'{settings.window_minutes}m'  # Добавляем ТФ
-                    )
+                alert = Alert(
+                    ts=now,
+                    symbol=sym,
+                    kind=kind,
+                    price_now=s.last_price,
+                    ref_price=ref,
+                    ma=s.ma,
+                    change_pct=change * 100,
+                    timeframe=f'{settings.window_minutes}m'  # Добавляем ТФ
                 )
+                state.add_alert(alert)
+                self._attach_wait(sym, alert)
                 log.warning('ALERT %s %s %+.2f%% (%.6f vs %.6f)',
                             kind, sym, change * 100, s.last_price, ref)
+
+    def _attach_wait(self, sym: str, alert) -> None:
+        """Привязывает к алерту ожидание закрытия свечи рабочего ТФ режима.
+
+        Бот ждёт не «4ч/1д» как было раньше в UI-хардкоде, а конкретный бар
+        рабочего ТФ выбранного режима (скальп — 5m, интрадэй — 15m, лонг — 4H),
+        в пределах окна подтверждения пин-сигнала. Если бот уже нашёл пин по
+        этому символу — берём точные границы ожидаемой свечи; иначе считаем
+        от текущего бара. Режим кешируется (30с), свечей не запрашиваем.
+        """
+        try:
+            mode = self._current_mode()
+            if mode is None:
+                return
+            from .modes import interval_sec
+            dur = interval_sec(mode.work_tf)
+            now = time.time()
+            open_ts = int(now // dur) * dur
+            deadline = now + mode.confirm_window_sec
+            import sys
+            bot = getattr(sys.modules.get('app.main'), 'trading_bot', None)
+            wait = getattr(bot, '_wait_tf', {}).get((sym, mode.id)) if bot else None
+            if wait:
+                open_ts = max(int(wait[0]), open_ts)
+                deadline = min(float(wait[1]), deadline)
+            if deadline <= now:
+                return
+            alert.wait_tf_label = mode.work_label
+            alert.wait_candle_open_ts = open_ts
+            alert.wait_deadline_ts = deadline
+            alert.tf_sec = dur
+        except Exception:
+            log.debug('attach wait info failed for %s', sym, exc_info=True)
+
+    def _current_mode(self):
+        """Текущий режим торговли (из БД, кеш 30с)."""
+        now = time.time()
+        if self._mode_cache and now - self._mode_cache[0] < 30:
+            return self._mode_cache[1]
+        mode = None
+        try:
+            fut = asyncio.run_coroutine_threadsafe(self._load_trade_mode(), self._loop)
+            mode = fut.result(timeout=3)
+        except Exception:
+            log.debug('load trade_mode failed', exc_info=True)
+        # При сбое кеша оставляем прошлый режим, если он был.
+        self._mode_cache = (now, mode or (self._mode_cache[1] if self._mode_cache else None))
+        return self._mode_cache[1]
+
+    async def _load_trade_mode(self):
+        from .modes import get_mode
+        async with SessionLocal() as session:
+            s = await session.get(Settings, 1)
+            return get_mode(getattr(s, 'trade_mode', None) if s else None)
 
 
 monitor = Monitor()
