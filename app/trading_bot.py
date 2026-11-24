@@ -1773,6 +1773,44 @@ class TradingBot:
                         session.add(history)
                         await session.commit()
 
+                # --- 1b. HARD SL: исчерпанные усреднения + пробитие сетки ---
+                # Не «паника на лёгком испуге», а фиксация ПРОИГРАННОГО тезиса.
+                # Закрываем только когда совпали ВСЕ условия:
+                #   1) все max_steps усреднений уже сделаны;
+                #   2) цена прошла ЗА ПОСЛЕДНИМ уровнем сетки ещё один полный
+                #      шаг (структурное пробитие, а не шум у последнего уровня);
+                #   3) разворот структурно краснеет ИЛИ сделка живёт дольше
+                #      1.5 × штатного hold_max_hours (время вышло, а возврата нет).
+                # На микро-балансе это отсекает хвостовые потери (висящие сутки
+                # ноги), но нормально переживает просадки внутри сетки.
+                age_h = _trade_age_hours(t) or 0.0
+                if t.grid_step >= t.max_steps and t.max_steps > 0:
+                    step_pct = self._grid_step_pct(t, cfg, gs, mode)
+                    # Уровень пробития = последний уровень сетки минус ещё один шаг.
+                    last_level = t.avg_entry_price * (1 - step_pct / 100.0) if t.side == 'LONG' \
+                        else t.avg_entry_price * (1 + step_pct / 100.0)
+                    breached = (t.side == 'LONG' and price <= last_level * (1 - step_pct / 100.0)) or \
+                               (t.side == 'SHORT' and price >= last_level * (1 + step_pct / 100.0))
+                    if breached:
+                        hard_deadline_h = mode.hold_max_hours * 1.5 if mode.hold_max_hours else 0
+                        overdue = hard_deadline_h > 0 and age_h >= hard_deadline_h
+                        v_hard = validity if validity is not None else await self._check_trade_validity(t)
+                        thesis_dead = (v_hard is not None and v_hard.status == 'red') or overdue
+                        if thesis_dead:
+                            reason_bits = []
+                            if v_hard is not None and v_hard.status == 'red':
+                                reason_bits.append('разворот мёртв: ' + ('; '.join(v_hard.reasons[:3]) or 'red'))
+                            if overdue:
+                                reason_bits.append(f'просрочка {age_h:.1f}ч > {hard_deadline_h:.0f}ч лимита')
+                            log.warning('HARD SL %s #%s @ %.6f | шаги %d/%d исчерпаны, сетка пробита | %s',
+                                        t.symbol, t.id, price, t.grid_step, t.max_steps,
+                                        ' + '.join(reason_bits))
+                            await self._close_position(
+                                session, t, price,
+                                reason='HARD SL: ' + ' + '.join(reason_bits)
+                            )
+                            continue
+
                 # --- 2. РАСЧЕТ PnL ---
                 if t.side == 'LONG':
                     change_pct = (price - t.avg_entry_price) / t.avg_entry_price * 100
@@ -1791,7 +1829,6 @@ class TradingBot:
                 target_exit_pct = self._exit_target_pct(t, cfg, gs, mode)
 
                 # --- 3b. ВЫХОД ПО ВРЕМЕНИ РЕЖИМА (макс. время удержания) ---
-                age_h = _trade_age_hours(t) or 0.0
                 time_exit = mode.hold_max_hours and age_h >= mode.hold_max_hours
 
                 exit_max = t.exit_max_steps if getattr(t, 'exit_max_steps', 0) else (gs.exit_max_steps if gs and gs.exit_max_steps > 0 else 0)

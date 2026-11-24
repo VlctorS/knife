@@ -1291,6 +1291,8 @@ async function openHistory(tradeId, symbol) {
       if (h.action === 'PARTIAL_CLOSE') { actionName = '🟢 Частичный выход'; actionClass = 'pump'; }
       if (h.action === 'FULL_CLOSE') { actionName = '🟢 Полное закрытие'; actionClass = 'pump'; }
       if (h.action === 'MANUAL_CLOSE') { actionName = '🟢 Ручное закрытие'; actionClass = 'pump'; }
+      // Принудительный стоп после исчерпания сетки — показываем красным
+      if (h.action === 'FULL_CLOSE' && /HARD SL/.test(h.notes || '')) { actionName = '🔴 HARD SL'; actionClass = 'dump'; }
       if (h.action === 'VALIDITY_CHANGE') { actionName = '🟠 Смена разворота'; actionClass = 'reason-radar'; }
       if (h.action === 'SNAPSHOT') actionName = '📸 Снимок состояния';
 
