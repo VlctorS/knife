@@ -13,7 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .bybit import BybitREST
 import uuid
-from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, TradeHistory, engine, Settings
+from .db import SessionLocal, SymbolStat, Trade, SymbolConfig, TradeHistory, engine, Settings, CLOSE_ACTIONS
 from .state import (
     state, Alert, classify_event, moving_average,
     trend_by_closes, find_pins_with_confirm, PinContext, _candle_sec,
@@ -1208,7 +1208,7 @@ class TradingBot:
                 if session is not None:
                     realized_res = await session.execute(
                         select(sa_func.sum(TradeHistory.pnl))
-                        .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+                        .where(TradeHistory.action.in_(CLOSE_ACTIONS))
                     )
                     realized_total = realized_res.scalar() or 0.0
                     open_res = await session.execute(
@@ -1220,7 +1220,7 @@ class TradingBot:
                     async with SessionLocal() as s_sess:
                         realized_res = await s_sess.execute(
                             select(sa_func.sum(TradeHistory.pnl))
-                            .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+                            .where(TradeHistory.action.in_(CLOSE_ACTIONS))
                         )
                         realized_total = realized_res.scalar() or 0.0
                         open_res = await s_sess.execute(

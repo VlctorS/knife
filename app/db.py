@@ -48,6 +48,12 @@ class Base(DeclarativeBase):
     pass
 
 
+# Действия TradeHistory, которые фиксируют реализованный результат (выход/закрытие).
+# Должно совпадать во всех агрегатах PnL: /api/closed_stats, снапшоты баланса и т.п.
+# CLOSED_BY_SYNC — позиция закрыта на бирже вне бота (sync), HARD SL — аварийный выход бота.
+CLOSE_ACTIONS = ('PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE', 'CLOSED_BY_SYNC', 'HARD SL')
+
+
 class Settings(Base):
     __tablename__ = 'settings'
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)

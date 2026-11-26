@@ -18,7 +18,7 @@ from .bybit import REST_BASE, _sign_request, _read_json
 from .config import settings
 from .monitor import monitor
 from .state import state
-from .db import init_db, SessionLocal, SymbolStat, Trade, Settings, SymbolConfig, TradeHistory
+from .db import init_db, SessionLocal, SymbolStat, Trade, Settings, SymbolConfig, TradeHistory, CLOSE_ACTIONS
 from .trading_bot import TradingBot
 
 logging.basicConfig(level=settings.log_level, format='%(asctime)s %(levelname)s %(name)s | %(message)s')
@@ -51,7 +51,7 @@ async def record_balance_loop():
                 # Реализованный PnL (только закрытые сделки/выходы)
                 hist_res = await session.execute(
                     select(func.sum(TradeHistory.pnl))
-                    .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+                    .where(TradeHistory.action.in_(CLOSE_ACTIONS))
                 )
                 realized_pnl = hist_res.scalar() or 0.0
 
@@ -524,7 +524,7 @@ async def api_all_exits(limit: int = 100):
         r = await session.execute(
             select(TradeHistory, Trade)
             .join(Trade, TradeHistory.trade_id == Trade.id)
-            .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+            .where(TradeHistory.action.in_(CLOSE_ACTIONS))
             .order_by(TradeHistory.ts.desc())
             .limit(limit)
         )
@@ -554,7 +554,7 @@ async def api_closed_stats():
         total_count = len([t for t in all_trades if t.status == 'CLOSED'])
         
         hist_res = await session.execute(
-            select(func.sum(TradeHistory.pnl)).where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+            select(func.sum(TradeHistory.pnl)).where(TradeHistory.action.in_(CLOSE_ACTIONS))
         )
         total_realized = hist_res.scalar() or 0.0
         
@@ -575,14 +575,14 @@ async def api_closed_stats():
         
         today_hist_res = await session.execute(
             select(func.sum(TradeHistory.pnl))
-            .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+            .where(TradeHistory.action.in_(CLOSE_ACTIONS))
             .where(TradeHistory.ts >= today_start)
         )
         today_pnl = today_hist_res.scalar() or 0.0
         
         today_count_res = await session.execute(
             select(func.count(TradeHistory.id))
-            .where(TradeHistory.action.in_(['PARTIAL_CLOSE', 'FULL_CLOSE', 'MANUAL_CLOSE']))
+            .where(TradeHistory.action.in_(CLOSE_ACTIONS))
             .where(TradeHistory.ts >= today_start)
         )
         today_count = today_count_res.scalar() or 0
