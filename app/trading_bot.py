@@ -20,6 +20,7 @@ from .state import (
 )
 from .indicators import atr as calc_atr, find_levels, nearest_level
 from .modes import get_mode, resolve_distance, ModeParams, interval_sec as _interval_sec
+from .bybit import normalize_qty, min_order_notional
 from .config import settings
 from .validity import evaluate_validity
 
@@ -814,6 +815,17 @@ class TradingBot:
         pos_size = _pick(cfg.position_size_entry if cfg else 0, 
                          gs.position_size_entry if gs else 0, MIN_POS_SIZE)
         pos_size = max(MIN_POS_SIZE, pos_size)
+
+        # Уважаем контрактный минимум биржи: у BTC minQty=0.001 -> при цене
+        # ~60000 это 60 USDT. Если плановый размер меньше minQty*price (или
+        # minNotional), поднимаем позицию до минимума, иначе ордер отклонят
+        # либо (хуже) он окажется в разы больше задуманного.
+        min_notional = min_order_notional(sym, price)
+        if pos_size < min_notional:
+            log.warning('[ENTRY] %s: размер %.2f USDT < контрактного минимума %.2f USDT — поднимаю до минимума',
+                        sym, pos_size, min_notional)
+            pos_size = min_notional
+
         margin_needed = pos_size / max(max_lev, 1)
         if avail < margin_needed * 1.2:
             raise InsufficientBalance(
@@ -821,8 +833,12 @@ class TradingBot:
                 f"need ~{margin_needed:.2f} USDT (+20% буфер) для {sym}"
             )
 
+        # qty считаем от итогового размера — не меньше minQty контракта
+        qty = normalize_qty(sym, pos_size / price) if price > 0 else 0.0
+        if qty <= 0:
+            raise Exception(f'Не удалось вычислить объём для {sym} (price={price})')
+        pos_size = qty * price  # фактическая стоимость после округления лота
         margin = pos_size / max_lev
-        qty = pos_size / price
         entry_fee = pos_size * (fee_pct / 100.0)
 
         if cfg and cfg.max_steps > 0:

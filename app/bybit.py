@@ -73,25 +73,27 @@ async def _load_instruments_cache(rest):
         instruments = await rest.get_instruments()
         for inst in instruments:
             symbol = inst.get('symbol', '')
-            filters = inst.get('filters', [])
-            
+            # v5 /market/instruments-info отдаёт готовые объекты priceFilter /
+            # lotSizeFilter (а не массив filters[] как в старой v3). Старый
+            # парсер не находил ничего -> кэш пустой -> везде fallback minQty=0.001,
+            # из-за чего BTC входил на 60 USDT вместо минимальных ~5.
+            price_f = inst.get('priceFilter') or {}
+            lot_f = inst.get('lotSizeFilter') or {}
+
             info = {'symbol': symbol}
-            
-            for f in filters:
-                f_type = f.get('filterType', '')
-                
-                if f_type == 'PriceFilter':
-                    info['priceStep'] = float(f.get('tickSize', '0.01'))
-                    info['minPrice'] = float(f.get('minPrice', '0'))
-                    info['maxPrice'] = float(f.get('maxPrice', '999999'))
-                    info['tickSize'] = info['priceStep']
-                
-                elif f_type == 'LotSizeFilter':
-                    info['qtyStep'] = float(f.get('stepValue', '0.001'))
-                    info['minQty'] = float(f.get('minOrderQty', '0.001'))
-                    info['maxQty'] = float(f.get('maxOrderQty', '100'))
-                    info['lotSizeFilter'] = f
-            
+            if price_f:
+                info['priceStep'] = float(price_f.get('tickSize', '0.01'))
+                info['minPrice'] = float(price_f.get('minPrice', '0'))
+                info['maxPrice'] = float(price_f.get('maxPrice', '999999'))
+                info['tickSize'] = info['priceStep']
+
+            if lot_f:
+                info['qtyStep'] = float(lot_f.get('qtyStep', '0.001'))
+                info['minQty'] = float(lot_f.get('minOrderQty', '0.001'))
+                info['maxQty'] = float(lot_f.get('maxOrderQty', '100'))
+                info['minNotional'] = float(lot_f.get('minNotionalValue', '5'))
+                info['lotSizeFilter'] = lot_f
+
             if 'qtyStep' in info:
                 _instruments_cache[symbol] = info
         
@@ -147,8 +149,26 @@ def normalize_price(symbol, price):
     """Нормализует цену по priceStep."""
     info = get_instrument_info(symbol)
     price_step = float(info.get('priceStep', '0.01'))
-    
+
     return _round_to_tick(price, price_step, round_down=False)
+
+
+def min_order_notional(symbol, price: float) -> float:
+    """Минимальная стоимость ордера в USDT для символа при данной цене.
+
+    Учитываем оба ограничения биржи:
+      * minQty контрактов (например BTC: 0.001 BTC),
+      * minNotionalValue (обычно 5 USDT).
+    Возвращаем max(minQty * price, minNotional) — меньше этого биржа не примет.
+    """
+    info = get_instrument_info(symbol)
+    min_qty = float(info.get('minQty', '0.001') or 0.001)
+    min_notional = float(info.get('minNotional', 5.0) or 5.0)
+    try:
+        price = float(price)
+    except (TypeError, ValueError):
+        price = 0.0
+    return max(min_qty * price, min_notional)
 
 
 async def _read_json(resp):
@@ -494,6 +514,11 @@ class BybitREST:
                 
                 wallet_data = data.get('result', {})
                 for acct in wallet_data.get('list', []):
+                    # UTA: свободные средства считаются на УРОВНЕ АККАУНТА.
+                    # У монеты поля availableBalance может не быть вовсе (N/A) —
+                    # тогда coin-level avail = 0 и бот ложно думает, что денег нет.
+                    total_available = float(acct.get('totalAvailableBalance') or 0)
+                    total_equity_acct = float(acct.get('totalEquity') or 0)
                     for coin_data in (acct.get('coin') or []):
                         if coin_data.get('coin') != 'USDT':
                             continue
@@ -503,18 +528,29 @@ class BybitREST:
                         if wallet_bal == 0:
                             wallet_bal = float(acct.get('totalWalletBalance') or 0)
                         unrealised_pnl = float(coin_data.get('unrealisedPnl') or 0)
-                        available = float(coin_data.get('availableBalance') or 0)
+                        # Приоритет: account-level totalAvailableBalance.
+                        # Coin-level availableBalance используем только если он
+                        # реально присутствует (не пустой/None).
+                        raw_avail = coin_data.get('availableBalance')
+                        coin_avail = float(raw_avail) if raw_avail not in (None, '') else 0.0
+                        available = max(total_available, coin_avail)
+                        # Если аккаунт-баланс тоже не отдали — считаем сами:
+                        # wallet минус занято маржей (initial margin позиции/ордеров).
+                        if available == 0 and wallet_bal > 0:
+                            used_im = float(acct.get('totalInitialMargin') or 0) + \
+                                float(acct.get('totalOrderIM') or 0)
+                            available = max(0.0, total_equity_acct - used_im)
 
-                        if equity > 0:
+                        if equity > 0 or total_equity_acct > 0:
                             result = {
-                                'total_equity': equity,
+                                'total_equity': equity or total_equity_acct,
                                 'available_balance': available,
                                 'wallet_value': wallet_bal,
                                 'unrealised_pnl': unrealised_pnl,
                                 'mode': 'UTA',
                             }
                             log.info('[BALANCE] UTA: equity=%.2f wallet=%.2f upnl=%.2f avail=%.2f',
-                                     equity, wallet_bal, unrealised_pnl, available)
+                                     equity or total_equity_acct, wallet_bal, unrealised_pnl, available)
                             return result
                 log.warning('[BALANCE] UTA: USDT coin не найден')
         except Exception as e:
