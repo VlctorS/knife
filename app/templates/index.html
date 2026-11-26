@@ -1060,8 +1060,22 @@ async function loadTrades() {
            cfg.position_size_grid !== 0;
   };
   
+  // Комиссия за вход+выход по рынку (% от размера) — нужна для тултипа.
+  let feePct = 0.055;
+  try {
+    const stRes = await fetch('/api/settings');
+    const stData = await stRes.json();
+    if (stData.fee_pct > 0) feePct = stData.fee_pct;
+  } catch (e) { console.error('Failed to load fee_pct', e); }
+
   tb.innerHTML = d.items.map(t => {
     const position_size = (t.total_qty * t.current_price).toFixed(2);
+    // Комиссия биржи за полный круг (вход по рынку + выход по рынку)
+    const feeRound = (Number(position_size) * feePct / 100 * 2);
+    const sizeTitle = 'Комиссия (вход+выход по рынку): ' + fmtNum(feeRound, 4) + ' USDT (' + (feePct * 2) + '%)';
+    // Кол-во контрактов: целое без дробной части, иначе — дробное
+    const qty = Number(t.total_qty) || 0;
+    const qtyStr = Number.isInteger(qty) ? String(qty) : fmtNum(qty, 6);
     const timeStr = t.opened_at ? new Date(t.opened_at + 'Z').toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
     const changeClass = t.change_pct > 0 ? 'pump' : (t.change_pct < 0 ? 'dump' : '');
     const hasExits = t.exit_step > 0 ? '<span class="pump">Да</span>' : '<span class="muted">Нет</span>';
@@ -1093,8 +1107,8 @@ async function loadTrades() {
       '<td>'+fmtNum(t.avg_entry_price)+'</td>'+
       '<td>'+fmtNum(t.current_price)+'</td>'+
       '<td class="'+changeClass+'">'+(t.change_pct>0?'+':'')+t.change_pct.toFixed(2)+'%</td>'+
-      '<td>'+fmtNum(t.total_qty, 2)+'</td>'+
-      '<td>'+position_size+'</td>'+
+      '<td>'+qtyStr+'</td>'+
+      '<td title="'+sizeTitle+'" style="cursor:help;">'+position_size+'</td>'+
       '<td class="'+(t.grid_step>0?'pump':'')+'">'+t.grid_step+'</td>'+
       '<td>'+(t.leverage||10)+'x</td>'+
       '<td class="'+(t.pnl>0?'pump':(t.pnl<0?'dump':''))+'">'+fmtPnl(t.pnl)+'</td>'+
@@ -1651,6 +1665,7 @@ function updateHeaderPills(modeId, currentItem) {
   if (pMode) {
     pMode.textContent = label;
     pMode.style.background = modeId === 'scalp' ? '#2563eb' : modeId === 'swing' ? '#7c3aed' : '#059669';
+    pMode.style.color = '#fff';
   }
   if (currentItem) {
     const pThreshold = document.getElementById('p-threshold');
