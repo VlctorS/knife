@@ -354,24 +354,60 @@ class TradingBot:
                     log.info('[SYNC] Закрываем позицию в БД (нет на бирже): %s (статус: %s, qty: %.4f)',
                              t.symbol, t.status, t.total_qty)
 
-                    # Фиксируем последний PnL до обнуления позиции.
-                    last_price = t.current_price or t.avg_entry_price or 0.0
+                    # Пытаемся взять РЕАЛЬНУЮ цену закрытия и PnL из closed-pnl.
+                    # Fallback — последняя сохранённая цена в БД.
+                    exit_price = t.current_price or t.avg_entry_price or 0.0
                     closed_pnl = float(t.pnl or 0.0)
+                    closed_by_sync_pnl = None
+                    try:
+                        records = await self.rest.get_closed_pnl(t.symbol, limit=50)
+                        if records:
+                            # Берём самую свежую запись по updatedTime/createdTime
+                            def _ts(r):
+                                return int(r.get('updatedTime') or r.get('createdTime') or 0)
+                            rec = max(records, key=_ts)
+                            rec_avg_exit = float(rec.get('avgExitPrice') or 0)
+                            if rec_avg_exit > 0:
+                                exit_price = rec_avg_exit
+                            closed_by_sync_pnl = float(rec.get('closedPnl') or 0)
+                    except Exception as e:
+                        log.warning('[SYNC] closed-pnl недоступен для %s: %r', t.symbol, e)
+
+                    if closed_by_sync_pnl is not None:
+                        # Реальный суммарный PnL закрытого цикла от Bybit.
+                        # Заменяем ранее накопленный realized, чтобы не суммировать
+                        # частичные выходы бота дважды.
+                        realized_part = closed_by_sync_pnl
+                        total_closed_pnl = closed_by_sync_pnl
+                    else:
+                        # Без closed-pnl — считаем по реальной цене закрытия.
+                        avg = float(t.avg_entry_price or 0.0)
+                        q = float(t.total_qty or 0.0)
+                        if avg > 0 and q > 0 and exit_price > 0:
+                            gross = q * (exit_price - avg) if t.side == 'LONG' \
+                                else q * (avg - exit_price)
+                            exit_fee = q * exit_price * (fee_pct / 100.0)
+                            realized_part = gross - exit_fee - float(t.entry_fee or 0.0)
+                        else:
+                            realized_part = float(t.pnl or 0.0)
+                        total_closed_pnl = float(t.realized_pnl or 0.0) + realized_part
 
                     history = TradeHistory(
-                        trade_id=t.id, action='CLOSED_BY_SYNC', price=last_price,
-                        qty=0, margin=0, pnl=closed_pnl,
-                        notes=f'Позиция закрыта на бирже вне бота; зафиксирован PnL {closed_pnl:.4f} USDT'
+                        trade_id=t.id, action='CLOSED_BY_SYNC', price=exit_price,
+                        qty=float(t.total_qty or 0.0), margin=0, pnl=realized_part,
+                        notes=(f'Позиция закрыта на бирже вне бота @ {exit_price:.6f}; '
+                               f'PnL {realized_part:.4f} USDT'
+                               + ('' if closed_by_sync_pnl is not None else ' (расчёт по цене)'))
                     )
                     session.add(history)
 
-                    t.realized_pnl += closed_pnl
+                    t.realized_pnl = total_closed_pnl
                     t.status = 'CLOSED'
                     t.closed_at = datetime.datetime.utcnow()
-                    t.total_qty = 0
-                    t.avg_entry_price = 0
-                    t.current_price = 0
-                    t.pnl = t.realized_pnl
+                    # Не обнуляем avg_entry_price / entry_price / total_qty —
+                    # сохраняем историю сделки (UI показывает их в закрытых).
+                    t.current_price = exit_price
+                    t.pnl = total_closed_pnl
                     synced += 1
                 await session.commit()
 

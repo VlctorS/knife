@@ -638,6 +638,30 @@ class BybitREST:
             return []
         return data.get('result', {}).get('list', [])
 
+    async def get_closed_pnl(self, symbol: str, limit: int = 50) -> list:
+        """Закрытые сделки по символу (v5/position/closed-pnl).
+
+        Возвращает записи с полями: avgEntryPrice, avgExitPrice, closedPnl,
+        qty, side ('Buy'/'Sell'), createdTime, updatedTime.
+        Используется, чтобы зафиксировать PnL по РЕАЛЬНОЙ цене закрытия,
+        а не по последней сохранённой в БД current_price.
+        """
+        params = {
+            'category': 'linear',
+            'symbol': symbol,
+            'limit': str(limit),
+        }
+        try:
+            data = await self._get('/v5/position/closed-pnl', params)
+        except Exception as e:
+            log.warning('get_closed_pnl failed for %s: %r', symbol, e)
+            return []
+        if data.get('retCode') != 0:
+            log.warning('get_closed_pnl retCode=%s retMsg=%s',
+                        data.get('retCode'), data.get('retMsg'))
+            return []
+        return data.get('result', {}).get('list', [])
+
 
 class BybitTickerWS:
     def __init__(self, symbols, batch_size=10):
