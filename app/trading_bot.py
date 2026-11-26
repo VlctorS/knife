@@ -341,6 +341,11 @@ class TradingBot:
                     log.info('[SYNC] Создана сделка из Bybit: %s %s qty=%.4f avg=%.6f',
                              symbol, side, qty, avg_entry)
                     synced += 1
+
+                    # Визуализируем подхваченную вручную сделку в сигналах.
+                    self._alert_trade_opened(symbol, side, current_price,
+                                             mode.label, qty * current_price,
+                                             qty, leverage, source='sync')
             
             await session.commit()
 
@@ -938,6 +943,10 @@ class TradingBot:
                  side, sym, price, mode.label, pos_size, qty, max_lev, entry_fee,
                  bybit_order_id)
 
+        # Показываем успешный вход во вкладке «Сигналы» (не только ошибки).
+        self._alert_trade_opened(sym, side, price, mode.label, pos_size,
+                                 qty, max_lev, source='bot')
+
     def _calc_grid_exit_plan(self, t, cfg, gs):
         """Полный план сетки усреднений и ступенчатых выходов (для истории/снимков)."""
         plan = {}
@@ -1482,6 +1491,48 @@ class TradingBot:
             await self.sync_open_positions()
         except Exception as e:
             log.warning('[SYNC-PERIODIC] failed: %r', e)
+
+    def _alert_trade_opened(self, sym: str, side: str, price: float,
+                            mode_label: str, size_usdt: float,
+                            qty: float, leverage: float, source: str = 'bot') -> None:
+        """Регистрирует сигнал «успешный вход» во вкладке «Сигналы».
+
+        Алерты в UI не должны оставаться пустыми, когда сделка открывается:
+        раньше сюда попадали только PUMP/DUMP от монитора и сигналы без
+        средств, а реальные входы бота/подхваты синка — нет.
+        Дедупликация: заменяем свежий (10 мин) радар-алерт по этому символу,
+        чтобы не дублировать, а не добавлять новый.
+        """
+        now = time.time()
+        reason = (f'✅ Вход {side} {mode_label} @ {price:.6f} '
+                  f'• {size_usdt:.2f} USDT • {qty:g} контр. • {leverage:.0f}x'
+                  + ('' if source == 'bot' else ' (подхвачено с биржи)'))
+        for a in state.alerts:
+            if a.symbol == sym and now - a.ts < 600:
+                a.reason = reason
+                a.price_now = price
+                a.ts = now
+                a.wait_tf_label = ''
+                a.wait_candle_open_ts = 0
+                a.wait_deadline_ts = 0
+                a.tf_sec = 0
+                return
+        ref_price = state.price_n_minutes_ago(sym, settings.window_minutes) or price
+        state.add_alert(Alert(
+            ts=now,
+            symbol=sym,
+            kind='PUMP' if side == 'LONG' else 'DUMP',
+            price_now=price,
+            ref_price=ref_price,
+            ma=None,
+            change_pct=(price / ref_price - 1.0) * 100 if ref_price else 0.0,
+            timeframe='',
+            reason=reason,
+            wait_tf_label='',
+            wait_candle_open_ts=0,
+            wait_deadline_ts=0,
+            tf_sec=0,
+        ))
 
     def _signal_no_funds(self, sym: str, side: str, price: float,
                          mode, pin, now: float) -> None:
