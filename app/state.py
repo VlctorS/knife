@@ -49,6 +49,9 @@ class Alert:
     wait_candle_open_ts: float = 0.0
     wait_deadline_ts: float = 0.0
     tf_sec: int = 0  # длительность бара рабочего ТФ в секундах
+    # Подробный расклад сигнала для всплывающей подсказки (индикаторы,
+    # тренд, уровни, уверенность, RR и т.п.). None — нет данных.
+    details: Optional[dict] = None
 
 
 class AppState:
@@ -108,7 +111,27 @@ class AppState:
         return best
 
     def add_alert(self, alert: Alert) -> None:
+        self._prune_alerts()
         self.alerts.appendleft(alert)
+
+    def _prune_alerts(self) -> None:
+        """Удаляет неактуальные сигналы из списка.
+
+        - сигнал с ожиданием свечи (радар) живёт до дедлайна + 5 мин;
+        - обычный сигнал/вход живёт 15 минут.
+        Свежий вход (ENTRY) не должен пропасть раньше — ему отдан тот же TTL.
+        """
+        now = time.time()
+        keep: Deque[Alert] = deque(maxlen=self.alerts.maxlen)
+        for a in self.alerts:
+            ttl_ts = 0.0
+            if getattr(a, 'wait_deadline_ts', 0):
+                ttl_ts = a.wait_deadline_ts + 300
+            else:
+                ttl_ts = a.ts + 900
+            if now <= ttl_ts:
+                keep.append(a)
+        self.alerts = keep
 
 
 # =============================================================================

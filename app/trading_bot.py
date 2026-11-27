@@ -587,6 +587,20 @@ class TradingBot:
                 # жизни свечи якоря и сигнал протухает).
                 anchor_dir, anchor_strength = trend_by_closes(kl_anchor, use_open=True) if kl_anchor else ('flat', 0.0)
 
+                # --- 6b. Второй (старший) трендовый фильтр: напр. 4H для 5m ---
+                # Не обязательно ждём закрытия 4H-бара: считаем живой, с
+                # прогрессом бара. При trend_required=True вход разрешён
+                # ТОЛЬКО по направлению этого тренда — иначе при усреднении
+                # цена может уйти против старшего тренда и не вернуться.
+                trend_dir, trend_strength = '', 0.0
+                if mode.trend_tf:
+                    try:
+                        async with self._kline_sem:
+                            kl_trend = await self._fetch_klines_safe(sym, mode.trend_tf, self.KLINES_PER_REQUEST)
+                    except Exception:
+                        kl_trend = None
+                    trend_dir, trend_strength = trend_by_closes(kl_trend, use_open=True) if (kl_trend and len(kl_trend) >= 30) else ('flat', 0.0)
+
                 # --- 7. Пин-бары с подтверждением ---
                 pins = find_pins_with_confirm(
                     kl_work, levels_work, atr_work, st.last_price,
@@ -634,6 +648,21 @@ class TradingBot:
                     elif anchor_dir == 'up' and side != 'SHORT':
                         continue
 
+                    # --- 7b. Обязательный старший тренд (напр. 4H для скальпа) ---
+                    # Вход только ПО старшему тренду; флэт трактуется как
+                    # отсутствие направления — вход запрещён. Это повышает
+                    # шанс, что усреднения пойдут по тренду в плюс.
+                    if mode.trend_required and mode.trend_tf:
+                        if trend_dir == 'flat':
+                            log.debug('[SKIP-TREND] %s mode=%s: %s flat — вход по старшему ТФ запрещён',
+                                      sym, mode.id, mode.trend_label)
+                            continue
+                        want = 'up' if side == 'LONG' else 'down'
+                        if trend_dir != want:
+                            log.debug('[SKIP-TREND] %s mode=%s: %s trend=%s != %s',
+                                      sym, mode.id, mode.trend_label, trend_dir, want)
+                            continue
+
                     # --- 8. Пространство до цели ---
                     if side == 'LONG':
                         target = nearest_level(levels_work, st.last_price, 'above', within_pct=15)
@@ -660,6 +689,11 @@ class TradingBot:
                         stop_distance = st.last_price - extreme
                     else:
                         stop_distance = extreme - st.last_price
+                    # Минимальный стоп в ATR: не ставим стоп в рыночный шум
+                    # (AAVE: стоп 0.18% при ATR 0.22% ~ 0.8 ATR — выбивало
+                    # мгновенно). Расширяем до stop_min_atr*ATR, если задано.
+                    if mode.stop_min_atr > 0 and st.last_price > 0:
+                        stop_distance = max(stop_distance, mode.stop_min_atr * atr_work)
                     stop_pct = stop_distance / st.last_price * 100 if st.last_price > 0 else 0.0
 
                     # RR = (dist_to_target) / (stop_pct)
@@ -707,7 +741,10 @@ class TradingBot:
                                 'confidence': round(confidence, 2),
                                 'min_confidence': conf_min,
                                 'anchor_trend': anchor_dir,
-                                'anchor_strength': round(anchor_strength, 3),
+                                'anchor_strength': round(anchor_strength, 3),      
+                                'trend_tf': mode.trend_label or None,
+                                'trend_dir': trend_dir or None,
+                                'trend_strength': round(trend_strength, 3) if mode.trend_tf else None,
                                 'level_price': round(level_price, 8),
                                 'extreme': round(extreme, 8),
                                 'confirm_type': pin['confirm']['type'],
@@ -1494,7 +1531,8 @@ class TradingBot:
 
     def _alert_trade_opened(self, sym: str, side: str, price: float,
                             mode_label: str, size_usdt: float,
-                            qty: float, leverage: float, source: str = 'bot') -> None:
+                            qty: float, leverage: float, source: str = 'bot',
+                            details: dict = None) -> None:
         """Регистрирует сигнал «успешный вход» во вкладке «Сигналы».
 
         Алерты в UI не должны оставаться пустыми, когда сделка открывается:
@@ -1507,6 +1545,9 @@ class TradingBot:
         reason = (f'✅ Вход {side} {mode_label} @ {price:.6f} '
                   f'• {size_usdt:.2f} USDT • {qty:g} контр. • {leverage:.0f}x'
                   + ('' if source == 'bot' else ' (подхвачено с биржи)'))
+        payload = dict(details or {})
+        payload.update({'side': side, 'action': 'ENTRY', 'source': source,
+                        'size_usdt': size_usdt, 'qty': qty, 'leverage': leverage})
         for a in state.alerts:
             if a.symbol == sym and now - a.ts < 600:
                 a.reason = reason
@@ -1516,6 +1557,7 @@ class TradingBot:
                 a.wait_candle_open_ts = 0
                 a.wait_deadline_ts = 0
                 a.tf_sec = 0
+                a.details = payload
                 return
         ref_price = state.price_n_minutes_ago(sym, settings.window_minutes) or price
         state.add_alert(Alert(
@@ -1532,6 +1574,7 @@ class TradingBot:
             wait_candle_open_ts=0,
             wait_deadline_ts=0,
             tf_sec=0,
+            details=payload,
         ))
 
     def _signal_no_funds(self, sym: str, side: str, price: float,
@@ -1576,6 +1619,22 @@ class TradingBot:
             wait_candle_open_ts=int(confirm_ts),
             wait_deadline_ts=deadline,
             tf_sec=dur,
+            details={
+                'mode': mode.id,
+                'work_tf': mode.work_label,
+                'anchor_tf': mode.anchor_label,
+                'anchor_trend': pin.get('anchor_dir', 'flat'),
+                'anchor_strength': pin.get('anchor_strength', 0),
+                'level_price': pin.get('level_price', 0),
+                'extreme': pin.get('extreme', 0),
+                'confirm_type': pin.get('confirm', {}).get('type', ''),
+                'rr': pin.get('rr', 0),
+                'dist_target_pct': pin.get('dist_target_pct', 0),
+                'stop_pct': pin.get('stop_pct', 0),
+                'atr_work': pin.get('atr_work', 0),
+                'confidence': pin.get('confidence', 0),
+                'pin_range_pct': pin.get('range_pct', 0),
+            },
         ))
 
     def _refresh_wait_info(self, symbols_to_check, mode_id: str) -> None:

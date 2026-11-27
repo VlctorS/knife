@@ -53,6 +53,18 @@ button:hover { background:#1d4ed8; }
 .sub-tab-content.active { display:block; }
 
 .reason-cell { white-space: normal !important; max-width: 400px; font-size: 12px; line-height: 1.4; }
+/* Всплывающая подсказка с подробным раскладом сигнала */
+.sig-tip { position: fixed; z-index: 9999; max-width: 420px; pointer-events: none;
+  background: #111827; color: #e5e7eb; border: 1px solid #374151; border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5); padding: 12px 14px; font-size: 12px;
+  line-height: 1.55; display: none; }
+.sig-tip .st-title { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+.sig-tip .st-row { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; border-bottom: 1px dashed rgba(255,255,255,0.06); }
+.sig-tip .st-row:last-child { border-bottom: none; }
+.sig-tip .st-k { color: #8a93a6; }
+.sig-tip .st-v { text-align: right; font-variant-numeric: tabular-nums; }
+.sig-tip .st-sec { margin-top: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #6b7280; }
+.sig-tip .pump { color: #22c55e; } .sig-tip .dump { color: #ef4444; }
 .reason-success { color: #22c55e; }
 .reason-skip { color: #8a93a6; }
 .reason-radar { color: #f59e0b; }
@@ -137,6 +149,7 @@ button:hover { background:#1d4ed8; }
 .tf-btn.active { background:#2563eb !important; color:white !important; border:none !important; }
 </style></head>
 <body>
+<div class="sig-tip" id="sig-tip"></div>
 <header>
   <h1 style="margin:0;font-size:18px;">Knife Bot</h1>
   <span class="pill" id="p-mode" style="background:#2563eb;">—</span>
@@ -825,6 +838,93 @@ async function updateBalanceAndPnl() {
   }
 }
 
+// ---------- Всплывающая подсказка с раскладом сигнала ----------
+const SIDE_RU = { LONG: 'LONG (в лонг)', SHORT: 'SHORT (в шорт)' };
+const TREND_RU = { up: 'восходящий ↑', down: 'нисходящий ↓', flat: 'флэт / нет направления' };
+const CONFIRM_RU = { close: 'закрытие свечи за уровнем', retest: 'ретест уровня', bos: 'пробой структуры (BOS)' };
+function _r(v, d) { return (v == null || isNaN(v)) ? '—' : Number(v).toFixed(d); }
+
+function buildSignalTip(a) {
+  const q = a.details || {};
+  const isEntry = q.action === 'ENTRY';
+  const dirCls = a.kind === 'PUMP' ? 'pump' : 'dump';
+  let rows = [];
+  const row = (k, v) => `<div class="st-row"><span class="st-k">${k}</span><span class="st-v">${v}</span></div>`;
+  const sec = (t) => `<div class="st-sec">${t}</div>`;
+
+  rows.push(`<div class="st-title ${dirCls}">${isEntry ? '✅ Вход' : '⚡ Сигнал'} ${a.symbol} · ${a.kind}</div>`);
+
+  rows.push(sec('Направление и время'));
+  rows.push(row('Направление', SIDE_RU[q.side] || (a.kind === 'PUMP' ? 'PUMP (вверх)' : 'DUMP (вниз)')));
+  rows.push(row('Время сигнала', new Date(a.ts * 1000).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })));
+  if (a.timeframe) rows.push(row('Окно монитора', a.timeframe));
+  if (q.mode) rows.push(row('Режим', q.mode));
+
+  rows.push(sec('Таймфреймы и тренд'));
+  if (q.work_tf) rows.push(row('Рабочий ТФ', q.work_tf));
+  if (q.anchor_tf) rows.push(row('Якорный ТФ (тренд)', q.anchor_tf));
+  if (q.anchor_trend) rows.push(row('Тренд якоря', `${TREND_RU[q.anchor_trend] || q.anchor_trend} (сила ${_r(q.anchor_strength * 100, 0)}%)`));
+  if (q.trend_tf) rows.push(row(`Старший ТФ ${q.trend_tf}`, `${TREND_RU[q.trend_dir] || q.trend_dir} (сила ${_r((q.trend_strength || 0) * 100, 0)}%)`));
+
+  rows.push(sec('Цена и уровни'));
+  rows.push(row('Цена входа/сейчас', fmtNum(a.price_now, 8)));
+  if (a.ref_price) rows.push(row(`Цена ${a.timeframe || ''} назад`, fmtNum(a.ref_price, 8)));
+  rows.push(row('Изменение', `${(a.change_pct > 0 ? '+' : '') + _r(a.change_pct, 2)}%`));
+  if (q.level_price) rows.push(row('Уровень (S/R)', fmtNum(q.level_price, 8)));
+  if (q.extreme) rows.push(row('Экстремум тени (пин)', fmtNum(q.extreme, 8)));
+
+  if (q.confidence != null) {
+    rows.push(sec('Оценка сигнала'));
+    rows.push(row('Уверенность', `${_r(q.confidence * 100, 0)}% (порог ${_r((q.min_confidence || 0) * 100, 0)}%)`));
+  }
+  if (q.confirm_type) rows.push(row('Подтверждение', CONFIRM_RU[q.confirm_type] || q.confirm_type));
+  if (q.rr != null) rows.push(row('RR (цель/стоп)', _r(q.rr, 2)));
+  if (q.dist_target_pct != null) rows.push(row('До цели', _r(q.dist_target_pct, 2) + '%'));
+  if (q.stop_pct != null) rows.push(row('Стоп', _r(q.stop_pct, 2) + '%'));
+  if (q.atr_work) rows.push(row('ATR рабочего ТФ', fmtNum(q.atr_work, 8)));
+  if (q.pin_range_pct) rows.push(row('Диапазон пин-свечи', _r(q.pin_range_pct, 2) + '%'));
+  if (q.vol_ratio != null) rows.push(row('Объём (к среднему)', _r(q.vol_ratio, 2) + 'x'));
+
+  if (isEntry) {
+    rows.push(sec('Параметры входа'));
+    if (q.size_usdt != null) rows.push(row('Размер позиции', _r(q.size_usdt, 2) + ' USDT'));
+    if (q.qty != null) rows.push(row('Контрактов', Number.isInteger(q.qty) ? q.qty : fmtNum(q.qty, 6)));
+    if (q.leverage != null) rows.push(row('Плечо', _r(q.leverage, 0) + 'x'));
+    if (q.source) rows.push(row('Источник', q.source === 'sync' ? 'подхвачено с биржи' : 'бот'));
+  }
+
+  if (!q || !Object.keys(q).length) {
+    rows.push(sec('Подробности')); 
+    rows.push(row('Причины', a.reason || '—'));
+  }
+  return rows.join('');
+}
+
+// Наведение на строку сигнала -> подсказка следует за курсором
+function bindSignalTips(container) {
+  const tip = document.getElementById('sig-tip');
+  if (!tip) return;
+  container.querySelectorAll('tr[data-tip]').forEach(tr => {
+    tr.addEventListener('mouseenter', (e) => {
+      tip.innerHTML = decodeURIComponent(tr.dataset.tip || '');
+      tip.style.display = 'block';
+      moveTip(e);
+    });
+    tr.addEventListener('mousemove', moveTip);
+    tr.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+  });
+}
+function moveTip(e) {
+  const tip = document.getElementById('sig-tip');
+  if (!tip) return;
+  const pad = 16, w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = e.clientX + pad, y = e.clientY + pad;
+  if (x + w > window.innerWidth - 8) x = e.clientX - w - pad;
+  if (y + h > window.innerHeight - 8) y = e.clientY - h - pad;
+  tip.style.left = Math.max(8, x) + 'px';
+  tip.style.top = Math.max(8, y) + 'px';
+}
+
 async function loadAlerts() {
   const d = await (await fetch('/api/alerts?limit=100')).json();
   const tb = document.getElementById('alerts');
@@ -919,7 +1019,7 @@ async function loadAlerts() {
               .replace(/price still at knife low \(falling knife\)/g, 'Цена все еще на минимуме ножа (падающий нож)')
               .replace(/price still at knife high \(rising blow-off\)/g, 'Цена все еще на максимуме ножа (летящий нож)');
         }
-        normalRows.push(`<tr><td class="muted">${timeStr}</td><td>${a.symbol}</td><td class="${a.kind==='PUMP'?'pump':'dump'}">${a.kind}</td><td>${a.timeframe||''}</td><td>${a.change_pct.toFixed(2)}%</td><td>${fmtNum(a.price_now)}</td><td class="reason-cell ${reasonClass}">${reasonText}</td></tr>`);
+        normalRows.push(`<tr data-tip="${encodeURIComponent(buildSignalTip(a))}"><td class="muted">${timeStr}</td><td>${a.symbol}</td><td class="${a.kind==='PUMP'?'pump':'dump'}">${a.kind}</td><td>${a.timeframe||''}</td><td>${a.change_pct.toFixed(2)}%</td><td>${fmtNum(a.price_now)}</td><td class="reason-cell ${reasonClass}">${reasonText}</td></tr>`);
       }
     }
   }
@@ -942,6 +1042,7 @@ async function loadAlerts() {
   }
   html += normalRows.join('');
   tb.innerHTML = html;
+  bindSignalTips(tb);
   startCountdowns();
 }
 

@@ -193,6 +193,9 @@ async def api_status():
 
 @app.get('/api/alerts')
 async def api_alerts(limit: int = 100):
+    # Чистим неактуальные сигналы перед выдачей (радар — после дедлайна,
+    # обычные — старше 15 минут).
+    state._prune_alerts()
     limit = max(1, min(limit, settings.max_alerts))
     return {
         'items': [
@@ -212,6 +215,8 @@ async def api_alerts(limit: int = 100):
                 'wait_candle_open_ts': getattr(a, 'wait_candle_open_ts', 0.0),
                 'wait_deadline_ts': getattr(a, 'wait_deadline_ts', 0.0),
                 'tf_sec': getattr(a, 'tf_sec', 0),
+                # Подробный расклад сигнала для всплывающей подсказки.
+                'details': getattr(a, 'details', None),
             }
             for a in list(state.alerts)[:limit]
         ]

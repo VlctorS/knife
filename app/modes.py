@@ -48,6 +48,12 @@ class ModeParams:
     work_label: str         # человекочитаемый ('5m', '1H', '1D')
     anchor_tf: str          # Bybit interval трендового фильтра
     anchor_label: str       # человекочитаемый ('1h', '1d', '1w')
+    # Старший ТФ «второго подтверждения» (напр. 4H для скальпа 5m).
+    # Если задан — направление тренда на нём ДОЛЖНО совпасть со стороной
+    # сделки (при trend_required=True). Пусто — фильтр выключен.
+    trend_tf: str = ''
+    trend_label: str = ''
+    trend_required: bool = False
     confirm_window_sec: int # сколько секунд ждём подтверждения после пин-бара
     scan_period_sec: int    # минимальный период прохода по символам
     # --- Пороги сигнала ---
@@ -57,6 +63,8 @@ class ModeParams:
     move_pct_min: float     # мин. диапазон свечи в % (защита тихих рынков)
     shadow_lookback_atr: float  # тень пин-бара должна достать уровень в N*ATR
     space_rr_min: float     # минимум (расстояние до цели) / (до entry-stop)
+    # Минимальный стоп в долях ATR рабочего ТФ (0 — без ограничения).
+    stop_min_atr: float = 0.0
     # --- Параметры монитора (памп/дамп) — автоматически применяются при выборе режима ---
     monitor_threshold: float = 0.5      # мин. изменение цены в % для алерта монитора
     monitor_window_minutes: int = 60    # окно сравнения для монитора в минутах
@@ -81,16 +89,25 @@ MODES: Dict[str, ModeParams] = {
         # 1H (60 мин > confirm_window), тренд часа считаем живым объёмом.
         anchor_tf='60',
         anchor_label='1H (живой)',
+        # ВТОРОЙ фильтр: старший 4H-тренд. Вход в скальп только ПО 4H-тренду:
+        # если не пошли в плюс сразу, при усреднении цена с большей
+        # вероятностью вернётся по старшему тренду. Флэт 4H = вход запрещён.
+        trend_tf='240',
+        trend_label='4H',
+        trend_required=True,
         monitor_threshold=0.3,           # более чувствительный для быстрых движений
         monitor_window_minutes=5,        # 5 минут
         confirm_window_sec=900,          # ~3 свечи 5m — даём время на подтверждение
         scan_period_sec=20,
-        min_confidence=0.40,             # скальп 5m — шумный, но 0.40 достаточно с ATR-фильтрами
-        pin_shadow_frac=0.55,            # 0.55 для 5m — не жёстко 0.70
-        move_atr_mult=0.8,               # 0.8 ATR для 5m — не 1.6, слишком высоко
-        move_pct_min=0.2,                # 0.2% для 5m — не 0.45%, слишком много
+        min_confidence=0.52,             # скальп 5m: 0.40 пропускал слабые входы (AAVE 0.41)
+        pin_shadow_frac=0.60,            # тень должна быть заметнее — меньше ложных пинов
+        move_atr_mult=1.0,               # диапазон свечи >= 1 ATR: реальный импульс, не шум
+        move_pct_min=0.3,                # 0.3% для 5m — отсекаем микроколебания
         shadow_lookback_atr=0.5,         # допуск контакта тени с уровнем: 0.5*ATR
-        space_rr_min=1.2,                # 1.2 для скальпа достаточно (комиссии съедают RR)
+        space_rr_min=1.8,                # RR<1.8 при комиссиях — отрицательная матожидание
+        # Минимальный стоп: за экстремумом тени, но не ближе 0.4*ATR — иначе
+        # стоп стоит в шуме и выбивается на каждом тике (AAVE: 0.18%).
+        stop_min_atr=0.4,
         # --- ГЕОМЕТРИЯ СЕТКИ (профиль: микро-баланс, скальп 5m, риск ок) ---
         # Прежние 0.6%/1.25 были СЛИШКОМ мелкими для 5m: 4 усреднения прожимались
         # за минуту на обычном шуме, а средняя цена почти не улучшалась —
@@ -126,6 +143,7 @@ MODES: Dict[str, ModeParams] = {
         move_pct_min=0.9,
         shadow_lookback_atr=1.0,
         space_rr_min=1.5,
+        stop_min_atr=0.6,
         grid_step_pct=1.3,
         grid_step_atr=1.0,
         grid_step_multiplier=1.6,
@@ -154,6 +172,7 @@ MODES: Dict[str, ModeParams] = {
         move_pct_min=2.0,
         shadow_lookback_atr=1.2,
         space_rr_min=1.5,
+        stop_min_atr=1.0,
         grid_step_pct=3.5,
         grid_step_atr=1.2,
         grid_step_multiplier=2.0,
