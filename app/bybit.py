@@ -35,6 +35,79 @@ if API_KEY:
 else:
     log.warning('[BYBIT] API ключи НЕ загружены — работает только публичное')
 
+# --- Синхронизация времени с сервером Bybit ---
+# Локальные часы могут уходить от биржевого времени (дрейф, NTP, часовой
+# пояс). Bybit отклоняет подписанные запросы, если |timestamp - serverTime|
+# превышает recv_window (5000 мс): 'ErrCode 10002 timestamp not in recvWindow'.
+# Храним оффсет (server_time - local_time) в мс и подписываем им все запросы.
+_time_offset_ms = 0.0
+_time_sync_ts = 0.0
+TIME_SYNC_INTERVAL_SEC = 1800  # пересинхронизация раз в 30 минут
+
+
+def _server_now_ms() -> int:
+    """Текущее время в мс с учётом оффсета к серверу Bybit."""
+    return int(time.time() * 1000 + _time_offset_ms)
+
+
+def time_offset_ms() -> float:
+    """Текущий оффсет локального времени к серверу (мс)."""
+    return _time_offset_ms
+
+
+async def sync_server_time(session=None) -> float:
+    """Синхронизирует время с сервером Bybit (/v5/market/time).
+
+    Оффсет = server_time - локальное_время в момент ответа. Учитываем
+    сетевую задержку: берём середину между отправкой и получением, чтобы
+    не занизить/завысить оффсет на RTT/2.
+    Возвращает вычисленный оффсет (мс). При сбое оставляет прежний.
+    """
+    global _time_offset_ms, _time_sync_ts
+    url = REST_BASE + '/v5/market/time'
+    own_session = session is None
+    s = session
+    if own_session:
+        s = aiohttp.ClientSession(headers={'Accept': 'application/json'})
+    try:
+        t_before = time.time()
+        async with s.get(url) as r:
+            r.raise_for_status()
+            data = await _read_json(r)
+        t_after = time.time()
+        if data.get('retCode') != 0:
+            log.warning('[TIME] sync retCode=%s retMsg=%s',
+                        data.get('retCode'), data.get('retMsg'))
+            return _time_offset_ms
+        server_ms = int(data.get('result', {}).get('timeSecond', 0)) * 1000 \
+            + int(data.get('result', {}).get('timeNano', 0)) % 1_000_000_000 // 1_000_000
+        if server_ms <= 0:
+            log.warning('[TIME] sync: пустой serverTime в ответе')
+            return _time_offset_ms
+        local_ms = (t_before + t_after) / 2.0 * 1000.0
+        new_offset = server_ms - local_ms
+        _time_offset_ms = new_offset
+        _time_sync_ts = time.time()
+        log.info('[TIME] синхронизация с Bybit: оффсет %.0f мс (локально %+.1f с)',
+                 new_offset, new_offset / 1000.0)
+        return new_offset
+    except Exception as e:
+        log.warning('[TIME] sync failed: %r', e)
+        return _time_offset_ms
+    finally:
+        if own_session and s is not None:
+            await s.close()
+
+
+async def time_sync_loop(session=None, interval_sec: int = TIME_SYNC_INTERVAL_SEC):
+    """Фоновая задача: периодически пересинхронизирует время с сервером."""
+    while True:
+        try:
+            await sync_server_time(session)
+        except Exception as e:
+            log.warning('[TIME] loop error: %r', e)
+        await asyncio.sleep(interval_sec)
+
 # Кэш instrument info: {symbol: {qtyStep, priceStep, minQty, maxQty, tickSize, ...}}
 _instruments_cache = {}
 _instruments_ts = {}
@@ -181,7 +254,7 @@ async def _read_json(resp):
 def _sign_request(params: dict) -> dict:
     if not API_KEY or not API_SECRET:
         return {}
-    timestamp = str(int(time.time() * 1000))
+    timestamp = str(_server_now_ms())
     param_str = urlencode(params)
     payload = timestamp + API_KEY + '5000' + param_str
     signature = hmac.new(
@@ -328,7 +401,7 @@ class BybitREST:
         Bybit v5 требует: тело = сырой JSON, подпись = HMAC(timestamp+key+recv+body).
         Отправка через params= (form-urlencoded) даёт 'Error sign'.
         """
-        timestamp = str(int(time.time() * 1000))
+        timestamp = str(_server_now_ms())
         body = json.dumps(params)
         signature = hmac.new(
             API_SECRET.encode('utf-8'),

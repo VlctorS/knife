@@ -109,7 +109,7 @@ class TradingBot:
     KLINE_TTL_SEC = 25
     REST_TIMEOUT_SEC = 8
     # Если открытая сделка не обновлялась столько секунд, а тик свежий —
-    # считаем её «зависшей» и пишем SNAPSHOT-восстановление.
+    # считаем её «зависшей» и форсируем обновление.
     STALE_TRADE_SEC = 180
     # Храним seen-свечи 48 часов (хватает для 4h/D интервалов с запасом).
     SEEN_RETENTION_MS = 48 * 3600 * 1000
@@ -640,6 +640,11 @@ class TradingBot:
 
                     # Проверяем тренд якоря
                     if anchor_dir == 'flat':
+                        if mode.anchor_required:
+                            # Вход только по тренду якоря: флэт запрещает вход.
+                            log.debug('[SKIP-ANCHOR] %s mode=%s: %s flat — вход запрещён',
+                                      sym, mode.id, mode.anchor_label)
+                            continue
                         # Флэт на старшем — можно, но понижаем уверенность
                         pass
                     elif anchor_dir == 'down' and side != 'LONG':
@@ -1210,14 +1215,10 @@ class TradingBot:
             if db_age > stale_sec and tick_age < stale_sec:
                 log.warning('RECOVER stale trade %s #%s: history=%.0fs ago, tick=%.0fs ago -> forcing update',
                             t.symbol, t.id, db_age, tick_age)
-                # Помечаем в логе и сбрасываем timestamp, чтобы следующий цикл пересчитал PnL
-                snapshot = await self._get_market_snapshot(t, session=session)
-                session.add(TradeHistory(
-                    trade_id=t.id, action='SNAPSHOT', price=st.last_price, qty=t.total_qty,
-                    margin=t.total_margin, pnl=t.pnl,
-                    notes=f'Авто-восстановление после зависания ({db_age:.0f}s)',
-                    details=json.dumps(snapshot)
-                ))
+                # Лишние SNAPSHOT-записи в истории не создаём: история монеты
+                # должна содержать только значимые события (открытие, усреднение,
+                # выходы, красные лампочки). Зависание лечим логом и коммитом,
+                # чтобы следующий цикл пересчитал PnL по свежему тику.
                 await session.commit()
                 recovered = True
         return recovered
@@ -1229,8 +1230,7 @@ class TradingBot:
             v_tf = _validity_tf(mode_v)
             v_sec, v_confirm = _validity_struct_params(mode_v)
             kl_1h = await self._fetch_klines_safe(t.symbol, v_tf, 60)
-            anchor_map = {'5': '60', '15': '240', '240': 'D'}
-            kl_4h = await self._fetch_klines_safe(t.symbol, anchor_map.get(v_tf, '60'), 30)
+            kl_4h = await self._fetch_klines_safe(t.symbol, mode_v.anchor_tf, 30)
             if not kl_1h or not kl_4h:
                 return {}
             st = state.symbols.get(t.symbol)
@@ -1406,9 +1406,8 @@ class TradingBot:
             min_age_sec, confirm_candles = _validity_struct_params(mode)
 
             kl_work = await self._fetch_klines_safe(t.symbol, valid_tf, 60)
-            # Старший якорь — на шаг выше: 1H для скальпа, 4H для интрадэй, D для свинг.
-            anchor_tf_map = {'5': '60', '15': '240', '240': 'D'}
-            kl_anchor = await self._fetch_klines_safe(t.symbol, anchor_tf_map.get(valid_tf, '60'), 30)
+            # Старший якорь берём из конфигурации режима (anchor_tf).
+            kl_anchor = await self._fetch_klines_safe(t.symbol, mode.anchor_tf, 30)
 
             if not kl_work or not kl_anchor:
                 return None
@@ -1715,9 +1714,7 @@ class TradingBot:
                 for t in open_trades:
                     m = get_mode(getattr(t, 'mode', None))
                     v_tf = _validity_tf(m)
-                    anchor_map = {'5': '60', '15': '240', '240': 'D'}
-                    a_tf = anchor_map.get(v_tf, '60')
-                    trade_symbols.setdefault(t.symbol, set()).update({v_tf, a_tf})
+                    trade_symbols.setdefault(t.symbol, set()).update({v_tf, m.anchor_tf})
                 log.debug('[PRIORITY] Loading live mode TF candles for %d open trades...', len(trade_symbols))
                 for sym, tfs in trade_symbols.items():
                     for tf in sorted(tfs):
@@ -1735,7 +1732,7 @@ class TradingBot:
                 log.warning('Periodic position sync failed: %r', e)
             
             # --- ЛЕЧЕНИЕ «ЗАВИСШИХ» СДЕЛОК ---
-            # Если история не обновлялась дольше STALE_TRADE_SEC, но тик свежий — пишем SNAPSHOT
+            # Если история не обновлялась дольше STALE_TRADE_SEC, но тик свежий — форсируем пересчёт
             try:
                 await self._recover_stale_trades(session, open_trades)
             except Exception as e:
@@ -1796,10 +1793,10 @@ class TradingBot:
                 if last_hist:
                     last_hist_ts, last_action = last_hist
                     delta = (datetime.datetime.utcnow() - last_hist_ts).total_seconds()
-                    # После VALIDITY_CHANGE / SNAPSHOT — cooldown 60 сек
-                    if last_action in ('VALIDITY_CHANGE', 'SNAPSHOT') and delta < 60:
+                    # После VALIDITY_CHANGE — cooldown 60 сек
+                    if last_action == 'VALIDITY_CHANGE' and delta < 60:
                         need_check = False
-                    elif last_action not in ('VALIDITY_CHANGE', 'SNAPSHOT') and delta < 15:
+                    elif last_action != 'VALIDITY_CHANGE' and delta < 15:
                         # После открытия/усреднения/выхода ждём 15 сек перед проверкой
                         need_check = False
 
@@ -1822,9 +1819,6 @@ class TradingBot:
                         await session.commit()
                         
                         if old_status != v.status:
-                            # Собираем снимок индикаторов
-                            snapshot = await self._get_market_snapshot(t)
-                            
                             # Формируем подробное обоснование смены цвета
                             verdict_text = ''
                             if v.verdict:
@@ -1832,7 +1826,7 @@ class TradingBot:
                                 verdict_note = v.verdict.get('note', '')
                                 if verdict_note:
                                     verdict_text = verdict_note + '. ' + verdict_text if verdict_text else verdict_note
-                            
+
                             hist_notes = f"Смена статуса разворота: {old_status} -> {v.status}. Оценка: {v.score:.2f}"
                             if verdict_text:
                                 hist_notes += f"\nОбоснование: {verdict_text}"

@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Knife — принцип работы торгового бота</title>
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #161b22;
+    --panel-2: #1c2530;
+    --border: #263241;
+    --text: #d7dee8;
+    --muted: #8b98a8;
+    --accent: #4ea1ff;
+    --accent-2: #7ee787;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --orange: #f0883e;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --code: #0a0d12;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: linear-gradient(180deg, #0b0e13 0%, #0e1117 100%);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  .layout { display: flex; max-width: 1400px; margin: 0 auto; }
+  nav {
+    position: sticky; top: 0; align-self: flex-start;
+    width: 280px; min-width: 280px;
+    height: 100vh; overflow-y: auto;
+    padding: 28px 18px;
+    border-right: 1px solid var(--border);
+    background: rgba(14,17,23,0.9);
+    backdrop-filter: blur(6px);
+  }
+  nav .brand {
+    font-size: 20px; font-weight: 700; letter-spacing: .5px;
+    margin-bottom: 4px;
+    background: linear-gradient(90deg,#4ea1ff,#7ee787);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  nav .sub { font-size: 12px; color: var(--muted); margin-bottom: 22px; }
+  nav a {
+    display: block; color: var(--muted); text-decoration: none;
+    font-size: 13.5px; padding: 6px 10px; border-radius: 7px;
+    border-left: 2px solid transparent; transition: .15s;
+  }
+  nav a:hover { color: var(--text); background: var(--panel); }
+  nav a.active { color: var(--accent); border-left-color: var(--accent); background: var(--panel); }
+  nav .group { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #56616f; margin: 18px 0 6px 10px; }
+
+  main { flex: 1; padding: 40px 48px 100px; min-width: 0; }
+
+  h1 { font-size: 32px; margin: 0 0 8px; letter-spacing: -.5px; }
+  h2 {
+    font-size: 23px; margin: 56px 0 16px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border); letter-spacing: -.3px;
+    scroll-margin-top: 20px;
+  }
+  h2 .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 32px; height: 32px; border-radius: 9px; margin-right: 12px;
+    background: linear-gradient(135deg,#4ea1ff,#bc8cff);
+    color: #06101c; font-size: 16px; font-weight: 800; vertical-align: middle;
+  }
+  h3 { font-size: 17px; margin: 28px 0 10px; color: #eaf1fb; scroll-margin-top: 20px; }
+  h4 { font-size: 14.5px; margin: 20px 0 8px; color: var(--accent); }
+  p { margin: 10px 0; }
+  ul, ol { margin: 10px 0; padding-left: 22px; }
+  li { margin: 5px 0; }
+  code {
+    background: var(--code); color: #9ad2ff; padding: 2px 6px;
+    border-radius: 5px; font-family: "Cascadia Code", "Consolas", monospace; font-size: 13px;
+  }
+  .lead { font-size: 16px; color: #b9c4d2; }
+  a.ref { color: var(--accent); }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px 20px; margin: 16px 0;
+  }
+  .card.accent { border-color: #2b4361; background: linear-gradient(180deg,#17202c,#151b24); }
+
+  .grid { display: grid; gap: 14px; }
+  .grid.c2 { grid-template-columns: repeat(2, 1fr); }
+  .grid.c3 { grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 900px) { .grid.c2, .grid.c3 { grid-template-columns: 1fr; } }
+
+  .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; line-height: 1.6;
+  }
+  .pill.green { background: rgba(63,185,80,.14); color: var(--green); border: 1px solid rgba(63,185,80,.3); }
+  .pill.yellow { background: rgba(210,153,34,.14); color: var(--yellow); border: 1px solid rgba(210,153,34,.3); }
+  .pill.orange { background: rgba(240,136,62,.14); color: var(--orange); border: 1px solid rgba(240,136,62,.3); }
+  .pill.red { background: rgba(248,81,73,.14); color: var(--red); border: 1px solid rgba(248,81,73,.3); }
+  .pill.blue { background: rgba(78,161,255,.14); color: var(--accent); border: 1px solid rgba(78,161,255,.3); }
+  .pill.purple { background: rgba(188,140,255,.14); color: var(--purple); border: 1px solid rgba(188,140,255,.3); }
+
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--panel-2); color: #cdd7e3; font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .4px; }
+  tr:hover td { background: rgba(78,161,255,.03); }
+  td.num, th.num { text-align: right; font-family: "Consolas", monospace; }
+  .ok { color: var(--green); }
+  .no { color: var(--red); }
+  .warn { color: var(--yellow); }
+
+  .formula {
+    background: var(--code); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    padding: 12px 16px; border-radius: 8px; margin: 12px 0;
+    font-family: "Cascadia Code","Consolas",monospace; font-size: 13px; color: #cfe4ff;
+    overflow-x: auto; white-space: pre-wrap;
+  }
+
+  /* Поток этапов */
+  .flow { counter-reset: step; margin: 20px 0; }
+  .flow .step {
+    position: relative; padding: 14px 18px 14px 60px; margin: 0 0 4px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .flow .step::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 16px; top: 13px;
+    width: 28px; height: 28px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--panel-2); border: 1px solid #33506e; color: var(--accent);
+    font-weight: 700; font-size: 13px;
+  }
+  .flow .step.spine { border-left: 2px solid #2b4361; border-radius: 0; margin-left: 14px; padding-left: 46px; }
+  .flow .step.spine::before { left: 0px; top: 12px; }
+  .flow .step:last-child { border-bottom-left-radius: 0; }
+  .flow .step b { color: #fff; }
+  .flow .step .desc { color: var(--muted); font-size: 13px; }
+
+  .kv { display: grid; grid-template-columns: 180px 1fr; gap: 4px 16px; font-size: 13.5px; margin: 8px 0; }
+  .kv .k { color: var(--muted); }
+  .kv .v { color: var(--text); }
+
+  .callout {
+    border-radius: 10px; padding: 14px 18px; margin: 16px 0;
+    border: 1px solid var(--border); background: var(--panel-2);
+    font-size: 14px;
+  }
+  .callout.info { border-left: 3px solid var(--accent); }
+  .callout.warn { border-left: 3px solid var(--orange); }
+  .callout.danger { border-left: 3px solid var(--red); background: rgba(248,81,73,.06); }
+  .callout.good { border-left: 3px solid var(--green); background: rgba(63,185,80,.05); }
+  .callout b.title { display: block; margin-bottom: 4px; }
+
+  .tag { display:inline-block; font-size:11px; padding:1px 7px; border-radius:5px; background: var(--panel-2); border:1px solid var(--border); color: var(--muted); font-family: Consolas, monospace; margin-left:4px; }
+
+  .mode-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .mode-head .icon { font-size: 22px; }
+
+  .timeline { border-left: 2px solid var(--border); padding-left: 18px; margin-left: 6px; }
+  .timeline .t { position: relative; margin: 14px 0; }
+  .timeline .t::before {
+    content:''; position:absolute; left:-25px; top:6px; width:10px; height:10px;
+    border-radius:50%; background: var(--accent); box-shadow: 0 0 0 3px rgba(78,161,255,.15);
+  }
+  .timeline .t.red::before { background: var(--red); box-shadow: 0 0 0 3px rgba(248,81,73,.15); }
+
+  footer { margin-top: 70px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12.5px; }
+
+  .top-link { font-size: 12px; color: var(--muted); text-decoration: none; }
+  .top-link:hover { color: var(--accent); }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #2a3644; border-radius: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  @media (max-width: 820px) {
+    nav { display: none; }
+    main { padding: 24px 18px 60px; }
+    h1 { font-size: 25px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <nav id="toc">
+    <div class="brand">KNIFE</div>
+    <div class="sub">Bybit USDT-перпетуалы · сеточное усреднение</div>
+    <div class="group">Обзор</div>
+    <a href="#overview">Что делает бот</a>
+    <a href="#pipeline">Полный конвейер (этап 0→9)</a>
+    <a href="#monitor">Монитор памп/дамп</a>
+    <div class="group">Сигнал</div>
+    <a href="#pin">Пин-бар и уровень S/R</a>
+    <a href="#confirm">Подтверждение входа</a>
+    <a href="#trend">Трендовые фильтры</a>
+    <a href="#space">Пространство и RR</a>
+    <a href="#confidence">Уверенность сигнала</a>
+    <div class="group">Режимы</div>
+    <a href="#modes">Сравнение трёх режимов</a>
+    <a href="#scalp">Скальпинг (5m)</a>
+    <a href="#intraday">Интрадэй (15m)</a>
+    <a href="#swing">Долгосрок (4H)</a>
+    <div class="group">Позиция</div>
+    <a href="#grid">Усреднение (сетка)</a>
+    <a href="#partial">Частичные выходы</a>
+    <a href="#hardstop">Аварийный стоп (HARD SL)</a>
+    <a href="#validity">Валидатор разворота</a>
+    <a href="#time">Выход по времени</a>
+    <a href="#example">Пример сделки под цифрам</a>
+    <div class="group">Прочее</div>
+    <a href="#sync">Синхронизация и надёжность</a>
+    <a href="#params">Все настройки и приоритет</a>
+    <a href="#glossary">Глоссарий</a>
+  </nav>
+
+  <main>
+    <h1>Принцип работы торгового бота Knife</h1>
+    <p class="lead">Автоматический бот для USDT-перпетуалов на Bybit. Ловит резкие движения (памп/дамп), находит разворотные пин-бары у уровней поддержки/сопротивления и ведёт позицию по системе <b>сеточного усреднения со ступенчатым выходом</b>. Документ описывает каждый этап: от скрининга рынка до закрытия сделки.</p>
+
+    <div class="callout danger">
+      <b class="title">⚠ Бот торгует реальными средствами</b>
+      Все ордера — рыночные (Market) на реальном аккаунте Bybit. Неверные настройки размера позиции или шага сетки ведут к реальным потерям.
+    </div>
+
+    <!-- ================= OVERVIEW ================= -->
+    <h2 id="overview"><span class="num">1</span>Что делает бот (в двух словах)</h2>
+    <div class="grid c3">
+      <div class="card">
+        <span class="pill blue">ШАГ 1</span>
+        <h4>Находит движение</h4>
+        <p>Монитор цен смотрит за изменением цены в коротком окне и помечает памп (рост) или дамп (падение).</p>
+      </div>
+      <div class="card">
+        <span class="pill purple">ШАГ 2</span>
+        <h4>Ищет разворот</h4>
+        <p>На рабочем ТФ находит пин-бар у уровня S/R и ждёт подтверждения входа (close/BOS/retest).</p>
+      </div>
+      <div class="card">
+        <span class="pill green">ШАГ 3</span>
+        <h4>Ведёт позицию</h4>
+        <p>Открывает сделку. Если цена идёт против — усредняет по сетке. При возврате — выходит частями.</p>
+      </div>
+    </div>
+    <p>Идея проста: <b>не ловить нож на лету</b>, а дождаться, пока импульс выдохнется об уровень и появится разворотный сигнал. Затем пережить шум сеткой усреднений и забрать прибыль ступенчатыми выходами.</p>
+
+    <!-- ================= PIPELINE ================= -->
+    <h2 id="pipeline"><span class="num">2</span>Полный конвейер: от тика до сделки</h2>
+    <p>Главный цикл (каждые ~2 секунды) выполняет три функции подряд: поиск новых сигналов (<code>check_for_entries</code>), обновление открытых сделок (<code>update_open_trades</code>) и оценку валидности разворота. Ниже — каждый этап принятия сигнала по порядку.</p>
+
+    <div class="flow">
+      <div class="step"><b>Фильтр символов.</b> <span class="desc">Берутся только инструменты Bybit с максимальным плечом ≥ <code>min_leverage</code> (по умолчанию 10x) и оборотом за 24ч ≥ <code>min_turnover</code> (5 млн USDT). Список обновляется раз в час.</span></div>
+      <div class="step"><b>Тики цен по WebSocket.</b> <span class="desc">Для каждого символа хранится последняя цена и её таймстамп. Если цена устарела (&gt;300 сек) — символ пропускается.</span></div>
+      <div class="step"><b>Монитор памп/дамп.</b> <span class="desc">Сравнивает текущую цену с ценой N минут назад. Превышение порога режима → алерт-радар в UI (см. <a class="ref" href="#monitor">раздел 3</a>).</span></div>
+      <div class="step"><b>Тик прохода и лимит сделок.</b> <span class="desc">Проход по символам не чаще <code>scan_period_sec</code> режима. Если открыто <code>max_open_trades</code> сделок — новые сигналы не ищутся.</span></div>
+      <div class="step"><b>Индикаторы рабочего ТФ.</b> <span class="desc">Загружаются klines рабочего ТФ, считаются ATR(14) и кластерные уровни S/R. Нет ATR или уровней → символ пропускается.</span></div>
+      <div class="step"><b>Тренд якорного ТФ + старший фильтр.</b> <span class="desc">Определяется направление тренда якоря (живой бар) и, для скальпа, старшего 4H-тренда (см. <a class="ref" href="#trend">раздел 6</a>).</span></div>
+      <div class="step"><b>Поиск пин-баров с подтверждением.</b> <span class="desc">Ищутся свежие пин-бары у уровней в пределах последних 36 закрытых свечей; для каждого проверяется подтверждение в пределах 6 свечей после пина.</span></div>
+      <div class="step"><b>Фильтры.</b> <span class="desc">Тренд якоря → старший тренд (обязательный для скальпа) → пространство до цели и RR → уверенность ≥ порога → окно подтверждения не истекло. Подробно — разделы 5–8.</span></div>
+      <div class="step"><b>Открытие сделки.</b> <span class="desc">Проверка баланса → расчёт qty с учётом контрактных минимумов → Market-ордер на Bybit → запись сделки и истории со всей контекстной информацией (уверенность, RR, ATR, уровень).</span></div>
+    </div>
+
+    <div class="callout info">
+      <b class="title">Дедупликация сигналов</b>
+      Каждый пин-бар помечается по ключу <code>symbol_mode_pin_ts</code>. Пин «сжигается» (больше не проверяется), только когда его окно подтверждения истекло. Если пин отбросили «живые» фильтры (тренд, RR, уверенность) — он остаётся активным: рынок может измениться, и пин ещё станет валидным, пока окно не закрылось.
+    </div>
+
+    <!-- ================= MONITOR ================= -->
+    <h2 id="monitor"><span class="num">3</span>Монитор памп/дамп (радар)</h2>
+    <p>Монитор — это отдельный фоновый цикл (каждые 2 сек), который формирует «сырые» алерты о резких движениях. Это ещё <b>не сделка</b> — это радар-сигнал, к которому привязывается ожидание закрытия свечи рабочего ТФ.</p>
+    <div class="formula">change = (price_now / price_N_минут_назад) − 1
+если |change| ≥ monitor_threshold  →  алерт PUMP (рост) / DUMP (падение)</div>
+    <table>
+      <tr><th>Режим</th><th class="num">Порог</th><th class="num">Окно</th><th>Смысл</th></tr>
+      <tr><td>Скальпинг</td><td class="num">0.3 %</td><td class="num">5 мин</td><td>чувствительный — быстрые движения</td></tr>
+      <tr><td>Интрадэй</td><td class="num">0.5 %</td><td class="num">60 мин</td><td>стандартный</td></tr>
+      <tr><td>Долгосрок</td><td class="num">1.0 %</td><td class="num">240 мин</td><td>фильтр шума — только сильные движения</td></tr>
+    </table>
+    <p>Алерт дедуплицируется (не чаще раза в 10 минут по символу) и получает поля ожидания: какой свечи рабочего ТФ ждёт бот (<code>wait_tf_label</code>), когда она откроется и когда истечёт окно подтверждения. UI рисует по ним обратный отсчёт — так видно «бот смотрит на формирующуюся 5m/15m/4H свечу».</p>
+
+    <!-- ================= PIN ================= -->
+    <h2 id="pin"><span class="num">4</span>Пин-бар и уровень S/R</h2>
+    <p>Пин-бар — это свеча с длинной тенью и маленьким телом: цена сходила в сторону, но её отвергли и вернули. Это след «борьбы» на уровне.</p>
+    <h3>Условия пин-бара</h3>
+    <div class="grid c2">
+      <div class="card">
+        <h4>Геометрия свечи</h4>
+        <ul>
+          <li><b>Длинная тень:</b> нижняя тень (для LONG) или верхняя (для SHORT) составляет ≥ <code>pin_shadow_frac</code> полного диапазона свечи (0.60–0.66 по режимам).</li>
+          <li><b>Маленькое тело:</b> тело ≤ 34 % диапазона — иначе это импульс, а не отвержение.</li>
+          <li><b>Диапазон свечи:</b> не меньше <code>max(move_pct_min, move_atr_mult × ATR%)</code> — отсекаем тихий шум.</li>
+          <li><b>Объём:</b> объём пина ≥ 0.5 × среднего за 20 свечей — пин без объёма подозрителен.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h4>Контакт с уровнем S/R</h4>
+        <p>Уровни строятся автоматически: ищутся локальные экстремумы (pivot window = 3 свечи), склеиваются в кластеры с допуском 0.35 %, требуют минимум 2 касания.</p>
+        <ul>
+          <li>Тень пина (экстремум) должна доставать уровень в пределах <code>shadow_lookback_atr × ATR</code> (0.5–1.2 ATR).</li>
+          <li>Для LONG уровень должен быть <b>ниже</b> текущей цены (это поддержка), для SHORT — <b>выше</b> (сопротивление).</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout info">
+      <b class="title">Скользящий ATR</b>
+      ATR(14) считается по Вилду и только по <b>закрытым</b> свечам (последняя незакрытая исключается). ATR переводит «шум» в универсальную единицу: шаг сетки, допуск уровня, размер стопа — всё привязано к ATR рабочего ТФ, поэтому бот адаптируется к волатильности любой монеты.
+    </div>
+
+    <!-- ================= CONFIRM ================= -->
+    <h2 id="confirm"><span class="num">5</span>Подтверждение входа (3 способа)</h2>
+    <p>Само по себе пин-бар — только кандидат. Вход разрешён, если в течение 6 свечей после пина появилось <b>любое из трёх</b> подтверждений:</p>
+    <div class="grid c3">
+      <div class="card"><span class="pill blue">close</span><h4>Закрытие за телом</h4><p>Свеча закрылась выше тела пина (для LONG) / ниже (для SHORT). Простое и частое подтверждение.</p></div>
+      <div class="card"><span class="pill purple">bos</span><h4>Break of Structure</h4><p>Закрытие за локальным экстремумом соседних 4 свечей вокруг пина — слом микроструктуры. Считается самым надёжным.</p></div>
+      <div class="card"><span class="pill yellow">retest</span><h4>Ретест тени</h4><p>Цена снова коснулась 50 % тени пина и отверглась (закрытие в сторону сделки). Ложный ретест отсекается.</p></div>
+    </div>
+    <h3>Окно подтверждения</h3>
+    <p>Отсчёт ведётся не от открытия пин-свечи, а от <b>закрытия свечи-подтверждения</b> (<code>confirm_ts</code>). Иначе BOS/retest на 4–6-й свече после пина физически не успевали пройти фильтр. Дедлайн = <code>confirm_ts + confirm_window_sec</code> режима:</p>
+    <table>
+      <tr><th>Режим</th><th class="num">Окно подтверждения</th><th>Обоснование</th></tr>
+      <tr><td>Скальпинг</td><td class="num">900 с (~3 × 5m)</td><td>быстро, но хватает на несколько свечей</td></tr>
+      <tr><td>Интрадэй</td><td class="num">1800 с (~2 × 15m)</td><td>чуть больше времени на подтверждение</td></tr>
+      <tr><td>Долгосрок</td><td class="num">7200 с (~2 × 4H)</td><td>медленный темп сделок</td></tr>
+    </table>
+
+    <!-- ================= TREND ================= -->
+    <h2 id="trend"><span class="num">6</span>Трендовые фильтры</h2>
+    <p>Бот использует <b>два</b> уровня трендовой проверки, чтобы не торговать против рынка (особенно важно при усреднении — цена должна возвращаться по тренду).</p>
+
+    <h3>6.1 Тренд якоря (обязательное совпадение направления)</h3>
+    <p>Тренд якорного ТФ считается функцией <code>trend_by_closes</code> по MA(9)/MA(26) и направлению гистограммы MACD:</p>
+    <div class="formula">slope = (MA9 − MA26) / MA26 × 100
+rising  = растёт гистограмма MACD     falling = падает
+up   →  slope &gt; +0.15  и rising
+down →  slope &lt; −0.15  и falling
+иначе → flat (направления нет)</div>
+    <ul>
+      <li>Тренд <b>up</b> пропускает только LONG, <b>down</b> — только SHORT.</li>
+      <li><b>flat</b> — даёт пройти, но снижает уверенность (нейтральный рынок допустим).</li>
+      <li>Используется <b>живой</b> (ещё не закрытый) бар якоря — не ждём закрытия 1H/1D. Сила тренда умножается на долю прошедшего бара.</li>
+    </ul>
+
+    <h3>6.2 Старший тренд (обязателен для скальпа — 4H)</h3>
+    <p>У скальпа есть дополнительный фильтр по старшему ТФ (<code>trend_required = True</code>):</p>
+    <ul>
+      <li>Старший тренд <b>flat → вход запрещён</b> (нет направления — нельзя рассчитывать на возврат).</li>
+      <li>Старший тренд <b>против</b> стороны сделки → вход запрещён.</li>
+      <li>Логика: если скальп не ушёл в плюс сразу, при усреднении цена с большей вероятностью вернётся по старшему тренду.</li>
+    </ul>
+    <div class="callout warn">
+      <b class="title">Каскад трендов для скальпа</b>
+      Сигнал LONG на 5m должен совпасть с трендом <b>1H вверх</b> (якорь) и <b>4H вверх</b> (старший). Интрадэй и долгосрок проверяют только якорь (1H / 1D).
+    </div>
+
+    <!-- ================= SPACE ================= -->
+    <h2 id="space"><span class="num">7</span>Пространство и Risk/Reward</h2>
+    <p>Даже сильный пин не входим, если перед ценой нет места до цели — комиссии съедят прибыль.</p>
+    <h3>Цель (take-profit ориентир)</h3>
+    <ul>
+      <li><b>Есть уровень впереди</b> (в пределах 15 %): цель — этот ближайший уровень S/R. Дополнительно защита: если уровень ближе 0.8 ATR к цене (слишком близкая цель), расстояние искусственно растягивается до 1.2 ATR.</li>
+      <li><b>Нет уровня</b>: цель = <code>3 × ATR</code> для скальпа, <code>5 × ATR</code> для интрадэя/долгосрока.</li>
+    </ul>
+    <h3>Стоп (расчётный, не биржевой)</h3>
+    <p>Стоп ставится за экстремумом тени пина, но не ближе <code>stop_min_atr × ATR</code> — иначе он стоит в рыночном шуме и выбивается на каждом тике:</p>
+    <div class="formula">stop_distance = |price − extreme|
+stop_distance = max(stop_distance, stop_min_atr × ATR)
+stop_pct      = stop_distance / price × 100</div>
+    <h3>Risk/Reward</h3>
+    <div class="formula">RR = dist_to_target_pct / stop_pct
+вход разрешён, только если RR ≥ space_rr_min режима</div>
+    <table>
+      <tr><th>Режим</th><th class="num">RR min</th><th class="num">stop_min_atr</th><th>Комментарий</th></tr>
+      <tr><td>Скальпинг</td><td class="num">1.8</td><td class="num">0.4</td><td>при комиссиях меньший RR — отрицательное матожидание</td></tr>
+      <tr><td>Интрадэй</td><td class="num">1.5</td><td class="num">0.6</td><td>—</td></tr>
+      <tr><td>Долгосрок</td><td class="num">1.5</td><td class="num">1.0</td><td>стоп шире — меньше ложных выбиваний</td></tr>
+    </table>
+
+    <!-- ================= CONFIDENCE ================= -->
+    <h2 id="confidence"><span class="num">8</span>Уверенность сигнала (score)</h2>
+    <p>Каждый пин получает композитный балл 0..1. Сумма компонентов = 1.0:</p>
+    <table>
+      <tr><th>Фактор</th><th class="num">Макс. вес</th><th>Как считается</th></tr>
+      <tr><td>Длина тени</td><td class="num">0.30</td><td>min(тень/диапазон ÷ 0.85, 1) × 0.30</td></tr>
+      <tr><td>Объём пина</td><td class="num">0.15</td><td>min(объём/средний ÷ 2, 1) × 0.15</td></tr>
+      <tr><td>Сила уровня S/R</td><td class="num">0.15</td><td>сила кластера (касания + свежесть)</td></tr>
+      <tr><td>Тренд якоря</td><td class="num">0.25</td><td>by trend: 0.15 + сила×0.10; flat = 0.10; против = 0</td></tr>
+      <tr><td>RR</td><td class="num">0.15</td><td>min(RR ÷ (2×RR_min), 1) × 0.15</td></tr>
+      <tr><td>Тип подтверждения</td><td class="num">0.10</td><td>close/bos = 0.10, retest = 0.07</td></tr>
+      <tr><td>Волатильность (бонус/штраф)</td><td class="num">±0.10</td><td>по ATR% и режиму — см. ниже</td></tr>
+    </table>
+    <h3>Поправка на волатильность</h3>
+    <div class="grid c3">
+      <div class="card"><h4>Скальпинг</h4><p>ATR &lt; 0.08 % → −0.08 (тишина, цель не пробегает).<br>0.08–1.2 % → +0.05 (оптимум).<br>&gt; 2.5 % → −0.05 (слишком бурно, стоп выбивается).</p></div>
+      <div class="card"><h4>Интрадэй</h4><p>ATR &lt; 0.2 % → −0.06.<br>0.4–2.5 % → +0.04.</p></div>
+      <div class="card"><h4>Долгосрок</h4><p>ATR ≥ 0.8 % → +0.04.</p></div>
+    </div>
+    <p><b>Порог входа</b> — приоритет: конфиг монеты &gt; глобальные настройки &gt; порог режима. Мин. уверенность по режимам: <span class="pill blue">скальп 0.52</span> <span class="pill purple">интрадэй 0.70</span> <span class="pill green">долгосрок 0.60</span>. Меньше порога — сигнал отбрасывается.</p>
+
+    <!-- ================= MODES ================= -->
+    <h2 id="modes"><span class="num">9</span>Сравнение трёх режимов</h2>
+    <table>
+      <tr>
+        <th>Параметр</th><th>Скальпинг</th><th>Интрадэй</th><th>Долгосрок</th>
+      </tr>
+      <tr><td>Рабочий ТФ (поиск пина)</td><td>5m</td><td>15m</td><td>4H</td></tr>
+      <tr><td>Якорный ТФ (тренд)</td><td>1H (живой)</td><td>1H (живой)</td><td>1D</td></tr>
+      <tr><td>Старший фильтр</td><td><span class="warn">4H (обязателен)</span></td><td>—</td><td>—</td></tr>
+      <tr><td>Окно подтверждения</td><td>900 с</td><td>1800 с</td><td>7200 с</td></tr>
+      <tr><td>Период сканирования</td><td>20 с</td><td>60 с</td><td>300 с</td></tr>
+      <tr><td>Мин. уверенность</td><td>0.52</td><td>0.70</td><td>0.60</td></tr>
+      <tr><td>Доля тени пина</td><td>0.60</td><td>0.66</td><td>0.62</td></tr>
+      <tr><td>Мин. диапазон свечи</td><td>1.0 ATR / 0.3 %</td><td>1.4 ATR / 0.9 %</td><td>1.2 ATR / 2.0 %</td></tr>
+      <tr><td>Допуск уровня</td><td>0.5 ATR</td><td>1.0 ATR</td><td>1.2 ATR</td></tr>
+      <tr><td>RR min</td><td>1.8</td><td>1.5</td><td>1.5</td></tr>
+      <tr><td>Стоп min</td><td>0.4 ATR</td><td>0.6 ATR</td><td>1.0 ATR</td></tr>
+      <tr><td>Шаг сетки (база)</td><td>1.2 %</td><td>1.3 %</td><td>3.5 %</td></tr>
+      <tr><td>Шаг сетки (ATR)</td><td>1.0 ATR</td><td>1.0 ATR</td><td>1.2 ATR</td></tr>
+      <tr><td>Рост шага сетки</td><td>×1.5 / шаг</td><td>×1.6 / шаг</td><td>×2.0 / шаг</td></tr>
+      <tr><td>Первый выход (цель)</td><td>0.9 %</td><td>2.6 %</td><td>9.0 %</td></tr>
+      <tr><td>Рост цели выхода</td><td>×1.3 / шаг (≥1.0 ATR)</td><td>×1.4 / шаг (≥1.5 ATR)</td><td>×1.6 / шаг (≥2.0 ATR)</td></tr>
+      <tr><td>Макс. усреднений</td><td>4</td><td>4</td><td>6</td></tr>
+      <tr><td>Макс. удержание</td><td>8 ч</td><td>72 ч</td><td>672 ч (28 д)</td></tr>
+    </table>
+
+    <!-- ================= SCALP ================= -->
+    <h2 id="scalp"><span class="num">10</span>Режим «Скальпинг» (5m / якорь 1H)</h2>
+    <div class="mode-head"><span class="icon">⚡</span><span class="pill blue">Быстрые сделки · высокий риск</span></div>
+    <p><b>Философия:</b> много коротких сделок на откатах от уровней, ставка на возврат цены по старшему тренду. Комиссии критичны — поэтому RR ≥ 1.8 и шаг сетки не мельче ~1 ATR, чтобы шум не прожимал сетку за минуту.</p>
+    <h3>Условия входа LONG (зеркально для SHORT)</h3>
+    <ol>
+      <li>Свеча 5m — пин-бар: нижняя тень ≥ 60 % диапазона, тело ≤ 34 %, диапазон ≥ max(1 ATR, 0.3 %), объём ≥ 0.5× среднего.</li>
+      <li>Тень достаёт поддержку S/R в пределах 0.5 ATR.</li>
+      <li>Подтверждение close / BOS / retest в течение 6 свечей; окно не старше 900 с.</li>
+      <li>Тренд 1H — <b>up</b> или flat; тренд 4H — строго <b>up</b> (flat запрещён).</li>
+      <li>Цель до уровня ≥ 1.8 × стопа (стоп ≥ 0.4 ATR).</li>
+      <li>Уверенность ≥ 0.52 (плюс бонус за ATR 0.08–1.2 %).</li>
+    </ol>
+    <h3>Сетка и выходы</h3>
+    <div class="kv">
+      <div class="k">Шаг усреднения</div><div class="v">max(1.2 %, 1.0 ATR) → далее ×1.5: <b>1.2 % → 1.8 % → 2.7 % → 4.05 %</b> (4 шага)</div>
+      <div class="k">Первый выход</div><div class="v">0.9 % от средней (но не меньше 1.0 ATR), далее ×1.3 на каждом шаге выхода</div>
+      <div class="k">Доля выхода</div><div class="v">50 % позиции за ступень (по умолчанию)</div>
+      <div class="k">Удержание</div><div class="v">8 часов, затем выход по времени</div>
+    </div>
+
+    <!-- ================= INTRADAY ================= -->
+    <h2 id="intraday"><span class="num">11</span>Режим «Интрадэй» (15m / якорь 1H)</h2>
+    <div class="mode-head"><span class="icon">📊</span><span class="pill purple">Баланс риска и прибыли · режим по умолчанию</span></div>
+    <p><b>Философия:</b> торгуем внутри дня на 15m, якорь — живой часовой тренд. Более строгие пороги, чем у скальпа, но без перегруза старшим фильтром — сделок больше, чем в долгосроке.</p>
+    <h3>Условия входа LONG (зеркально для SHORT)</h3>
+    <ol>
+      <li>Пин-бар 15m: тень ≥ 66 % диапазона, диапазон ≥ max(1.4 ATR, 0.9 %), объём ≥ 0.5×.</li>
+      <li>Контакт с уровнем в пределах 1.0 ATR.</li>
+      <li>Подтверждение в течение 6 свечей; окно не старше 1800 с.</li>
+      <li>Тренд 1H — up или flat (жёсткого старшего фильтра нет).</li>
+      <li>RR ≥ 1.5 (стоп ≥ 0.6 ATR).</li>
+      <li>Уверенность ≥ 0.70.</li>
+    </ol>
+    <h3>Сетка и выходы</h3>
+    <div class="kv">
+      <div class="k">Шаг усреднения</div><div class="v">max(1.3 %, 1.0 ATR) → ×1.6: <b>1.3 % → 2.08 % → 3.33 % → 5.32 %</b> (4 шага)</div>
+      <div class="k">Первый выход</div><div class="v">2.6 % от средней (≥ 1.5 ATR), далее ×1.4</div>
+      <div class="k">Доля выхода</div><div class="v">50 % за ступень</div>
+      <div class="k">Удержание</div><div class="v">72 часа, затем выход по времени</div>
+    </div>
+
+    <!-- ================= SWING ================= -->
+    <h2 id="swing"><span class="num">12</span>Режим «Долгосрок» (4H / якорь 1D)</h2>
+    <div class="mode-head"><span class="icon">🐢</span><span class="pill green">Редкие сделки · крупные цели · ниже риск</span></div>
+    <p><b>Философия:</b> единственный режим, где оправдан дневной якорь — позиции живут дни, и ожидание закрытия дневного бара часть цикла. Широкая сетка, большие ступени выхода, максимум времени на разворот.</p>
+    <h3>Условия входа LONG (зеркально для SHORT)</h3>
+    <ol>
+      <li>Пин-бар 4H: тень ≥ 62 %, диапазон ≥ max(1.2 ATR, 2.0 %), объём ≥ 0.5×.</li>
+      <li>Контакт с уровнем в пределах 1.2 ATR.</li>
+      <li>Подтверждение в течение 6 свечей; окно не старше 7200 с.</li>
+      <li>Тренд 1D — up или flat.</li>
+      <li>RR ≥ 1.5 (стоп ≥ 1.0 ATR).</li>
+      <li>Уверенность ≥ 0.60.</li>
+    </ol>
+    <h3>Сетка и выходы</h3>
+    <div class="kv">
+      <div class="k">Шаг усреднения</div><div class="v">max(3.5 %, 1.2 ATR) → ×2.0: <b>3.5 % → 7 % → 14 % → 28 % → 56 % → 112 %</b> (6 шагов)</div>
+      <div class="k">Первый выход</div><div class="v">9.0 % от средней (≥ 2.0 ATR), далее ×1.6</div>
+      <div class="k">Доля выхода</div><div class="v">50 % за ступень</div>
+      <div class="k">Удержание</div><div class="v">672 часа (28 дней)</div>
+    </div>
+
+    <!-- ================= GRID ================= -->
+    <h2 id="grid"><span class="num">13</span>Усреднение (сетка)</h2>
+    <p>После открытия сделки, если цена идёт против позиции, бот докупает по сетке, понижая среднюю цену входа. Усреднение увеличивает объём и маржу, приближая точку безубытка к цене.</p>
+
+    <h3>Когда срабатывает усреднение</h3>
+    <div class="formula">LONG:  price ≤ avg_entry × (1 − step_pct / 100)
+SHORT: price ≥ avg_entry × (1 + step_pct / 100)
+при условии  grid_step &lt; max_steps</div>
+
+    <h3>Шаг сетки</h3>
+    <p>Шаг пересчитывается на каждом уровне от <b>текущей средней</b> цены:</p>
+    <div class="formula">step_pct = max(база_режима_% , ATR% × grid_step_atr)
+где ATR% = ATR(14 рабочего ТФ) / цена × 100
+override из конфига монеты/настроек — нижняя граница «%»</div>
+    <p>Затем к <b>уже сработавшему</b> шагу применяется множитель роста (<code>grid_step_multiplier</code>) — отступы растут, чтобы ловить реальные откаты, а не микроколебания. На практике удобнее сравнить с предпросмотром сетки в UI (там тот же расчёт).</p>
+
+    <h3>Размер добавляемой позиции</h3>
+    <div class="formula">add_size = max(6 USDT, position_size_grid)
+если grid_size_multiplier &gt; 1:
+    add_size = add_size × mult^grid_step   ← объём растёт с каждым шагом</div>
+    <p>Каждое усреднение — реальный Market-ордер. После исполнения:</p>
+    <ul>
+      <li><code>total_qty += add_qty</code>, <code>grid_step += 1</code>;</li>
+      <li>пересчитывается средняя: <code>avg = (avg·old_qty + price·add_qty) / new_qty</code>;</li>
+      <li>к <code>entry_fee</code> добавляется комиссия усреднения;</li>
+      <li>начиная с 3-го усреднения счётчик ступеней выхода сбрасывается (<code>exit_step = 0</code>) — чтобы цели выхода заново отстроились от новой (более низкой) средней.</li>
+    </ul>
+
+    <div class="callout warn">
+      <b class="title">Проверка валидности перед усреднением</b>
+      Если включён <code>check_validity_before_grid</code> и разворот «покраснел» (структурный слом) — бот закрывает позицию целиком вместо усреднения. Иначе усредняет, спасая среднюю.
+    </div>
+
+    <!-- ================= PARTIAL ================= -->
+    <h2 id="partial"><span class="num">14</span>Частичные выходы (ступенчатые)</h2>
+    <p>Когда цена возвращается к средней в плюс, бот выходит <b>частями</b> — фиксирует прибыль, оставляя часть позиции на продолжение.</p>
+
+    <h3>Цель выхода текущей ступени</h3>
+    <div class="formula">target_pct = база_режима × exit_mult^exit_step
+если задана ATR-привязка: target_pct = max(target_pct, ATR% × exit_step_atr × (1 + exit_step×0.35))
+если при входе была SR-цель (dist_target_pct): target_pct ограничен
+      min(max(SR-цель, target_pct), SR-цель × 1.25)</div>
+    <p>Смысл: первые ступени скромные, но каждая следующая — заметно больше, чтобы оставшаяся часть дольше бежала за прибылью. SR-цель, измеренная при входе, задаёт «потолок», чтобы не ждать слишком далеко за уровнем.</p>
+
+    <h3>Логика выхода</h3>
+    <div class="flow">
+      <div class="step"><b>Условие срабатывания.</b> <span class="desc">Текущий процент прибыли от средней ≥ <code>target_pct</code> (или истекло время удержания).</span></div>
+      <div class="step"><b>Полное или частичное?</b> <span class="desc">Полное закрытие, если: достигнут лимит <code>exit_max_steps</code>; остаток меньше минимального лота; доля выхода × цена &lt; 1 USDT. Иначе — частичное.</span></div>
+      <div class="step"><b>PARTIAL_CLOSE.</b> <span class="desc">Закрывается <code>exit_contract_pct</code> (по умолчанию 50 %) объёма reduce-only ордером. <code>exit_step += 1</code>, <code>grid_step = 0</code> (сетка перезапускается для остатка), средняя цена сбрасывается на цену выхода. PnL-часть фиксируется в <code>realized_pnl</code>.</span></div>
+      <div class="step"><b>FULL_CLOSE.</b> <span class="desc">Закрывается весь остаток. Статус сделки → CLOSED, <code>closed_at</code> проставляется.</span></div>
+      <div class="step"><b>Учёт комиссий.</b> <span class="desc">Из результата каждой части вычитается её доля entry_fee и комиссия выхода (<code>fee_pct</code> по умолчанию 0.055 %). Реализованный PnL только прибавляется.</span></div>
+    </div>
+
+    <div class="callout info">
+      <b class="title">Перезапуск сетки после выхода</b>
+      После частичного выхода <code>grid_step</code> сбрасывается в 0 — сетка снова строится от новой (прибыльной) средней. Это позволяет выходить ещё раз, если рынок откатился обратно.
+    </div>
+
+    <!-- ================= HARD STOP ================= -->
+    <h2 id="hardstop"><span class="num">15</span>Аварийный стоп (HARD SL)</h2>
+    <p>Это не «паника на испуге», а фиксация проигранного тезиса. Срабатывает, только если совпали <b>все</b> условия:</p>
+    <div class="grid c3">
+      <div class="card"><h4>1. Сетка исчерпана</h4><p><code>grid_step ≥ max_steps</code> — все усреднения сделаны.</p></div>
+      <div class="card"><h4>2. Структурное пробитие</h4><p>Цена прошла за последним уровнем сетки ещё один полный шаг (не шум у последнего уровня).</p></div>
+      <div class="card"><h4>3. Тезис мёртв</h4><p>Разворот структурно «красный» <b>ИЛИ</b> сделка живёт дольше 1.5 × <code>hold_max_hours</code>.</p></div>
+    </div>
+    <div class="formula">last_level = avg × (1 − step%) для LONG / (1 + step%) для SHORT
+breached   = цена прошла ещё один шаг за last_level
+overdue    = возраст ≥ 1.5 × hold_max_hours
+если breached и (status == red или overdue) → FULL_CLOSE</div>
+    <p>Так бот отсекает хвостовые потери (висящие сутками ноги), но нормально переживает просадки внутри сетки.</p>
+
+    <!-- ================= VALIDITY ================= -->
+    <h2 id="validity"><span class="num">16</span>Валидатор разворота (green / orange / red)</h2>
+    <p>Пока сделка открыта, бот периодически оценивает, «жив» ли ещё разворот. Это светофор актуальности:</p>
+    <ul>
+      <li><span class="pill green">green</span> — разворот актуален, продолжение безопасно;</li>
+      <li><span class="pill orange">orange</span> — сомнительно, есть противодавление (тревога, но не повод закрывать);</li>
+      <li><span class="pill red">red</span> — разворот потерян, только красный является триггером закрытия.</li>
+    </ul>
+
+    <h3>Мягкие факторы (только score → green/orange)</h3>
+    <p>Цена относительно MA рабочего ТФ и старшего ТФ, доля бычьих/медвежьих свечей, объём на свече, направление старшего тренда, позиция закрытия в диапазоне свечи. Они меняют score (0..1), но <b>не ставят red</b> — только смещают между green и orange.</p>
+
+    <h3>Структурный red — 4 проверки (для LONG, зеркально для SHORT)</h3>
+    <table>
+      <tr><th>Проверка</th><th>Условие</th></tr>
+      <tr><td>1. Новый минимум</td><td>мин. low за 10 закрытых свечей ниже средней на ≥ порога: скальп 1.0 % / интрадэй 1.5 % / свинг 2.5 %, но не меньше 2.5 × ATR%.</td></tr>
+      <tr><td>2. Без отскока</td><td>все последние N закрытых свечей закрылись ниже средней (N = 2, для свинга — 2 часа в барах).</td></tr>
+      <tr><td>3. Объём пробоя</td><td>объём свечи-пробойника ≥ 1.3 × среднего за окно.</td></tr>
+      <tr><td>4. Цена под средней</td><td>текущая цена ниже средней более чем на 1 %.</td></tr>
+    </table>
+    <p><b>Cooldown:</b> red запрещён первые N времени после входа: скальп — 45 мин, интрадэй — 3 ч, свинг — 6 ч. ТФ валидации = рабочий ТФ режима сделки (5m/15m/4H), не захардкоженные часы.</p>
+    <div class="callout danger">
+      <b class="title">Что делает red</b>
+      При <code>check_validity_before_grid = true</code> и срабатывании усреднения при красном — позиция закрывается целиком (reason = структурный слом). Также red + структурное пробитие исчерпанной сетки = HARD SL (раздел 15).
+    </div>
+
+    <!-- ================= TIME ================= -->
+    <h2 id="time"><span class="num">17</span>Выход по времени</h2>
+    <p>Если сделка не достигла цели за <code>hold_max_hours</code> режима — бот закрывает её по рынку (через ступенчатую логику: если остаток делится — частично, иначе полностью):</p>
+    <table>
+      <tr><th>Режим</th><th class="num">Лимит времени</th><th class="num">HARD SL после</th></tr>
+      <tr><td>Скальпинг</td><td class="num">8 ч</td><td class="num">12 ч (×1.5)</td></tr>
+      <tr><td>Интрадэй</td><td class="num">72 ч</td><td class="num">108 ч</td></tr>
+      <tr><td>Долгосрок</td><td class="num">672 ч</td><td class="num">1008 ч</td></tr>
+    </table>
+    <p>Цель: не держать «зависшие» позиции бесконечно, освобождать маржу и слот под новые сделки.</p>
+
+    <!-- ================= EXAMPLE ================= -->
+    <h2 id="example"><span class="num">18</span>Пример сделки под цифрам (скальпинг LONG)</h2>
+    <div class="timeline">
+      <div class="t"><b>1. Монитор.</b> Цена упала на 0.35 % за 5 минут → алерт DUMP, бот начинает смотреть 5m.</div>
+      <div class="t"><b>2. Пин-бар.</b> На 5m свеча с нижней тенью 70 % диапазона, диапазон 1.1 ATR, тень достаёт поддержку (class cluster 3 касания).</div>
+      <div class="t"><b>3. Подтверждение.</b> Следующая 5m свеча закрылась выше тела пина → тип <code>close</code>, окно не истекло.</div>
+      <div class="t"><b>4. Фильтры.</b> 1H тренд up, 4H тренд up, RR 2.1 ≥ 1.8, уверенность 0.63 ≥ 0.52 → вход.</div>
+      <div class="t"><b>5. Вход.</b> Market-ордер на ~6 USDT @ 1.0000, плечо 10x, avg = 1.0000.</div>
+      <div class="t red"><b>6. Цена против.</b> Упала до 0.9880 (−1.2 %) → шаг сетки 1.2 % → усреднение +6 USDT. Новая avg ≈ 0.9940, grid_step = 1.</div>
+      <div class="t red"><b>7. Ещё против.</b> До 0.9760 → шаг 1.8 % → усреднение. avg ≈ 0.9860, grid_step = 2.</div>
+      <div class="t"><b>8. Возврат.</b> Цена вернулась к 0.9959 (+1.0 % от средней) → цель выхода 0.9 % → PARTIAL_CLOSE 50 %.</div>
+      <div class="t"><b>9. Дальше.</b> grid_step = 0, цель следующего выхода = 0.9 % × 1.3 = 1.17 % от новой средней. Если цена падает снова — сетка отработает от новой средней.</div>
+      <div class="t"><b>10. Финал.</b> Цена растёт дальше до +1.17 % → частичный/полный выход. Сделка закрывается, PnL фиксируется, слот освобождается.</div>
+    </div>
+
+    <!-- ================= SYNC ================= -->
+    <h2 id="sync"><span class="num">19</span>Синхронизация и надёжность</h2>
+    <ul>
+      <li><b>Синхронизация с биржей</b> (при старте и раз в 60 с): бот подхватывает позиции, открытые/усреднённые/закрытые <i>вне</i> бота. Новая позиция на Bybit без записи в БД → создаётся Trade; закрытая на бирже → статус CLOSED с реальной ценой и closed-pnl.</li>
+      <li><b>Лечение «зависших» сделок</b>: если история не обновлялась &gt; 180 с, а тик свежий — принудительно пишется SNAPSHOT и пересчитывается PnL.</li>
+      <li><b>Кеш klines</b> (TTL 25 с) + лимит одновременных запросов (5) — защита от rate-limit Bybit. При сбое REST — используется прошлый кеш, сделка не «зависает».</li>
+      <li><b>Приоритет свечей</b>: открытые сделки грузят свои ТФ первыми, чтобы валидатор и сетка работали на свежих данных.</li>
+      <li><b>Недостаток маржи</b>: сигнал не «сжигается» — он регистрируется как радар с причиной «мало маржи», и бот попробует снова.</li>
+    </ul>
+
+    <!-- ================= PARAMS ================= -->
+    <h2 id="params"><span class="num">20</span>Все настройки и приоритет</h2>
+    <p>Параметры применяются с приоритетом: <b>конфиг монеты &gt; глобальные настройки &gt; параметры режима</b>. Если в конфиге 0 — берётся глобальное, если и там 0 — значение режима.</p>
+    <table>
+      <tr><th>Настройка</th><th>Где</th><th>Что определяет</th></tr>
+      <tr><td><code>trade_mode</code></td><td>глоб.</td><td>режим для НОВЫХ сигналов (старые дорабатывают свой)</td></tr>
+      <tr><td><code>max_open_trades</code></td><td>глоб.</td><td>лимит одновременных сделок (по умолчанию 5)</td></tr>
+      <tr><td><code>position_size_entry</code></td><td>cfg/глоб.</td><td>размер позиции при входе, USDT (мин. 6)</td></tr>
+      <tr><td><code>position_size_grid</code></td><td>cfg/глоб.</td><td>размер добавляемой позиции при усреднении</td></tr>
+      <tr><td><code>grid_size_multiplier</code></td><td>cfg/глоб.</td><td>рост объёма усреднения по шагам</td></tr>
+      <tr><td><code>grid_step_pct</code> / <code>grid_step_multiplier</code></td><td>cfg/глоб/режим</td><td>шаг сетки и его рост</td></tr>
+      <tr><td><code>max_steps</code></td><td>cfg/глоб/режим</td><td>макс. число усреднений</td></tr>
+      <tr><td><code>initial_exit_pct</code> / <code>exit_step_multiplier</code></td><td>cfg/глоб/режим</td><td>цель первого выхода и рост цели</td></tr>
+      <tr><td><code>exit_contract_pct</code></td><td>cfg/глоб</td><td>доля объёма на частичный выход (по умолч. 50 %)</td></tr>
+      <tr><td><code>exit_max_steps</code></td><td>глоб.</td><td>лимит ступеней выхода (0 = без ограничения)</td></tr>
+      <tr><td><code>min_confidence</code></td><td>cfg/глоб/режим</td><td>нижний порог уверенности</td></tr>
+      <tr><td><code>check_validity_before_grid</code></td><td>глоб.</td><td>закрывать по red вместо усреднения</td></tr>
+      <tr><td><code>fee_pct</code></td><td>глоб.</td><td>taker-комиссия, % (по умолч. 0.055)</td></tr>
+      <tr><td><code>min_leverage</code> / <code>min_turnover</code></td><td>глоб.</td><td>фильтр символов (плечо и оборот)</td></tr>
+    </table>
+
+    <!-- ================= GLOSSARY ================= -->
+    <h2 id="glossary"><span class="num">21</span>Глоссарий</h2>
+    <div class="grid c2">
+      <div class="card">
+        <div class="kv">
+          <div class="k">Пин-бар</div><div class="v">свеча с длинной тенью и малым телом — след отвержения уровня</div>
+          <div class="k">Рабочий ТФ</div><div class="v">где ищем пин-бар (5m / 15m / 4H)</div>
+          <div class="k">Якорный ТФ</div><div class="v">где определяем тренд (1H / 1D)</div>
+          <div class="k">Старший фильтр</div><div class="v">обязательный 4H-тренд для скальпа</div>
+          <div class="k">ATR</div><div class="v">средний истинный диапазон; единица волатильности</div>
+          <div class="k">S/R</div><div class="v">уровни поддержки/сопротивления (кластеры пивотов)</div>
+          <div class="k">RR</div><div class="v">Risk/Reward: расстояние до цели ÷ до стопа</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="kv">
+          <div class="k">close / bos / retest</div><div class="v">три типа подтверждения входа</div>
+          <div class="k">Усреднение (grid)</div><div class="v">докупка против движения для снижения средней</div>
+          <div class="k">exit_step</div><div class="v">номер ступени частичного выхода</div>
+          <div class="k">Validity</div><div class="v">светофор актуальности разворота</div>
+          <div class="k">HARD SL</div><div class="v">аварийный стоп при исчерпании сетки и сломе</div>
+          <div class="k">reduce-only</div><div class="v">ордер только на закрытие (не открывает новую позицию)</div>
+          <div class="k">partial / full close</div><div class="v">частичное / полное закрытие позиции</div>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      Knife — Bybit Trading Bot · документ описывает логику из <code>app/modes.py</code>, <code>app/trading_bot.py</code>, <code>app/state.py</code>, <code>app/validity.py</code>, <code>app/monitor.py</code>. Параметры могут отличаться при переопределении в конфиге монеты/глобальных настройках — приоритет описан в разделе 20.
+      <br><br><a class="top-link" href="#overview">↑ наверх</a>
+    </footer>
+  </main>
+</div>
+
+<script>
+  // Подсветка активного пункта меню при прокрутке
+  const links = Array.from(document.querySelectorAll('nav a[href^="#"]'));
+  const heads = links.map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+  const byId = new Map();
+  links.forEach(a => byId.set(a.getAttribute('href').slice(1), a));
+
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.remove('active'));
+        const l = byId.get(e.target.id);
+        if (l) l.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-10% 0px -80% 0px', threshold: 0 });
+
+  heads.forEach(h => obs.observe(h));
+</script>
+</body>
+</html>

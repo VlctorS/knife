@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, delete, func
 
-from .bybit import REST_BASE, _sign_request, _read_json
+from .bybit import REST_BASE, _sign_request, _read_json, sync_server_time, time_sync_loop
 from .config import settings
 from .monitor import monitor
 from .state import state
@@ -123,6 +123,10 @@ async def lifespan(app: FastAPI):
 
     await init_db()
 
+    # Синхронизируем время с сервером Bybit ДО первых подписанных запросов:
+    # дрейф локальных часов даёт 'ErrCode 10002 timestamp not in recvWindow'.
+    await sync_server_time(monitor._rest._s)
+
     # Применяем параметры монитора из сохранённого режима торговли,
     # иначе при старте threshold=0.5 / window=60 не соответствуют режиму.
     from .config import update_monitor_params, get_monitor_threshold, get_monitor_window_minutes
@@ -139,6 +143,9 @@ async def lifespan(app: FastAPI):
     # Загружаем кэш параметров контрактов (qtyStep, priceStep, minQty, ...)
     await _load_instruments(trading_bot)
     
+    # Фоновая синхронизация времени (раз в 30 мин)
+    time_sync_task = asyncio.create_task(time_sync_loop(monitor._rest._s))
+
     # Синхронизируем открытые позиции с биржей
     sync_task = asyncio.create_task(_sync_positions(trading_bot))
 
@@ -151,12 +158,17 @@ async def lifespan(app: FastAPI):
     finally:
         task_history.cancel()
         task_balance.cancel()
+        time_sync_task.cancel()
         try:
             await task_history
         except asyncio.CancelledError:
             pass
         try:
             await task_balance
+        except asyncio.CancelledError:
+            pass
+        try:
+            await time_sync_task
         except asyncio.CancelledError:
             pass
             
